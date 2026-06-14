@@ -1,0 +1,1497 @@
+"""
+BABLoopEngine — B->A->B' 可複用迴圈引擎。
+
+核心引擎，Stage 1（全域迴圈）和 Stage 2（per-section 聚焦迴圈）都用。
+
+流程：
+  Phase 0: build initial B (ContextMap)
+  Loop:
+    Phase 1: derive A (search plan) from B
+    Phase 2: execute A (retrieval)
+    Phase 3: mini-reasoning (Analyst + Critic + Consistency Monitor)
+    Phase 4: update B -> B'
+    Check: is_stable? → break
+    Check: consistency pause? → break
+    Check: max_iterations? → break
+"""
+
+import json
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+from core.retriever import search as retriever_search  # Track E (sprint 2026-05-28): module-level for monkeypatch testability
+from misc.logger.logging_config_helper import get_configured_logger
+from reasoning.agents.associator import AssociatorAgent
+from reasoning.live_research.sse_emit import emit_sse
+from reasoning.schemas_live import (
+    ContextMap,
+    ConsistencyReview,
+    EvidencePoolEntry,
+    context_map_to_summary,
+)
+
+
+def _extract_domain(url: str) -> str:
+    """從 URL 取 domain（不含 www.）。空 URL 或 parse 失敗回傳空字串。"""
+    if not url:
+        return ""
+    try:
+        netloc = urlparse(url).netloc.lower()
+        return netloc.removeprefix("www.")
+    except Exception:
+        return ""
+
+logger = get_configured_logger("live_research.loop_engine")
+
+
+class BABLoopEngine:
+    """
+    B->A->B' 可複用迴圈引擎。
+
+    使用方式：
+        engine = BABLoopEngine(associator=..., handler=..., max_iterations=3)
+        context_map = await engine.run_loop(query="...", focus_topic_ids=None)
+    """
+
+    def __init__(
+        self,
+        associator: AssociatorAgent,
+        handler: Any,
+        max_iterations: int = 3,
+        enable_consistency_monitor: bool = True,
+        dry_run: bool = False,
+        seed_evidence_pool: Optional[Dict[int, EvidencePoolEntry]] = None,
+        seed_counter: int = 0,
+    ):
+        """
+        Args:
+            associator: AssociatorAgent instance
+            handler: Request handler (for SSE, connection check, retrieval access)
+            max_iterations: B->A->B' loop 最大迭代次數
+            enable_consistency_monitor: 是否跑 Consistency Monitor
+            dry_run: True = use fixture results, skip LLM calls
+            seed_evidence_pool: 從先前 stage（如 Stage 1）累積的 evidence pool，
+                注入後本 engine 從此基礎繼續累積（Stage 2 跨 engine 共用 ID）
+            seed_counter: 從先前 stage 累積的 _evidence_counter 最大值，
+                本 engine 從 seed_counter+1 開始分配新 ID
+        """
+        self.associator = associator
+        self.handler = handler
+        self.max_iterations = max_iterations
+        self.enable_consistency_monitor = enable_consistency_monitor
+        self.dry_run = dry_run
+
+        # State exposed for orchestrator to access
+        self.initial_context_map: Optional[ContextMap] = None
+        self.executed_searches: List[str] = []
+        self.consistency_review: Optional[ConsistencyReview] = None
+        self.paused_by_consistency: bool = False
+        # 降級旁白 per-run dedup flags（FIX-3：__init__ 兜底 + run_loop 入口重置共用一個
+        # helper，避免兩處各自展開 + 註解互相交叉引用）。語意見 _reset_per_run_dedup_flags。
+        self._reset_per_run_dedup_flags()
+
+        # Evidence pool — 跨 iteration 累積，caller 透過 engine.evidence_pool 取出持久化
+        self.evidence_pool: Dict[int, EvidencePoolEntry] = (
+            dict(seed_evidence_pool) if seed_evidence_pool else {}
+        )
+        self._evidence_counter: int = seed_counter
+        # URL → evidence_id 反查表（去重用，避免同一 URL 重複收錄）
+        self._url_to_id: Dict[str, int] = {
+            entry.url: eid
+            for eid, entry in self.evidence_pool.items()
+            if entry.url
+        }
+        # 當前 BAB iteration（_execute_search 寫進 evidence.iteration_origin 用，debug）
+        self._current_iteration: int = 0
+
+        # Track A (sprint 2026-05-28): caller (orchestrator) injects state for
+        # evidence_usage indexing — Analyst argument_graph 索引進 state.evidence_usage。
+        # 默認 None: caller 未注入 → 不索引（test code / dry-run 沿舊行為）。
+        self.state: Optional[Any] = None
+        # 當前 BAB topic id (Stage 2 per-topic loop) — caller (orchestrator) 注入
+        # 給 GroundedClaim.source_topic 用; default "" → GroundedClaim 用 "global"。
+        self._current_topic_id: str = ""
+
+        # Track F (sprint 2026-05-28) I-3: caller (orchestrator) 在 Stage 1 / Stage 2
+        # BAB invoke 入口分別 inject `_current_stage`（"stage_1" / "stage_2"）。
+        # default "stage_1" 對未注入 case fallback（backward-compat, 但 audit data
+        # 對 Stage 2 entry 會誤標 stage_1 → 必須由 caller 補 inject 才正確）。
+        # Gemini R4 F-MIN-1: 未來 Stage 3+ 必同步 (a) Literal type 加新值、
+        # (b) caller chain sweep + inject。本 sprint 只 cover Stage 1+2。
+        self._current_stage: str = "stage_1"
+
+        if dry_run:
+            self._setup_dry_run()
+
+    def _reset_per_run_dedup_flags(self) -> None:
+        """重置所有降級旁白 per-run dedup flag（每個降級場景一次性旁白去重）。
+
+        兩處呼叫：
+          - `__init__` 兜底——直呼降級分支所在 method（如 unit test 直呼
+            `_run_mini_reasoning` / `_run_gap_routing_phase` / `_process_gap_resolutions_lr`）
+            時，except 內檢查 flag 不可 AttributeError（在 except body 內 raise 會往外
+            拋，破壞 non-fatal 語意）。
+          - `run_loop` 入口——**per-run 重置才是正確語意**：engine instance 被重用（多
+            次 run_loop）時，放 __init__-only 會讓第二次 run 的降級旁白被永久靜音。
+
+        新增降級 flag 時只在此處加一行，兩個呼叫點自動覆蓋。
+        """
+        self._consistency_degraded_narrated = False
+        self._mini_reasoning_degraded_narrated = False   # O5-B
+        self._gap_routing_degraded_narrated = False       # O5-C
+        self._gap_routing_cap_narrated = False            # C3: gap routing 外部呼叫 cap 旁白
+        self._revise_degraded_narrated = False            # M-5: revise 降級旁白
+        self._search_required_degraded_narrated = False   # M-5: SEARCH_REQUIRED 補搜降級旁白
+
+    def _setup_dry_run(self):
+        """Override methods with fixtures for dry-run."""
+        async def mock_search(seeds):
+            logger.info("[BAB LOOP] Dry-run: returning fixture search results")
+            return (
+                "[1] 台灣光電發展現況\n近年光電裝置容量大幅成長...\nURL: https://example.com/1\n",
+                {"1": {"name": "台灣光電發展現況", "url": "https://example.com/1"}},
+            )
+
+        async def mock_mini(cm, results):
+            logger.info("[BAB LOOP] Dry-run: skipping mini-reasoning")
+
+        async def mock_consistency(current, initial):
+            return ConsistencyReview(
+                drift_level="none",
+                drift_description="方向一致（dry-run）",
+                dubao_voice_message="",
+                recommended_action="continue",
+            )
+
+        self._execute_search = mock_search
+        self._run_mini_reasoning = mock_mini
+        self._run_consistency_check = mock_consistency
+
+    async def run_loop(
+        self,
+        query: str,
+        initial_context: Optional[str] = None,
+        user_prior_knowledge: Optional[str] = None,
+        focus_topic_ids: Optional[List[str]] = None,
+        existing_context_map: Optional[ContextMap] = None,
+        existing_initial_map: Optional[ContextMap] = None,
+        prior_executed_searches: Optional[List[str]] = None,
+    ) -> ContextMap:
+        """
+        執行 B->A->B' 迴圈。
+
+        Args:
+            query: 研究問題
+            initial_context: 初始 retrieval 結果（Phase 0 用）
+            user_prior_knowledge: 使用者提供的先備知識
+            focus_topic_ids: 聚焦的 topic IDs（Stage 2 per-section 用）
+            existing_context_map: 已有的 ContextMap（Stage 2 跳過 Phase 0）
+            existing_initial_map: 已有的 initial ContextMap（Stage 2 用）
+            prior_executed_searches: 之前已執行的搜尋
+
+        Returns:
+            最新版本的 ContextMap
+        """
+        self.executed_searches = list(prior_executed_searches or [])
+        self.paused_by_consistency = False
+        # per-run dedupe flags 重置（FIX-3：與 __init__ 共用 helper）。**per-run 重置**
+        # 是正確語意——engine instance 被重用（多次 run_loop）時，第二次 run 的降級旁白
+        # 不會被永久靜音。見 _reset_per_run_dedup_flags docstring。
+        self._reset_per_run_dedup_flags()
+
+        # Phase 0: 建立或複用 initial B
+        if existing_context_map is not None:
+            context_map = existing_context_map
+            self.initial_context_map = existing_initial_map or existing_context_map.model_copy(deep=True)
+        else:
+            await self._emit_narration("開始建立研究結構...")
+            build_output = await self.associator.build_context_map(
+                query=query,
+                initial_context=initial_context,
+                user_prior_knowledge=user_prior_knowledge,
+            )
+            context_map = build_output.context_map
+            self.initial_context_map = context_map.model_copy(deep=True)
+            await self._emit_narration(build_output.narration)
+            await self._emit_phase("bab_phase0", "completed")
+
+        # B->A->B' Loop
+        for iteration in range(self.max_iterations):
+            logger.info(f"[BAB LOOP] Iteration {iteration + 1}/{self.max_iterations}")
+            self._check_connection()
+            # 標記當前 iteration 給 _execute_search 寫進 EvidencePoolEntry.iteration_origin
+            self._current_iteration = iteration + 1
+
+            # Phase 1: 從 B 推導 A
+            await self._emit_phase("bab_phase1", "started")
+            derive_output = await self._run_derive_phase(
+                context_map, self.executed_searches, focus_topic_ids
+            )
+            await self._emit_narration(derive_output.narration)
+            await self._emit_phase("bab_phase1", "completed")
+
+            # Phase 2: 執行 A (retrieval)
+            await self._emit_phase("bab_phase2", "started")
+            formatted_results, new_source_map = await self._execute_search(derive_output.search_seeds)
+            for seed in derive_output.search_seeds:
+                self.executed_searches.append(seed.query)
+            await self._emit_phase("bab_phase2", "completed")
+
+            # Phase 3: Mini-Reasoning (optional — Analyst + Critic on new evidence)
+            await self._run_mini_reasoning(context_map, formatted_results)
+
+            # Phase 4: 更新 B -> B'
+            await self._emit_phase("bab_phase4", "started")
+            # #8: 長 LLM call 前推進度 narration
+            await self._emit_narration("正在根據新資料更新研究結構...")
+            refine_output = await self.associator.refine_context_map(
+                current_context_map=context_map,
+                initial_context_map=self.initial_context_map,
+                retrieval_results=formatted_results,
+                focus_topic_ids=focus_topic_ids,
+            )
+            context_map = refine_output.updated_context_map
+            await self._emit_narration(refine_output.narration)
+            await self._emit_phase("bab_phase4", "completed")
+
+            # Consistency Monitor (always-on)
+            if self.enable_consistency_monitor:
+                # #8: 長 LLM call 前推進度 narration
+                await self._emit_narration("正在檢查研究方向的一致性...")
+                self.consistency_review = await self._run_consistency_check(
+                    context_map, self.initial_context_map
+                )
+
+                # Track F F2 (sprint 2026-05-28): 持久化 consistency drift log
+                # spec §9.2 自標未實現的補完；F-AMB-3 LOCKED: 每輪都 append
+                # （drift_level=none 也 append，audit trail 完整）。
+                # I-3: stage 欄位區分 Stage 1 (global) / Stage 2 (per-topic) invoke
+                # — caller (orchestrator) 透過 self._current_stage attribute inject。
+                if self.state is not None:
+                    try:
+                        from reasoning.schemas_live import ConsistencyDriftEntry
+                        entry = ConsistencyDriftEntry(
+                            stage=getattr(self, "_current_stage", "stage_1"),
+                            iteration=self._current_iteration,
+                            topic_id=self._current_topic_id or "",
+                            drift_level=self.consistency_review.drift_level,
+                            drift_description=(
+                                self.consistency_review.drift_description or ""
+                            ),
+                            recommended_action=(
+                                self.consistency_review.recommended_action
+                            ),
+                            monitor_degraded=getattr(
+                                self.consistency_review, "monitor_degraded", False
+                            ),  # O5-A: 降級旗標傳入 audit entry
+                        )
+                        self.state.consistency_drift_log.append(entry.model_dump())
+                    except Exception as e:
+                        # secondary defense: 不阻塞 BAB loop
+                        logger.warning(
+                            f"[BAB LOOP F2] consistency drift log append failed "
+                            f"(non-fatal): {type(e).__name__}: {e}"
+                        )
+
+                if self.consistency_review.dubao_voice_message:
+                    await self._emit_narration(self.consistency_review.dubao_voice_message)
+                elif getattr(self.consistency_review, "monitor_degraded", False):
+                    # O5-A: 降級必有 user-facing 訊息（CLAUDE.md「不可 silent fail」）。
+                    # round-3（Gemini critical）：consistency check 每輪（for iteration in
+                    # range(max_iterations)）都跑，持久失敗會每輪 emit → 高頻迴圈訊息轟炸。
+                    # per-run 只提示一次（flag 在 run_loop 入口初始化，見 Step 3b）。
+                    if not self._consistency_degraded_narrated:
+                        await self._emit_narration(
+                            "（一致性監控暫時無法使用，研究仍會繼續，但這一輪沒有做方向一致性檢查。）"
+                        )
+                        self._consistency_degraded_narrated = True
+                if self.consistency_review.recommended_action == "pause_confirm":
+                    self.paused_by_consistency = True
+                    logger.info("[BAB LOOP] Paused by Consistency Monitor")
+                    break
+
+            # 穩定性判定
+            if refine_output.is_stable:
+                logger.info(f"[BAB LOOP] Stable after iteration {iteration + 1}")
+                break
+
+        return context_map
+
+    async def _run_derive_phase(self, context_map, executed_searches, focus_topic_ids=None):
+        # #8: 長 LLM call 前推進度 narration（避免靜默窗口 → SSE idle 斷 + 黑屏）。
+        # 抽 helper 的唯一目的:讓「emit 在 derive 之前」由 production code 保證,
+        # 單測可直接驗(GPT #2:不可讓 test 自己 replay 順序)。
+        await self._emit_narration("正在推導下一輪要查的資料方向...")
+        return await self.associator.derive_search_plan(
+            context_map=context_map,
+            executed_searches=executed_searches,
+            focus_topic_ids=focus_topic_ids,
+        )
+
+    @staticmethod
+    def _normalize_item(item) -> dict:
+        """將 list/tuple 格式的搜尋結果轉為 dict。
+
+        postgres_client.search() 回傳 [url, schema_str, title, source, ?vector]
+        google_search_client 回傳 (url, schema_json, title, site, [])
+        """
+        if isinstance(item, dict):
+            return item
+        # list/tuple format
+        schema_str = item[1] if len(item) > 1 else "{}"
+        try:
+            schema_obj = json.loads(schema_str) if isinstance(schema_str, str) else (schema_str or {})
+        except (json.JSONDecodeError, TypeError):
+            schema_obj = {}
+        # FIX-3 (Cayenne #10, sprint 2026-05-28): 抽 author 進 normalized item，
+        # 讓 EvidencePoolEntry 能填 author → APA inline citation 不再「(來源不明, n.d.)」。
+        # schema.org author 可為 dict({"@type":"Person","name":...}) / list / str
+        # （沿 qdrant._parse_schema 既有 pattern）。
+        author_data = schema_obj.get('author', '')
+        if isinstance(author_data, dict):
+            author = author_data.get('name', '') or ''
+        elif isinstance(author_data, list) and author_data:
+            author = (
+                author_data[0].get('name', '')
+                if isinstance(author_data[0], dict)
+                else str(author_data[0])
+            )
+        elif isinstance(author_data, str):
+            author = author_data
+        else:
+            author = ''
+        return {
+            'url': item[0] if len(item) > 0 else '',
+            'name': item[2] if len(item) > 2 else '',
+            'title': item[2] if len(item) > 2 else '',
+            'source': item[3] if len(item) > 3 else '',
+            'description': schema_obj.get('description') or schema_obj.get('articleBody', ''),
+            'snippet': schema_obj.get('description') or schema_obj.get('articleBody', ''),
+            'datePublished': schema_obj.get('datePublished', ''),  # Track E (sprint 2026-05-28)
+            'author': author,  # FIX-3 (Cayenne #10): APA citation metadata
+        }
+
+    async def _execute_search(self, search_seeds) -> Tuple[str, Dict]:
+        """
+        執行搜尋計畫。
+
+        使用現有 retriever_search（internal）和 GoogleSearchClient（web）。
+
+        Returns:
+            (formatted_results_str, source_map_dict)
+        """
+        # Track E (sprint 2026-05-28): 從 state.time_constraint 構造 datePublished
+        # filter 與 query suffix（沿 DR baseHandler.py:518-532 模式）。
+        # N-1: None bound 不過濾；N-4: raw_phrase 優先 fallback 才用日期。
+        # N-8: kwarg name 固定用 `filters=`，禁 `search_filters=` 別名。
+        search_filters: List[Dict] = []
+        query_suffix: str = ""
+        if self.state is not None and getattr(self.state, "time_constraint", None) is not None:
+            tc = self.state.time_constraint
+            if tc.start_date:
+                search_filters.append(
+                    {"field": "datePublished", "operator": "gte", "value": tc.start_date}
+                )
+            if tc.end_date:
+                search_filters.append(
+                    {"field": "datePublished", "operator": "lte", "value": tc.end_date}
+                )
+            # 給 query rewriter / search engine 提示（N-4: raw_phrase 優先）
+            if tc.raw_phrase:
+                query_suffix = f"（{tc.raw_phrase}）"
+            elif tc.start_date and tc.end_date:
+                query_suffix = f"（{tc.start_date[:4]} 至 {tc.end_date[:4]}）"
+            elif tc.start_date:
+                query_suffix = f"（{tc.start_date[:4]} 之後）"
+            elif tc.end_date:
+                query_suffix = f"（{tc.end_date[:4]} 之前）"
+            if search_filters:
+                logger.info(
+                    f"[BAB LOOP][Track E] datePublished filter active: {search_filters}; "
+                    f"query suffix: {query_suffix!r}"
+                )
+
+        all_items = []
+        # Track C C3 (F-9 根解 2026-05-28): keyword white-list for intl/transnational queries.
+        # 沿 C-AMB-3 / C-AMB-4 紀律段同一份 white-list（class-level constant），
+        # 確保 Associator prompt 紀律與 fallback gate 同步。
+        # C-MIN-1 (Gemini R4 2026-05-29): 英文 keyword 必須 case-insensitive 比對
+        # (user 可能輸入小寫 'oecd' / 'paris agreement')。
+        INTL_KEYWORDS = (
+            "德國", "丹麥", "日本", "美國", "歐洲", "荷蘭", "英國", "法國",
+            "義大利", "瑞典", "挪威", "印度", "中國", "韓國", "新加坡", "東南亞",
+            "IEA", "IRENA", "CBAM", "Paris Agreement", "IPCC", "OECD",
+            "聯合國", "WTO",
+        )
+        FALLBACK_THRESHOLD = 3
+
+        for seed in search_seeds:
+            seed_items_count = 0  # F-9 per-seed local count (不 cross-seed 累計)
+            try:
+                if seed.source_strategy in ("internal", "both"):
+                    items = await retriever_search(
+                        query=seed.query + query_suffix,  # Track E: query suffix
+                        site=getattr(self.handler, 'site', 'all'),
+                        num_results=5,
+                        query_params=getattr(self.handler, 'query_params', None),
+                        filters=search_filters or None,  # Track E (N-8): kwarg name `filters=`
+                    )
+                    seed_items_count += len(items or [])
+                    all_items.extend(items or [])
+
+                # Track C C2: enable_web_search toggle gate. Default False → web path inactive
+                # (backward-compat for LR sessions that didn't ask for web search).
+                # Source: docs/decisions.md:87-90 active decision「Web search 只在 Reasoning
+                # gap resolution 中使用」— LR direct web path 仍受 toggle 控制。
+                if seed.source_strategy in ("web", "both") and getattr(
+                    self.handler, "enable_web_search", False
+                ):
+                    web_items = await self._execute_web_search(seed.query)
+                    seed_items_count += len(web_items)
+                    all_items.extend(web_items)
+
+            except Exception as e:
+                logger.warning(f"[BAB LOOP] Search failed for '{seed.query}': {e}")
+
+            # Track C C3 (F-9 根解 2026-05-28): 站內空集合 + 國際 keyword 雙閘 fallback web gate.
+            # 觸發條件 (AND)：
+            #   1. seed 原 source_strategy=="internal" (沒跑過 web)
+            #   2. *本 seed* 回 < 3 條 (per-seed count filter — 不 cross-seed 累計)
+            #   3. seed.query 含「非台灣 / 國際 / 跨國」keyword (keyword filter)
+            #   4. self.handler.enable_web_search==True (toggle)
+            # 單純 count<3 不觸發 — 避免「純台灣議題站內偶然空也打 Google」(Reward Hack 補丁)。
+            # 獨立於上方 try/except — fallback 失敗有自己的 warning，不被外層 swallow。
+            seed_was_internal_only = seed.source_strategy == "internal"
+            seed_returned_low = seed_items_count < FALLBACK_THRESHOLD
+            # C-MIN-1 case-insensitive 比對
+            _query_lower = seed.query.lower()
+            query_has_intl_keyword = any(kw.lower() in _query_lower for kw in INTL_KEYWORDS)
+            if (
+                seed_was_internal_only
+                and seed_returned_low
+                and query_has_intl_keyword
+                and getattr(self.handler, "enable_web_search", False)
+            ):
+                logger.info(
+                    f"[BAB LOOP][Track C C3 fallback] seed internal returned {seed_items_count} items "
+                    f"(<{FALLBACK_THRESHOLD}) for seed '{seed.query}' (intl keyword matched), "
+                    f"triggering fallback web search"
+                )
+                try:
+                    fallback_web_items = await self._execute_web_search(seed.query)
+                    all_items.extend(fallback_web_items)
+                except Exception as e:
+                    logger.warning(f"[BAB LOOP][Track C C3 fallback] web search failed: {e}")
+            elif seed_was_internal_only and seed_returned_low and not query_has_intl_keyword:
+                logger.debug(
+                    f"[BAB LOOP][Track C C3 fallback] seed internal low ({seed_items_count} items) "
+                    f"for seed '{seed.query}' but no intl keyword matched — skipping fallback"
+                )
+
+        # Normalize: retrieval returns list/tuple, not dict
+        all_items = [self._normalize_item(item) for item in all_items]
+
+        # Format results using orchestrator's shared formatter
+        if not all_items:
+            return ("（未找到相關結果）", {})
+
+        # 全局累積編號：跨 iteration 唯一遞增；同 URL 去重沿用既有 evidence_id
+        formatted_lines = []
+        iteration_source_map: Dict[int, dict] = {}
+
+        # Track E (sprint 2026-05-28): time_constraint 過濾 helper。
+        # N-1: None bound 不過濾；N-2: published_at 缺 (None/empty) 走 fallback 不過濾；
+        # N-3: 只取前 10 字元（YYYY-MM-DD）做比對，不做 timezone normalize。
+        tc = self.state.time_constraint if (self.state is not None and getattr(self.state, "time_constraint", None) is not None) else None
+
+        def _is_in_time_range(date_only: Optional[str]) -> bool:
+            """date_only=None/empty → True（不過濾）。"""
+            if not date_only:
+                return True
+            if tc.start_date and date_only < tc.start_date:
+                return False
+            if tc.end_date and date_only > tc.end_date:
+                return False
+            return True
+
+        filtered_count = 0
+
+        for item in all_items:
+            url = item.get('url', '') or ''
+            title = item.get('name', item.get('title', '')) or ''
+            desc = item.get('description', item.get('snippet', '')) or ''
+            raw_published = item.get('datePublished', '') or ''
+            # Track E (N-3): 只取前 10 字元（YYYY-MM-DD）；空字串 → None
+            published_at: Optional[str] = raw_published[:10] if raw_published else None
+
+            # Track E: 範圍外 evidence 跳過入庫（N-2: published_at 缺則 fallback 不過濾）
+            if tc is not None and published_at and not _is_in_time_range(published_at):
+                filtered_count += 1
+                logger.debug(
+                    f"[BAB LOOP][Track E] Filtered out-of-range item: "
+                    f"published={published_at!r} not in [{tc.start_date}, {tc.end_date}] — {url}"
+                )
+                continue
+
+            if url and url in self._url_to_id:
+                # 同 URL 已收錄 → 沿用既有 evidence_id（去重）
+                evidence_id = self._url_to_id[url]
+            else:
+                self._evidence_counter += 1
+                evidence_id = self._evidence_counter
+                if url:
+                    self._url_to_id[url] = evidence_id
+                self.evidence_pool[evidence_id] = EvidencePoolEntry(
+                    evidence_id=evidence_id,
+                    title=title,
+                    url=url,
+                    source_domain=_extract_domain(url),
+                    snippet=desc[:300],
+                    iteration_origin=self._current_iteration,
+                    published_at=published_at,  # Track E (sprint 2026-05-28) Option A
+                    # FIX-3 (Cayenne #10): 填 author → APA inline 不再「來源不明」。
+                    # year 由 render 從 published_at 取年份（避免重複 source-of-truth）。
+                    author=item.get('author', '') or '',
+                )
+
+            formatted_lines.append(f"[{evidence_id}] {title}\n{desc[:500]}\nURL: {url}\n")
+            iteration_source_map[evidence_id] = item
+
+        if filtered_count > 0 and tc is not None:
+            logger.info(
+                f"[BAB LOOP][Track E] Filtered {filtered_count} out-of-range items "
+                f"(constraint: start={tc.start_date}, end={tc.end_date})"
+            )
+
+        return ("\n".join(formatted_lines), iteration_source_map)
+
+    async def _execute_web_search(self, query: str) -> list:
+        """執行 web search（Google Custom Search）。
+        num_results 從 LR 專屬 config key tier_6.web_search.max_results_lr 讀取，
+        default 直接 8，**不 fallback 到共用 max_results**（與 DR 完全解耦）。
+        CEO 決策③：max_results_lr 設為 8（原 hard-code 3 → 補上游資料不足）。
+        DR 走自己的 reasoning/orchestrator.py 讀 max_results=5，與此處兩鍵互不 fallback。
+        reviewer R-G1：移除 fallback 耦合，避免日後調 DR 的 max_results 連帶影響 LR。
+        """
+        try:
+            from retrieval_providers.google_search_client import GoogleSearchClient
+            from core.config import CONFIG
+            tier_6_config = CONFIG.reasoning_params.get("tier_6", {})
+            web_config = tier_6_config.get("web_search", {})
+            # LR 專屬 key，default 8，不 fallback 到共用 max_results（與 DR 解耦）
+            num_results = web_config.get("max_results_lr", 8)
+            client = GoogleSearchClient()
+            results = await client.search_all_sites(query, num_results=num_results)
+            logger.debug(f"[BAB LOOP] Web search '{query}': num_results={num_results}, got={len(results or [])}")
+            return results or []
+        except Exception as e:
+            logger.warning(f"[BAB LOOP] Web search failed: {e}")
+            return []
+
+    # Evidence Sufficiency Narration（reviewer R-G2：比例制，不寫死 magic number）
+    # 閾值用「實際取得 evidence 數 / 理論最大數」的百分比判斷，而非固定筆數。
+    # 理由：search 數已從 3→8（max_results_lr），固定筆數閾值在未來再調 search 量時會失真。
+    #   理論最大 = num_results (max_results_lr=8) × query 數 (BAB 每 run 3 query) = 24
+    # 比例常數（依現況推導，標明依據；可調）：
+    #   - THIN：< 25%（≈ 24 筆中不到 6 筆 → 偏少。原固定 thin=5 筆 ≈ 20.8%，取整為 25% 邊界）
+    #   - CRITICAL：< 10%（≈ 24 筆中不到 2.4 筆 → 嚴重不足。原固定 critical=2 筆 ≈ 8.3%，取整為 10%）
+    EVIDENCE_THIN_RATIO = 0.25       # < 25% 理論最大 → 偏少
+    EVIDENCE_CRITICAL_RATIO = 0.10   # < 10% 理論最大 → 嚴重不足
+    BAB_QUERIES_PER_RUN = 3          # BAB 每 run 派生的 search query 數（理論最大數的乘數）
+
+    async def emit_evidence_sufficiency_narration(self) -> None:
+        """BAB 完成後評估 evidence pool 充分度，emit SSE narration。
+
+        判斷標準（reviewer R-G2：比例制）：
+        令 theoretical_max = max_results_lr × BAB_QUERIES_PER_RUN，
+        ratio = pool_size / theoretical_max。
+        - ratio < EVIDENCE_CRITICAL_RATIO：嚴重不足，明告 user
+        - ratio < EVIDENCE_THIN_RATIO：偏少，溫和提示
+        - ratio >= EVIDENCE_THIN_RATIO：不 emit（正常）
+
+        用比例而非固定筆數：search 量（max_results_lr）未來再調時閾值自動跟著縮放，
+        不會因為 hard-coded 筆數而失真。
+
+        目的：透明度 — user 知道 LR 拿到多少資料（純前端 SSE 顯示）。
+        注意：narration 只走 SSE 給 user 看，**不進 writer 的 prompt context**
+        （writer context 由 evidence_pool 經 outline_planner / _write_section 注入，
+        與本 narration 是兩條獨立通道；見決策 C）。
+        """
+        from core.config import CONFIG
+        pool_size = len(self.evidence_pool)
+        # 理論最大數 = LR 每次 search 抓取上限 × BAB query 數
+        web_config = CONFIG.reasoning_params.get("tier_6", {}).get("web_search", {})
+        num_results = web_config.get("max_results_lr", 8)
+        theoretical_max = max(1, num_results * self.BAB_QUERIES_PER_RUN)  # 防除零
+        ratio = pool_size / theoretical_max
+        logger.info(
+            f"[BAB LOOP] Evidence pool after BAB: {pool_size}/{theoretical_max} "
+            f"(ratio={ratio:.2f})"
+        )
+
+        if ratio < self.EVIDENCE_CRITICAL_RATIO:
+            msg = (
+                f"（注意：本次研究蒐集到的資料來源極為有限（{pool_size} 筆），"
+                "結論可靠性較低，建議擴大搜尋範圍或開啟更多資料來源。）"
+            )
+            await self._emit_narration(msg)
+            logger.warning(
+                f"[BAB LOOP] Evidence pool critically thin: {pool_size} entries "
+                f"(ratio={ratio:.2f} < {self.EVIDENCE_CRITICAL_RATIO})"
+            )
+
+        elif ratio < self.EVIDENCE_THIN_RATIO:
+            msg = (
+                f"（本次研究蒐集到 {pool_size} 筆資料，資料量偏少，"
+                "報告內容可能較為有限，部分議題可能無法深入分析。）"
+            )
+            await self._emit_narration(msg)
+            logger.info(
+                f"[BAB LOOP] Evidence pool thin: {pool_size} entries "
+                f"(ratio={ratio:.2f} < {self.EVIDENCE_THIN_RATIO})"
+            )
+        else:
+            logger.info(
+                f"[BAB LOOP] Evidence pool sufficient: {pool_size} entries "
+                f"(ratio={ratio:.2f})"
+            )
+
+    # ========================================================================
+    # Track C C4 (sprint 2026-05-28): gap_resolutions routing port from DR.
+    # 移植自 reasoning/orchestrator.py:1864-1989 _process_gap_resolutions，
+    # 只 handle 4 類 (LLM_KNOWLEDGE / WIKIPEDIA / WEB_SEARCH / INTERNAL_SEARCH)。
+    # Stock/weather/company 6 類 LR 明示砍 — log skip 不 raise (fail-loud-with-info).
+    # ========================================================================
+
+    async def _process_gap_resolutions_lr(self, gap_resolutions: list) -> None:
+        """Process Analyst gap_resolutions in LR BAB context (Track C C4).
+
+        結果建 EvidencePoolEntry(source=...) 入 self.evidence_pool。
+        不 re-run mini-reasoning Analyst (C-AMB-2 拍板：一次性消費)。
+
+        Toggle gates:
+        - enable_gap_enrichment=False → 整個 method early return
+        - enable_web_search=False → WEB_SEARCH gap log skip (其他三類仍跑)
+
+        F-6 紀律: 只寫 self.evidence_pool (engine dict)，不寫 state — state 上
+        沒 evidence_pool dict attr (只有 evidence_pool_json: str 序列化欄位)，
+        merge 由 orchestrator 統一處理。
+        """
+        if not getattr(self.handler, "enable_gap_enrichment", False):
+            logger.info("[LR gap routing] enable_gap_enrichment=False, skipping all gaps")
+            return
+
+        from reasoning.schemas_enhanced import GapResolutionType
+
+        SUPPORTED_IN_LR = {
+            GapResolutionType.LLM_KNOWLEDGE,
+            GapResolutionType.WIKIPEDIA,
+            GapResolutionType.WEB_SEARCH,
+            GapResolutionType.INTERNAL_SEARCH,
+        }
+
+        # C3 (2026-06-11): per-run 外部呼叫 cap（default-on 安全配套）。CEO「gap_enrichment
+        # 全開不拆」不動 — cap 是「單 run 外部呼叫次數上限」非分類開關，4 類仍全開。
+        # 防 Analyst 異常輸出大量 gap 時 Wikipedia / Google CSE 呼叫失控燒 API 額度 + 拉延遲。
+        # 呼叫時讀（非 module-import 常數）→ unit test monkeypatch CONFIG 可蓋到。
+        from core.config import CONFIG
+        gap_external_cap = (
+            CONFIG.reasoning_params.get("tier_6", {})
+            .get("gap_routing", {})
+            .get("max_external_calls_per_run", 6)
+        )
+        external_calls_made = 0
+
+        for gap in gap_resolutions:
+            res = gap.resolution
+            if res not in SUPPORTED_IN_LR:
+                # 明示砍：stock / weather / company → fail-loud-with-info
+                res_value = res.value if hasattr(res, "value") else str(res)
+                logger.info(
+                    f"[LR gap routing] Skipping {res_value} "
+                    f"— not supported in LR (financial/weather/company APIs are DR-only)"
+                )
+                continue
+
+            if res == GapResolutionType.LLM_KNOWLEDGE:
+                self._add_llm_knowledge_evidence(gap)
+
+            elif res == GapResolutionType.WIKIPEDIA:
+                # C3: cap 計數加在真正打外部之前（WIKIPEDIA 無其他 gate，直接 guard）。
+                if external_calls_made >= gap_external_cap:
+                    logger.info(
+                        f"[LR gap routing] external call cap ({gap_external_cap}) reached, "
+                        f"skipping WIKIPEDIA gap '{gap.search_query}'"
+                    )
+                    await self._narrate_gap_cap_once()
+                    continue
+                external_calls_made += 1
+                await self._execute_wikipedia_searches_lr([gap])
+
+            elif res == GapResolutionType.WEB_SEARCH:
+                if not getattr(self.handler, "enable_web_search", False):
+                    logger.info(
+                        f"[LR gap routing] WEB_SEARCH gap '{gap.search_query}' "
+                        f"skipped (enable_web_search=False)"
+                    )
+                    continue
+                if not gap.search_query:
+                    logger.info("[LR gap routing] WEB_SEARCH gap has empty search_query, skipping")
+                    continue
+                # C3: cap 計數加在 enable_web_search gate + 空 query 檢查通過後、真打外部之前。
+                # 被 gate / 空 query / cap 跳過的 gap 不消耗額度（skip 不燒 budget）。
+                if external_calls_made >= gap_external_cap:
+                    logger.info(
+                        f"[LR gap routing] external call cap ({gap_external_cap}) reached, "
+                        f"skipping WEB_SEARCH gap '{gap.search_query}'"
+                    )
+                    await self._narrate_gap_cap_once()
+                    continue
+                external_calls_made += 1
+                web_items = await self._execute_web_search(gap.search_query)
+                # F-11 紀律: _execute_web_search 回傳 list of tuples (來自
+                # GoogleSearchClient.search_all_sites)，必須先過 _normalize_item
+                # 轉成 dict 才能 .get() 取 url/title/snippet。
+                for item in web_items:
+                    self._add_external_evidence(self._normalize_item(item), source="web")
+
+            elif res == GapResolutionType.INTERNAL_SEARCH:
+                # internal search 已由 BAB main loop _execute_search 處理 — gap routing no-op
+                logger.info(
+                    f"[LR gap routing] INTERNAL_SEARCH gap '{gap.search_query}' "
+                    f"pass-through (handled by BAB main loop)"
+                )
+
+    async def _narrate_gap_cap_once(self) -> None:
+        """C3: gap routing 外部呼叫達 per-run cap 時 emit 一次 user-facing 旁白。
+
+        CLAUDE.md「不可 silent fail」紀律：cap 跳過 gap 不可無聲略過，使用者
+        得知「補強查證已達本輪上限」。per-run dedup（_gap_routing_cap_narrated）
+        防同一輪多個 gap 撞 cap 時重複轟炸旁白。
+        """
+        if not self._gap_routing_cap_narrated:
+            await self._emit_narration(
+                "這一輪的外部補強查證已達上限 — 為控制查證次數與時間，"
+                "剩餘的外部資料補強（維基／網路）先略過，研究照常繼續。"
+            )
+            self._gap_routing_cap_narrated = True
+
+    def _add_llm_knowledge_evidence(self, gap) -> None:
+        """LLM_KNOWLEDGE gap → 建 virtual doc 進 evidence_pool (Track C C4).
+
+        F-6 紀律: 只寫 self.evidence_pool (engine dict)，沿既有 _execute_search
+        line 378 pattern。state.evidence_pool 在 LiveResearchStageState 上不存在
+        (state 有 evidence_pool_json: str 序列化欄位，由 orchestrator BAB run
+        loop 結束時統一 serialize)。
+        """
+        from reasoning.schemas_live import EvidencePoolEntry
+
+        topic = gap.topic or gap.gap_type.replace(" ", "_")
+        urn = f"urn:llm:knowledge:{topic}"
+        # 避免重複建 — 若 URN 已存在 self._url_to_id，沿用既有 eid
+        if urn in self._url_to_id:
+            return
+        self._evidence_counter += 1
+        eid = self._evidence_counter
+        self._url_to_id[urn] = eid
+        entry = EvidencePoolEntry(
+            evidence_id=eid,
+            title=f"AI 背景知識：{gap.gap_type}",
+            url=urn,
+            source_domain="llm_knowledge",
+            snippet=f"[Tier 6 | llm_knowledge] {gap.llm_answer or ''}"[:300],
+            iteration_origin=self._current_iteration,
+            source="llm_knowledge",
+            # F-12 紀律 (Track C × Track E orthogonal): llm_knowledge 無 publish 概念
+            published_at=None,
+        )
+        self.evidence_pool[eid] = entry
+        logger.info(f"[LR gap routing] Added llm_knowledge evidence eid={eid} urn={urn}")
+
+    async def _execute_wikipedia_searches_lr(self, gaps: list) -> None:
+        """Wikipedia API call + 結果建 EvidencePoolEntry(source='wiki') (Track C C4).
+
+        仿 DR `orchestrator.py:2319-2363` _execute_wikipedia_searches，但 result
+        結構直接寫進 evidence_pool（不走 DR current_context + source_map pattern）。
+
+        F-2 dual-guard 紀律: 同時測 module-level WIKIPEDIA_AVAILABLE (ImportError
+        defensive) + client.is_available() (CONFIG yaml tier_6.wikipedia.enabled 開關)，
+        避免 import 副作用觸發。
+        """
+        try:
+            from retrieval_providers.wikipedia_client import WikipediaClient, WIKIPEDIA_AVAILABLE
+        except ImportError:
+            logger.info("[LR gap routing] wikipedia_client import failed, skipping wiki gaps")
+            return
+
+        if not WIKIPEDIA_AVAILABLE:
+            logger.info("[LR gap routing] wikipedia library not installed, skipping wiki gaps")
+            return
+
+        client = WikipediaClient()
+        if not client.is_available():
+            logger.info(
+                "[LR gap routing] WikipediaClient disabled "
+                "(tier_6.wikipedia.enabled=false in config), skipping wiki gaps"
+            )
+            return
+
+        for gap in gaps:
+            query = gap.search_query or (gap.api_params.get("query") if gap.api_params else None)
+            if not query:
+                logger.info("[LR gap routing] WIKIPEDIA gap has no query, skipping")
+                continue
+            try:
+                results = await client.search(query)
+            except Exception as e:
+                logger.warning(f"[LR gap routing] Wikipedia search failed for '{query}': {e}")
+                continue
+            for result in (results or []):
+                if not isinstance(result, dict):
+                    continue
+                url = result.get("link", "")
+                if not url:
+                    continue
+                self._add_external_evidence({
+                    "url": url,
+                    "title": result.get("title", "Wikipedia"),
+                    "snippet": f"[Tier 6 | encyclopedia] {result.get('snippet', '')}",
+                }, source="wiki")
+
+    def _add_external_evidence(self, item: dict, source: str) -> None:
+        """共用 helper：把外部來源 item (web / wiki) 寫進 evidence_pool (Track C C4).
+
+        item 預期 keys: url, title, snippet (已 normalized)。
+        URL 去重沿用既有 self._url_to_id 機制。
+
+        F-6 紀律: 只寫 self.evidence_pool (engine dict)。
+        F-12 紀律 (Track C × Track E orthogonal): wiki/web 不填 publish date
+        (Wikipedia 只有 revision date 不是 content publish date；Google CSE
+        無可靠 publish metadata)，落 Track E _is_in_time_range fallback 不過濾。
+        """
+        from reasoning.schemas_live import EvidencePoolEntry
+
+        url = item.get("url", "") or ""
+        if not url:
+            return
+        if url in self._url_to_id:
+            return  # 已存在 → 不重複建（沿既有 eid）
+        self._evidence_counter += 1
+        eid = self._evidence_counter
+        self._url_to_id[url] = eid
+        entry = EvidencePoolEntry(
+            evidence_id=eid,
+            title=item.get("title", "") or "",
+            url=url,
+            source_domain=_extract_domain(url),
+            snippet=(item.get("snippet", "") or "")[:300],
+            iteration_origin=self._current_iteration,
+            source=source,
+            published_at=None,  # F-12: wiki/web 不填 publish date
+        )
+        self.evidence_pool[eid] = entry
+        logger.info(f"[LR gap routing] Added {source} evidence eid={eid} url={url[:60]}")
+
+    @staticmethod
+    def _merge_knowledge_graph(state_kg, new_kg):
+        """Track D D1 (sprint 2026-05-28): merge new_kg 進 state_kg。
+
+        D-AMB-2 LOCKED 2026-05-28:
+        - entity dedup by name.lower().strip()
+        - relationship dedup by (remapped_src, str(rel_type), remapped_tgt) triple
+        - evidence_ids set union (不保留重複)
+        - 沿用 existing entity_id (new_kg entity_id 被丟棄)
+        - relationship 的 source/target entity_id remap 到 existing entity_id
+
+        Args:
+            state_kg: 當前累積的 KnowledgeGraph (None 表示尚未啟動 → fast path)
+            new_kg: Analyst 新輸出的 KnowledgeGraph
+
+        Returns:
+            合併後新的 KnowledgeGraph instance (不 mutate 原 state_kg)
+
+        N-5: empty new_kg → fast return；
+        N-6: name normalization 用 .lower().strip()，不做更複雜處理；
+        N-7: dangling relationship 由 DR validate_relationships() 自動 filter。
+        """
+        from reasoning.schemas_enhanced import KnowledgeGraph
+
+        # N-5: empty new_kg no-op (info log 由 caller 決定)
+        if not new_kg.entities and not new_kg.relationships:
+            return state_kg if state_kg is not None else new_kg
+
+        # state=None fast path — fresh start, 不跑 dedup logic (留給後續 iteration)
+        if state_kg is None:
+            return new_kg
+
+        # fix-up round 1 I-3 / R2-C1 / Gemini R4 I-3: deep copy state_kg
+        # 防 in-place mutation 副作用 — merge 過程 mutate evidence_ids 直接改 state_kg
+        # 內 reference，若 merge 過程 exception raise，state 進入半 merged 狀態
+        # (fail-unsafe)。deep_copy 後改 working copy，return 新 instance 是 fail-safe path。
+        state_kg = state_kg.model_copy(deep=True)
+
+        name_to_eid: Dict[str, str] = {
+            e.name.lower().strip(): e.entity_id
+            for e in state_kg.entities
+        }
+
+        merged_entities = list(state_kg.entities)
+        new_eid_to_existing: Dict[str, str] = {}
+
+        for new_e in new_kg.entities:
+            norm_name = new_e.name.lower().strip()
+            if not norm_name:
+                continue  # skip 空 name entity (防 Analyst hallucinate)
+            if norm_name in name_to_eid:
+                # dedup: merge evidence_ids 進 existing entity
+                existing_eid = name_to_eid[norm_name]
+                existing = next(
+                    e for e in merged_entities if e.entity_id == existing_eid
+                )
+                existing.evidence_ids = sorted(
+                    set(existing.evidence_ids) | set(new_e.evidence_ids)
+                )
+                new_eid_to_existing[new_e.entity_id] = existing_eid
+            else:
+                # new entity
+                merged_entities.append(new_e)
+                name_to_eid[norm_name] = new_e.entity_id
+
+        # Relationship triple dedup
+        existing_triples: set = {
+            (r.source_entity_id, str(r.relation_type), r.target_entity_id)
+            for r in state_kg.relationships
+        }
+        merged_relationships = list(state_kg.relationships)
+
+        for new_r in new_kg.relationships:
+            # remap new entity_id → existing entity_id (若 entity 被 dedup)
+            src = new_eid_to_existing.get(new_r.source_entity_id, new_r.source_entity_id)
+            tgt = new_eid_to_existing.get(new_r.target_entity_id, new_r.target_entity_id)
+            rtype_str = str(new_r.relation_type)
+            triple = (src, rtype_str, tgt)
+            if triple in existing_triples:
+                # dedup: merge evidence_ids
+                existing = next(
+                    r for r in merged_relationships
+                    if r.source_entity_id == src
+                    and str(r.relation_type) == rtype_str
+                    and r.target_entity_id == tgt
+                )
+                existing.evidence_ids = sorted(
+                    set(existing.evidence_ids) | set(new_r.evidence_ids)
+                )
+            else:
+                # remap & add
+                new_r.source_entity_id = src
+                new_r.target_entity_id = tgt
+                merged_relationships.append(new_r)
+                existing_triples.add(triple)
+
+        # N-7: dangling relationship 由 KnowledgeGraph.validate_relationships
+        # 自動 filter (Pydantic field_validator)
+        return KnowledgeGraph(
+            entities=merged_entities,
+            relationships=merged_relationships,
+        )
+
+    async def _run_mini_reasoning(self, context_map, formatted_results):
+        """
+        Mini-Reasoning：對新 evidence 跑 Analyst + Critic。
+
+        使用現有 AnalystAgent.research() + CriticAgent.review()，
+        注入 ContextMap summary 作為額外 context（live research 模式）。
+        失敗為 non-fatal，catch Exception 後 log warning 並繼續。
+
+        Track A (sprint 2026-05-28) — Task 1 + Task 6:
+        Analyst argument_graph 跑完 + Critic status 接到 → 索引進
+        state.evidence_usage[eid] 每個 evidence_id 一筆 GroundedClaim:
+        - status="REJECT" → 入庫並標 critic_status="REJECT"（forensic trail，
+          Task 3 render 層 filter 不入 writer prompt），同步 append rejected_claims_log
+        - status="WARN" → 入庫，confidence 降為 "low" + critic_status="WARN"
+          + entry 帶 from_warned_critic_review=True tag
+        - status="PASS"（或 default）→ 正常索引 + critic_status="PASS"
+        """
+        if not formatted_results or formatted_results == "（未找到相關結果）":
+            logger.info("[BAB LOOP] No results for mini-reasoning, skipping")
+            return
+
+        from reasoning.agents.analyst import AnalystAgent
+        from reasoning.agents.critic import CriticAgent
+
+        analyst = AnalystAgent(self.handler)
+        critic = CriticAgent(self.handler)
+
+        # Inject ContextMap summary into analyst context (prepended)
+        cm_summary = context_map_to_summary(context_map)
+        enriched_context = f"{cm_summary}\n\n---\n\n{formatted_results}"
+
+        # Track C C4 (F-4 紀律 2026-05-28): analyst_output 必須在 try 外初始化，
+        # 否則 try 內 raise 時後續 gap routing block (try 外) 會 NameError。
+        analyst_output = None
+
+        try:
+            # Analyst pass — use actual parameter name: formatted_context
+            # Track C C4 (F-7 fix 2026-05-28): 接通 enable_web_search 傳遞鏈，
+            # 讓 Analyst prompt _build_mandatory_precheck 段在
+            # enable_web_search=True AND CONFIG.gap_knowledge_enrichment=True
+            # 同時成立時 inject → Analyst 才會主動標 gap_resolutions。
+            analyst_output = await analyst.research(
+                query=context_map.research_question,
+                formatted_context=enriched_context,
+                mode="discovery",
+                enable_live_research=True,
+                context_map_summary=cm_summary,
+                enable_web_search=getattr(self.handler, "enable_web_search", False),
+                # Track D D1 (sprint 2026-05-28): 啟用 KG 生成。
+                # D-CEO-Q6 LOCKED 預設 ON — LR 永遠跑 KG (LR 是重度研究模式)。
+                # Analyst.research(enable_kg=True) → 走 AnalystResearchOutputLive
+                # schema (inherit AnalystResearchOutputEnhancedKG, 含 knowledge_graph
+                # field) + 注入 KG instruction prompt block → LLM 輸出 knowledge_graph。
+                enable_kg=True,
+            )
+            logger.info("[BAB LOOP] Mini-reasoning: Analyst pass complete")
+
+            # Task 2 (DR-parity SEARCH_REQUIRED): Analyst 喊站內資料不足 → 補搜站內 evidence → 重跑 Analyst。
+            # 補搜走 BAB 既有 _execute_search path（不新建檢索器），上限 1 次（與外層 BAB iteration 隔離）。
+            # 邊界：此處補的是 Analyst 頂層 status=SEARCH_REQUIRED（即時補救），與 gap_resolutions
+            # INTERNAL_SEARCH no-op（交給下一輪 Associator）不同層、不重複。
+            # 可引用性（CEO 2026-06-12 拍板）：補搜到的新 evidence 經 _execute_search side-effect
+            # 寫入 self.evidence_pool（:540）→ BAB 結束後 serialize 進 state.evidence_pool_json
+            # （orchestrator :938/1668）→ outline planner deserialize 全 pool 做 planned_evidence_ids
+            # 分配（orchestrator :3471）→ render_grounded_narrative 餵 writer findings = writer 可引用。
+            if (
+                analyst_output is not None
+                and str(getattr(analyst_output, "status", "")).upper() == "SEARCH_REQUIRED"
+                and getattr(analyst_output, "new_queries", None)
+            ):
+                # M-10（AR CX SF#5 / Q5）：consumer 層硬限 — 去重 + 過濾空字串 + cap 3 條
+                # （即使 Analyst prompt 要求 1-3，runtime 仍須兜底防 LLM 吐超量 / 空 query）。
+                _seen = set()
+                _capped_queries = []
+                for q in analyst_output.new_queries:
+                    # AR R2 Codex nit：先 strip 再去重（否則 " query" 與 "query" 被當不同條）
+                    qn = (q or "").strip()
+                    if qn and qn not in _seen:
+                        _seen.add(qn)
+                        _capped_queries.append(qn)
+                    if len(_capped_queries) >= 3:
+                        break
+                if not _capped_queries:
+                    logger.info("[BAB LOOP] Task2 SEARCH_REQUIRED but new_queries empty after dedup; skipping")
+                else:
+                    logger.info(
+                        f"[BAB LOOP] Task2 SEARCH_REQUIRED: Analyst requested "
+                        f"{len(_capped_queries)} secondary queries (capped from {len(analyst_output.new_queries)})"
+                    )
+                    # 把 capped queries 包成 _execute_search 吃的 seed-like 物件（讀 .query / .source_strategy）
+                    from types import SimpleNamespace
+                    secondary_seeds = [
+                        SimpleNamespace(query=q, source_strategy="internal")
+                        for q in _capped_queries
+                    ]
+                    # 註：secondary_formatted, _ = ... 丟棄回傳 source_map 是**安全的** —
+                    # _execute_search 已 side-effect 寫 self.evidence_pool（:540）。不需手動 merge source_map。
+                    try:
+                        secondary_formatted, _ = await self._execute_search(secondary_seeds)
+                    except Exception as e:
+                        logger.warning(
+                            f"[BAB LOOP] Task2 secondary search failed (non-fatal): {e}",
+                            exc_info=True,
+                        )
+                        secondary_formatted = "（未找到相關結果）"
+                    if secondary_formatted and secondary_formatted != "（未找到相關結果）":
+                        # 補到 evidence → 重組 context 重跑 Analyst 一次（上限 1 次）
+                        enriched_context = (
+                            f"{enriched_context}\n\n--- 補充資料 ---\n\n{secondary_formatted}"
+                        )
+                        analyst_output = await analyst.research(
+                            query=context_map.research_question,
+                            formatted_context=enriched_context,
+                            mode="discovery",
+                            enable_live_research=True,
+                            context_map_summary=cm_summary,
+                            enable_web_search=getattr(self.handler, "enable_web_search", False),
+                            enable_kg=True,
+                        )
+                        logger.info("[BAB LOOP] Task2: Analyst re-run after secondary search complete")
+                        # AR R2 Codex should-fix：第二次仍非 DRAFT_READY 或 draft 空 → 不可 silent no-op。
+                        # 補搜有結果但 Analyst 重跑後仍判資料不足 / 沒寫出 draft（→ critic 不跑、該批
+                        # 推論落空），須 forensic log + user-facing 降級旁白（不可 silent fail）。
+                        _rerun_status = str(getattr(analyst_output, "status", "")).upper()
+                        _rerun_draft_len = len(getattr(analyst_output, "draft", None) or "")
+                        if _rerun_status != "DRAFT_READY" or _rerun_draft_len == 0:
+                            logger.warning(
+                                f"[BAB LOOP] Task2: secondary search re-run still inconclusive "
+                                f"(status={_rerun_status!r}, draft_len={_rerun_draft_len}, "
+                                f"queries={_capped_queries}); continuing with existing evidence"
+                            )
+                            if not getattr(self, "_search_required_degraded_narrated", False):
+                                from reasoning.live_research import lr_copy
+                                await self._emit_narration(
+                                    lr_copy.SEARCH_REQUIRED_DEGRADED_NARRATION
+                                )
+                                self._search_required_degraded_narrated = True
+                    else:
+                        # 無結果 → 降級旁白（不可 silent fail），用原 analyst_output（draft 空 → critic 不跑）
+                        if not getattr(self, "_search_required_degraded_narrated", False):
+                            from reasoning.live_research import lr_copy
+                            await self._emit_narration(
+                                lr_copy.SEARCH_REQUIRED_DEGRADED_NARRATION
+                            )
+                            self._search_required_degraded_narrated = True
+
+            # Critic pass (if analyst produced a non-empty draft) — Track A Task 6:
+            # Critic status (CriticReviewOutput.status: Literal["PASS","WARN","REJECT"])
+            # 決定 Analyst claims 的 critic_status 標記。
+            critic_status = "PASS"  # default (Critic 沒跑 / 沒 draft → PASS)
+            if analyst_output and hasattr(analyst_output, 'draft') and analyst_output.draft:
+                critic_output = await critic.review(
+                    draft=analyst_output.draft,
+                    query=context_map.research_question,
+                    mode="discovery",
+                    formatted_context=enriched_context,
+                    enable_live_research=True,
+                )
+                # CriticReviewOutput.status 是 schema 真實欄位（不是 verdict）
+                critic_status = str(
+                    getattr(critic_output, 'status', 'PASS')
+                ).upper()
+                if critic_status not in ("PASS", "WARN", "REJECT"):
+                    critic_status = "PASS"
+                logger.info(
+                    f"[BAB LOOP] Mini-reasoning: Critic status={critic_status}"
+                )
+
+            # Task 1 (DR-parity revise loop): Critic REJECT → analyst.revise() 重寫該批推論 → re-review。
+            # 上限 1 輪（非 DR 的 3 輪 — LR mini-reasoning per-topic 內嵌，外層 BAB max_iterations 已疊乘）。
+            # 退出：revise 後 PASS/WARN → 用 revised output 走正常索引；仍 REJECT 或 revise 失敗 → 維持
+            # 既有 REJECT 入庫 forensic + render 過濾。critic REJECT 才進此迴圈。
+            MAX_REVISE = 1
+            revise_count = 0
+            while (
+                critic_status == "REJECT"
+                and revise_count < MAX_REVISE
+                and analyst_output is not None
+                and getattr(analyst_output, "draft", None)
+            ):
+                revise_count += 1
+                try:
+                    revised = await analyst.revise(
+                        original_draft=analyst_output.draft,
+                        review=critic_output,
+                        formatted_context=enriched_context,
+                        query=context_map.research_question,
+                    )
+                except Exception as e:
+                    # revise 這一步失敗 → 降級旁白（不可 silent fail），退回原 REJECT 入庫路徑。
+                    logger.warning(
+                        f"[BAB LOOP] Task1 revise failed (non-fatal): {e}", exc_info=True
+                    )
+                    if not getattr(self, "_revise_degraded_narrated", False):
+                        from reasoning.live_research import lr_copy
+                        await self._emit_narration(
+                            lr_copy.MINI_REASONING_REVISE_DEGRADED_NARRATION
+                        )
+                        self._revise_degraded_narrated = True
+                    break  # 退回原 analyst_output 的 REJECT 入庫
+                # revised 沒 draft → 無法 re-review，退回原路徑
+                if not getattr(revised, "draft", None):
+                    logger.info("[BAB LOOP] Task1 revise produced empty draft; keeping original REJECT")
+                    break
+                # M-4（AR round1 雙家收斂 IH S-4 / CX SF#4）：re-review 的 critic.review **必須**
+                # 也納入內層 try/except。否則 re-review 拋例外會冒泡到 outer except 被吞成
+                # 通用「Mini-reasoning failed」旁白（違反不可 silent fail：顯示的是整段失敗而非
+                # revise/re-review 失敗），且會中斷後續本應正常入庫的 forensic trail + KG merge。
+                # re-review 失敗 → 維持 critic_status 原值（原 REJECT）+ emit 降級旁白 + break，
+                # 讓迴圈外的索引/merge 用「原 analyst_output + 原 REJECT」正常跑完。
+                try:
+                    re_review = await critic.review(
+                        draft=revised.draft,
+                        query=context_map.research_question,
+                        mode="discovery",
+                        formatted_context=enriched_context,
+                        enable_live_research=True,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[BAB LOOP] Task1 re-review failed (non-fatal): {e}", exc_info=True
+                    )
+                    if not getattr(self, "_revise_degraded_narrated", False):
+                        from reasoning.live_research import lr_copy
+                        await self._emit_narration(
+                            lr_copy.MINI_REASONING_REVISE_DEGRADED_NARRATION
+                        )
+                        self._revise_degraded_narrated = True
+                    break  # 退回原 analyst_output / 原 critic_status 的 REJECT 入庫
+                new_status = str(getattr(re_review, "status", "PASS")).upper()
+                if new_status not in ("PASS", "WARN", "REJECT"):
+                    new_status = "PASS"
+                logger.info(
+                    f"[BAB LOOP] Task1 revise #{revise_count}: critic re-review status={new_status}"
+                )
+                # 採用 revised 結果（不論 PASS/WARN/REJECT 都以 revised 為準 — 它是更新後的推論）
+                analyst_output = revised
+                critic_output = re_review
+                critic_status = new_status
+                # PASS/WARN 達成 → 退出迴圈；仍 REJECT 且未達上限 → 迴圈續（此處 MAX_REVISE=1 即停）
+
+            # Track A Task 1 + Task 6: index Analyst argument_graph 進
+            # state.evidence_usage (Gemini Critical 拍板: REJECT 也入庫保留 forensic trail,
+            # Task 3 render 層 filter)。
+            if (
+                self.state is not None
+                and analyst_output
+                and hasattr(analyst_output, 'argument_graph')
+                and analyst_output.argument_graph
+            ):
+                from reasoning.schemas_live import GroundedClaim
+                for node in analyst_output.argument_graph:
+                    rtype = getattr(node, 'reasoning_type', 'induction')
+                    # LogicType enum → str
+                    rtype_str = rtype.value if hasattr(rtype, 'value') else str(rtype)
+                    raw_conf = str(getattr(node, 'confidence', 'medium'))
+                    # WARN / REJECT 兩種情況都把 confidence 視為 low
+                    # (REJECT 降級或保留視 metadata 用途; critic_status 為主鍵)
+                    eff_conf = (
+                        "low" if critic_status in ("WARN", "REJECT") else raw_conf
+                    )
+                    eff_critic_status = critic_status  # PASS / WARN / REJECT
+                    for eid in (getattr(node, 'evidence_ids', None) or []):
+                        # T1 Fix 2: C-4 invariant #3 — eid 必須在 evidence_pool 中
+                        # 若 Analyst 幻覺出不存在的 eid，skip 並 warning（不 raise）
+                        if eid not in self.evidence_pool:
+                            logger.warning(
+                                f"[BAB invariant #3] Analyst hallucinated eid={eid} not in evidence_pool "
+                                f"(topic={self._current_topic_id}, status={critic_status}); skipping indexing"
+                            )
+                            continue
+                        gc = GroundedClaim(
+                            claim=node.claim,
+                            reasoning_type=rtype_str,
+                            confidence=eff_conf,
+                            source_topic=self._current_topic_id or "global",
+                            source_iteration=self._current_iteration,
+                            critic_status=eff_critic_status,
+                            # T1 Fix 1: 正式欄位取代 dict key inject，確保 model_validate round-trip 不 drop
+                            from_warned_critic_review=(critic_status == "WARN"),
+                        )
+                        entry = gc.model_dump()
+                        self.state.evidence_usage.setdefault(eid, []).append(entry)
+                logger.info(
+                    f"[BAB LOOP] Indexed argument_graph (critic={critic_status}): "
+                    f"{len(analyst_output.argument_graph)} nodes, "
+                    f"total eids={len(self.state.evidence_usage)}"
+                )
+                # Gemini C-1: REJECT batch 同步 append rejected_claims_log
+                # (metadata trace — oncall 可直接撈某次 reject batch)
+                if critic_status == "REJECT":
+                    if not hasattr(self.state, "rejected_claims_log") or \
+                            self.state.rejected_claims_log is None:
+                        self.state.rejected_claims_log = []
+                    self.state.rejected_claims_log.append({
+                        "topic_id": self._current_topic_id or "global",
+                        "iteration": self._current_iteration,
+                        "claim_count": len(analyst_output.argument_graph),
+                        "evidence_ids": sorted({
+                            eid for n in analyst_output.argument_graph
+                            for eid in (getattr(n, 'evidence_ids', None) or [])
+                        }),
+                        "reason": "critic_status_reject",
+                    })
+                    logger.warning(
+                        f"[BAB LOOP] Critic REJECT — claims indexed with "
+                        f"critic_status='REJECT' (forensic trail); will be "
+                        f"filtered by render_grounded_narrative"
+                    )
+
+            # Track D D1 (sprint 2026-05-28): merge analyst KG into state.knowledge_graph
+            # D-AMB-4 LOCKED: Critic REJECT → 跳過 KG merge (KG 不入庫；跟 Track A T6
+            # evidence_usage REJECT 入庫 forensic trail 紀律刻意不同 — KG 是 LLM 生成
+            # structured data, REJECT 表示推斷整段不可信, 入庫只是噪音)
+            # fix-up round 1 I-5: critic_status 變數由 Track A T6 上方 block 設定
+            # (default "PASS" + normalize uppercase) — 不可改名 / refactor 必須同步 Track D
+            # N-5: empty new_kg → _merge_knowledge_graph 內部 fast return (no-op)
+            if (
+                self.state is not None
+                and critic_status != "REJECT"
+                and analyst_output
+                and hasattr(analyst_output, 'knowledge_graph')
+                and analyst_output.knowledge_graph
+                and (
+                    analyst_output.knowledge_graph.entities
+                    or analyst_output.knowledge_graph.relationships
+                )
+            ):
+                try:
+                    new_kg = analyst_output.knowledge_graph
+                    merged = self._merge_knowledge_graph(
+                        self.state.knowledge_graph,
+                        new_kg,
+                    )
+                    self.state.knowledge_graph = merged
+                    logger.info(
+                        f"[BAB LOOP][Track D] KG merged: "
+                        f"+{len(new_kg.entities)} entities, "
+                        f"+{len(new_kg.relationships)} relationships; "
+                        f"state total: {len(merged.entities)} entities, "
+                        f"{len(merged.relationships)} relationships"
+                    )
+                    # Stop-and-Report #2 (plan v6 §9): 大 KG warning
+                    if len(merged.entities) > 100:
+                        logger.warning(
+                            f"[BAB LOOP][Track D] state.knowledge_graph.entities "
+                            f"count exceeded 100 ({len(merged.entities)}); KG render "
+                            f"layout may break (kg-spec §11). Consider review Analyst "
+                            f"KG instruction tightness."
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[BAB LOOP][Track D] KG merge failed (non-fatal): {e}"
+                    )
+        except Exception as e:
+            # s3-3 review（in-house N2 + Gemini）：對齊 Track C except，補 stack trace
+            #（非 LLM 類程式錯誤如 GroundedClaim 建構失敗，無 trace 極難 debug）。
+            logger.warning(
+                f"[BAB LOOP] Mini-reasoning failed (non-fatal): {e}", exc_info=True
+            )
+            # O5-B: 降級必有 user-facing 訊息（CLAUDE.md 不可 silent fail）。
+            # mini-reasoning（Analyst+Critic，最耗時推理）整段失敗時，本輪
+            # evidence_usage 不被索引，下游某章可能落 blocked_no_evidence；若不告知，
+            # user 只看到「資料不足」而誤以為真的沒資料（實為 LLM 推理出狀況）。
+            # s3-3（三家收斂）：per-run 只提示一次，防持續性失敗（429 貫穿 run）
+            # 每輪轟炸——照同檔 consistency 先例（_consistency_degraded_narrated）。
+            # log 每輪照記，只有 user-facing 旁白 dedup。
+            if not self._mini_reasoning_degraded_narrated:
+                await self._emit_narration(
+                    "這一輪的深入分析遇到狀況、已先略過，"
+                    "稍後若有章節顯示資料不足，可能與此有關。我會繼續往下進行。"
+                )
+                self._mini_reasoning_degraded_narrated = True
+
+        # Track C C4 (F-4 紀律 2026-05-28): post-mini-reasoning gap routing.
+        # 必須在 outer try/except 之外獨立執行 — 若放 outer try 內，gap routing 內任何
+        # 例外都會被上方 outer except swallow 成 "Mini-reasoning failed (non-fatal)"
+        # warning，違反 CLAUDE.md「不可 silent fail」紀律（gap routing 失敗應該有自己
+        # 明確訊息，不可借用 mini-reasoning 的 warning 蓋掉）。
+        # Toggle gate 在 _process_gap_resolutions_lr 內判定
+        # (enable_gap_enrichment / enable_web_search)。
+        if (
+            analyst_output
+            and hasattr(analyst_output, "gap_resolutions")
+            and analyst_output.gap_resolutions
+        ):
+            await self._run_gap_routing_phase(analyst_output)
+
+    async def _run_gap_routing_phase(self, analyst_output) -> None:
+        """Track C C4：post-mini-reasoning gap routing，獨立 except + 降級 narration。
+
+        gap routing 把 Analyst 標出的 gap 補進 evidence_pool。失敗時 non-fatal
+        （不擋 BAB 主流程），但必須 emit user-facing narration（CLAUDE.md 不可
+        silent fail）—— 否則使用者拿到的報告少了補強證據卻完全無感知。
+        s3-4 收斂：旁白 per-run dedup（防 429 貫穿 run 每輪轟炸），log 每輪照記。
+        """
+        logger.info(
+            f"[BAB LOOP][Track C] Processing "
+            f"{len(analyst_output.gap_resolutions)} gap resolutions"
+        )
+        try:
+            await self._process_gap_resolutions_lr(analyst_output.gap_resolutions)
+        except Exception as e:
+            # 獨立 except — 明確標 [Track C] 來源 + non-fatal（不擋 BAB 主流程）
+            # exc_info=True 保留（既有 code 已有，helper 化不可丟失）
+            logger.warning(
+                f"[BAB LOOP][Track C] gap routing failed (non-fatal): {e}",
+                exc_info=True,
+            )
+            if not self._gap_routing_degraded_narrated:
+                await self._emit_narration(
+                    "這一輪的補強查證沒能完成 — 用外部資料（維基／網路／"
+                    "背景知識）補上資料缺口時出了狀況，這部分先略過，"
+                    "研究照常繼續。"
+                )
+                self._gap_routing_degraded_narrated = True
+
+    async def _run_consistency_check(
+        self, current_map: ContextMap, initial_map: ContextMap
+    ) -> ConsistencyReview:
+        """
+        執行 Consistency Monitor。
+
+        使用已實作的 ConsistencyPromptBuilder + Critic agent。
+        """
+        from reasoning.prompts.consistency import ConsistencyPromptBuilder
+        from reasoning.schemas_live import ConsistencyReview as CR
+
+        builder = ConsistencyPromptBuilder()
+        prompt = builder.build_consistency_check_prompt(
+            current_map_summary=context_map_to_summary(current_map),
+            initial_map_summary=context_map_to_summary(initial_map),
+            recent_events=self.executed_searches[-5:]  # Last 5 searches as events
+        )
+
+        # Use handler's LLM infrastructure
+        from core.llm import ask_llm
+        try:
+            response = await ask_llm(
+                prompt,
+                CR.model_json_schema(),
+                level="low",
+                query_params=getattr(self.handler, 'query_params', {}),
+            )
+            return CR.model_validate(response)
+        except Exception as e:
+            logger.warning(f"[BAB LOOP] Consistency check failed: {e}")
+            return CR(
+                drift_level="none",
+                drift_description="一致性檢查失敗，預設為無漂移",
+                dubao_voice_message="",
+                recommended_action="continue",
+                monitor_degraded=True,
+            )
+
+    def _check_connection(self):
+        """檢查客戶端是否仍然連線。
+
+        使用與 OrchestratorBase._check_connection 相同的 3-signal 檢查：
+        1. wrapper.connection_alive flag
+        2. handler.connection_alive_event
+        3. handler._soft_interrupt_event（使用者打字中斷）
+        """
+        from reasoning.orchestrator_base import ResearchCancelledError
+
+        wrapper = getattr(self.handler, 'request_handler', None)
+        event = getattr(self.handler, 'connection_alive_event', None)
+
+        # Signal 1: wrapper connection_alive flag
+        if wrapper and not wrapper.connection_alive:
+            # 同步清除 event，確保下游檢查一致
+            if event and event.is_set():
+                event.clear()
+            raise ResearchCancelledError("Client disconnected during BAB loop (wrapper)")
+
+        # Signal 2: handler connection_alive_event
+        if event and not event.is_set():
+            raise ResearchCancelledError("Client disconnected during BAB loop (event)")
+
+        # Signal 3: soft interrupt（使用者打字中斷研究）
+        soft_interrupt = getattr(self.handler, '_soft_interrupt_event', None)
+        if soft_interrupt and soft_interrupt.is_set():
+            raise ResearchCancelledError("User interrupted BAB loop (soft)")
+
+    async def _emit_narration(self, text: str):
+        """推送讀豹旁白到前端。"""
+        if not text:
+            return
+        await emit_sse(self.handler, {
+            "message_type": "live_research_narration",
+            "text": text,
+        })
+
+    async def _emit_phase(self, phase_name: str, status: str):
+        """推送 phase 進度事件到前端。"""
+        await emit_sse(self.handler, {
+            "message_type": "research_phase",
+            "phase": phase_name,
+            "status": status,
+        })

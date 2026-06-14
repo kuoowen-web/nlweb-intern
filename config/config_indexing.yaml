@@ -1,0 +1,61 @@
+# M0 Indexing Module Configuration
+# POC 驗證結果（2026-01-28）已納入
+
+quality_gate:
+  min_body_length: 50
+  min_chinese_ratio: 0.2       # 中文字比例下限（同時作為語言檢查）
+  max_html_ratio: 0.3          # HTML 標籤比例上限
+
+chunking:
+  # POC 驗證結果（2026-01-28）：
+  # - 語義分塊對中文新聞效果有限（相鄰句子相似度普遍 < 0.5）
+  # - 改用長度優先策略，區別度約 0.56，在理想範圍 0.4-0.6 內
+  strategy: "length_based"       # 使用長度優先策略（非語義分塊）
+  target_length: 170             # 目標 chunk 長度（字元）
+  min_length: 100                # 最小 chunk 長度（太短會合併到前一塊）
+  short_article_threshold: 200   # 短文閾值：< 200 字整篇作為 1 chunk
+  merge_threshold: 0.80          # 動態合併：相鄰 chunks 相似度 > 0.8 時合併
+  summary_max_length: 400
+  extractive_summary_sentences: 3  # Extractive summary 選取句數
+  overlap_chars: 30              # Overlap 字數，用於 embedding 優化（2026-02）
+
+# Source Tiers 簡化：不再用於分塊閾值，僅用於品質標記
+source_tiers:
+  tier_1: "authoritative"   # 官方、通訊社
+  tier_2: "verified"        # 主流媒體
+  tier_3: "standard"        # 一般新聞（預設）
+  tier_4: "aggregator"      # 聚合站
+
+source_mappings:
+  reuters.com: 1
+  cna.com.tw: 1
+  udn.com: 2
+  ltn.com.tw: 2
+  ithome.com.tw: 3
+
+vault:
+  compression_level: 3          # 預設壓縮等級
+  short_article_threshold: 1000 # 短文字數門檻
+  long_article_threshold: 5000  # 長文字數門檻
+  short_compression_level: 1    # 短文壓縮等級（速度優先）
+  long_compression_level: 5     # 長文壓縮等級（壓縮率優先）
+
+# API Rate Limiting 設定
+api:
+  embedding_concurrent_limit: 50      # 同時進行的 embedding 請求數
+  embedding_requests_per_minute: 5000 # 每分鐘最大請求數
+  embedding_retry_attempts: 3         # 失敗重試次數
+  embedding_retry_delay_ms: 1000      # 重試間隔（毫秒）
+
+health_monitor:
+  embedding_failure_rate: 0.05
+  date_parse_failure_rate: 0.10
+  max_chunks_per_article: 20
+  min_chunks_per_article: 1
+
+pipeline:
+  checkpoint_interval: 10      # 每 N 篇儲存 checkpoint
+  batch_size: 100              # Batch 處理大小
+
+rollback:
+  backup_retention_days: 30    # 備份保留天數

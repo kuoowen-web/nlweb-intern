@@ -1,0 +1,67 @@
+# NLWeb PostgreSQL Infrastructure
+# PostgreSQL 17 + pgvector (vector search) + pg_bigm (CJK full-text search)
+#
+# Usage:
+#   Start:  docker compose -f infra/docker-compose.yml up -d
+#   Stop:   docker compose -f infra/docker-compose.yml down
+#   Logs:   docker compose -f infra/docker-compose.yml logs -f
+#   Shell:  docker compose -f infra/docker-compose.yml exec postgres psql -U nlweb -d nlweb
+
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nlweb-postgres
+    restart: unless-stopped
+    shm_size: '6g'
+
+    environment:
+      POSTGRES_USER: nlweb
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nlweb_dev}
+      POSTGRES_DB: nlweb
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      # Persistent data volume
+      - pgdata:/var/lib/postgresql/data
+      # Init script runs on first start only (when data volume is empty)
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+
+    # Performance tuning for dev machine (32GB RAM)
+    # These override postgresql.conf defaults
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=2GB"
+      - "-c"
+      - "work_mem=256MB"
+      - "-c"
+      - "maintenance_work_mem=512MB"
+      - "-c"
+      - "effective_cache_size=8GB"
+      - "-c"
+      - "max_connections=50"
+      - "-c"
+      - "random_page_cost=1.1"
+      # pg_bigm requires shared_preload_libraries
+      - "-c"
+      - "shared_preload_libraries=pg_bigm"
+      # WAL settings for better write performance in dev
+      - "-c"
+      - "wal_buffers=64MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+
+    # Health check
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nlweb -d nlweb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+    driver: local

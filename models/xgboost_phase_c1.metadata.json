@@ -1,0 +1,86 @@
+{
+  "model_version": "phase_c1",
+  "model_type": "XGBRegressor",
+  "objective": "synthetic_label_training",
+  "label_type": "llm_final_score",
+  "feature_version": "phase_a",
+  "expected_features": 29,
+  "feature_names": [
+    "query_length",
+    "word_count",
+    "has_quotes",
+    "has_numbers",
+    "has_question_words",
+    "keyword_count",
+    "doc_length",
+    "recency_days",
+    "has_author",
+    "has_publication_date",
+    "schema_completeness",
+    "title_length",
+    "description_length",
+    "url_length",
+    "vector_similarity",
+    "bm25_score",
+    "keyword_boost",
+    "temporal_boost",
+    "final_retrieval_score",
+    "keyword_overlap_ratio",
+    "title_exact_match",
+    "retrieval_position",
+    "ranking_position",
+    "llm_final_score",
+    "relative_score_to_top",
+    "score_percentile",
+    "position_change",
+    "mmr_diversity_score",
+    "detected_intent"
+  ],
+  "training_date": "2025-12-04T18:34:47.636314",
+  "training_samples": 543,
+  "training_queries": 11,
+  "data_quality": "test_queries_only",
+  "validation_metrics": {
+    "rmse": 0.6507962836413906,
+    "mae": 0.2561495186332222,
+    "r2": 0.6564704515742728
+  },
+  "fold_results": [
+    {
+      "mse": 1.5754653335303894,
+      "rmse": 1.2551754194256632,
+      "mae": 0.10681509804892374,
+      "r2": 0.8589770601647496
+    },
+    {
+      "mse": 2.668755693542189,
+      "rmse": 1.6336326678731021,
+      "mae": 1.132099838256836,
+      "r2": 0.4564652355311225
+    },
+    {
+      "mse": 0.001767275065649301,
+      "rmse": 0.042038970796741695,
+      "mae": 0.00483795166015625,
+      "r2": 0.9982148736710613
+    },
+    {
+      "mse": 0.09978440539212897,
+      "rmse": 0.31588669708002737,
+      "mae": 0.032509765625,
+      "r2": 0.9686950885044301
+    },
+    {
+      "mse": 5.252861941698939e-05,
+      "rmse": 0.00724766303141843,
+      "mae": 0.004484939575195313,
+      "r2": 0.0
+    }
+  ],
+  "hyperparameters": {
+    "objective": "reg:squarederror",
+    "max_depth": 6,
+    "learning_rate": 0.1,
+    "n_estimators": 100
+  }
+}

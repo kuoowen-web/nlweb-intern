@@ -1,0 +1,19 @@
+[Unit]
+Description=NLWeb Dashboard Server
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/nlweb/code/python
+Environment=PATH=/home/%i/nlweb/venv/bin:/usr/bin
+Environment=CRAWLER_ENV=gcp
+ExecStart=/home/%i/nlweb/venv/bin/python -m indexing.dashboard_server
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/%i/nlweb/data/crawler/logs/dashboard-stdout.log
+StandardError=append:/home/%i/nlweb/data/crawler/logs/dashboard-stderr.log
+MemoryMax=300M
+
+[Install]
+WantedBy=multi-user.target

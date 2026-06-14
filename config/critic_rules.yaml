@@ -1,0 +1,39 @@
+# Critic compliance rules by research mode
+mode_compliance_rules:
+  strict:
+    reject_conditions:
+      - "引用了 Tier 3-5 作為核心證據"
+      - "缺少關鍵事實的直接引用"
+      - "使用了過時資訊（超過時間範圍）"
+      - "單一來源支持的重要聲明"
+    warn_conditions:
+      - "過度依賴單一來源"
+      - "部分事實缺少多方驗證"
+      - "有些引用來自較低可信度來源"
+    min_tier_1_ratio: 0.6
+    require_multi_source: true
+    max_tier_for_core_claims: 2
+
+  discovery:
+    reject_conditions:
+      - "視角過於單一，缺少多元觀點"
+      - "未探索相關主題連結"
+      - "分析深度不足"
+    warn_conditions:
+      - "某些面向探討不夠深入"
+      - "缺少對立觀點的呈現"
+    min_tier_1_ratio: 0.3
+    require_multi_source: false
+    max_tier_for_core_claims: 4
+
+  monitor:
+    reject_conditions:
+      - "缺少時序分析"
+      - "未標示重要轉折點"
+      - "時間線有明顯跳躍"
+    warn_conditions:
+      - "某些時間段資料不足"
+      - "趨勢分析缺乏數據支持"
+    min_tier_1_ratio: 0.4
+    require_multi_source: false
+    max_tier_for_core_claims: 3

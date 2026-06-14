@@ -1,0 +1,23 @@
+# 非同步網路請求
+aiohttp
+aiofiles
+
+# 解析與資料處理
+beautifulsoup4
+lxml
+ujson
+
+# 設定與管理
+PyYAML
+python-dotenv
+fake-useragent
+
+# 時間與時區處理
+python-dateutil
+pytz
+
+# 進度條顯示
+tqdm
+
+# 反爬蟲機制 - 瀏覽器指紋模擬
+curl-cffi>=0.5.10

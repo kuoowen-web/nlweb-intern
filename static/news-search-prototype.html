@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>臺灣讀豹 — 新聞搜尋引擎</title>
+    <script src="/static/clarity-init.js"></script>
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png?v=20260604a">
+    <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png?v=20260604a">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon-180.png?v=20260604a">
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="/static/news-search.css?v=20260604a">
+    <link rel="stylesheet" href="/static/css/feedback-modal.css">
+    <script src="/static/js/feedback-utils.js"></script>
+    <!-- D3.js for Knowledge Graph Visualization -->
+    <script src="/static/d3.v7.min.js"></script>
+</head>
+<body>
+    <!-- Hidden file input for upload (used by right tab panel) -->
+    <input type="file" id="fileInput" style="display: none;" accept=".pdf,.docx,.txt,.md">
+
+    <!-- Upload Progress Modal -->
+    <div class="upload-modal" id="uploadModal">
+        <div class="upload-modal-content">
+            <div class="upload-modal-title">處理文件中...</div>
+            <div class="upload-progress">
+                <div class="progress-bar">
+                    <div class="progress-bar-fill" id="progressBarFill" style="width: 0%"></div>
+                </div>
+                <div class="progress-text" id="progressText">準備上傳...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 左側邊欄展開按鈕（固定在左側邊緣） -->
+    <button class="left-sidebar-expand-btn hidden" id="btnExpandSidebar" title="展開對話紀錄">
+        <span>▶▶▶</span>
+        <span>展開對話紀錄</span>
+    </button>
+
+    <!-- ==================== 左側邊欄 ==================== -->
+    <div class="left-sidebar visible" id="leftSidebar" style="display:none">
+        <!-- 頂部：收回按鈕 -->
+        <div class="left-sidebar-header">
+            <button class="left-sidebar-collapse-btn" id="btnCollapseSidebar">
+                <img src="/static/images/Icon_back.png" alt="" class="sidebar-icon">
+                <span>收回</span>
+            </button>
+        </div>
+
+        <!-- 內容區 -->
+        <div class="left-sidebar-content">
+            <!-- 按鈕區（便條紙材質背景） -->
+            <div class="left-sidebar-buttons-area">
+                <!-- 新對話按鈕（outline style，排第一） -->
+                <button class="btn-new-conversation" id="btnNewConversation">
+                    <img src="/static/images/Icon_New.png" alt="" class="sidebar-icon">
+                    <span>開啟新對話</span>
+                </button>
+
+                <!-- 分享結果按鈕 -->
+                <button class="btn-share-sidebar" id="btnShareSidebar">
+                    <img src="/static/images/Icon_share.png" alt="" class="sidebar-icon">
+                    <span>分享結果</span>
+                </button>
+
+                <!-- 歷史搜尋按鈕 -->
+                <button class="btn-history-search" id="btnHistorySearch">
+                    <img src="/static/images/Icon_History_Black.png" alt="" class="sidebar-icon">
+                    <span>歷史搜尋</span>
+                </button>
+
+                <!-- 資料夾/專案區塊 -->
+                <div class="left-sidebar-section">
+                    <button class="btn-toggle-categories" id="btnToggleCategories">
+                        <img src="/static/images/Icon_Folder_Black.png" alt="" class="sidebar-icon">
+                        <span>開啟資料夾</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 過往 Session 列表（自動填入） -->
+            <div class="left-sidebar-divider"></div>
+            <!-- Session tabs: My sessions / Shared -->
+            <div class="left-sidebar-sessions-tabs">
+                <button class="left-sidebar-sessions-tab active" data-sessions-tab="my">我的對話</button>
+                <button class="left-sidebar-sessions-tab" data-sessions-tab="shared">組織空間</button>
+            </div>
+            <div class="left-sidebar-sessions" id="leftSidebarSessions">
+                <!-- Sessions rendered dynamically -->
+            </div>
+            <div class="left-sidebar-sessions" id="leftSidebarSessionsShared" style="display:none"></div>
+        </div>
+
+        <!-- 底部：通知 + Settings 觸發區 + Popover -->
+        <div class="left-sidebar-footer">
+            <div class="sidebar-footer-row">
+                <!-- 通知按鈕 -->
+                <button class="notification-btn" id="btnNotification" title="通知">
+                    <svg class="notification-icon" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <path d="M10 2a6 6 0 0 0-6 6v3l-1.5 2.5A.5.5 0 0 0 3 14h14a.5.5 0 0 0 .43-.74L16 11V8a6 6 0 0 0-6-6z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+                        <path d="M8 14a2 2 0 0 0 4 0" stroke="currentColor" stroke-width="1.5"/>
+                    </svg>
+                    <span class="notification-badge" id="notificationBadge" style="display:none;">0</span>
+                </button>
+                <!-- Settings 觸發區 -->
+                <button class="btn-settings" id="btnSettings">
+                    <img src="/static/images/Icon_setting.png" alt="" class="sidebar-icon">
+                    <span class="settings-user-name" id="settingsUserName">設定</span>
+                </button>
+            </div>
+
+            <!-- Settings Popover（往上彈出） -->
+            <div class="settings-popover" id="settingsPopover" style="display:none;">
+                <!-- Auth: Login button / User menu -->
+                <div class="auth-area" id="authArea">
+                    <!-- 已登入時顯示 -->
+                    <div class="user-menu" id="userMenu" style="display:none;">
+                        <div class="popover-user-info">
+                            <span class="user-name" id="userDisplayName"></span>
+                        </div>
+                        <div class="popover-divider"></div>
+                        <button class="popover-menu-item" id="btnOrgManage" style="display:none;" title="組織管理">
+                            <!-- building icon -->
+                            <svg class="popover-menu-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <rect x="2" y="4" width="12" height="10" rx="1"/>
+                                <line x1="2" y1="4" x2="8" y2="1"/>
+                                <line x1="8" y1="1" x2="14" y2="4"/>
+                                <rect x="6" y="10" width="4" height="4"/>
+                                <rect x="4" y="7" width="2" height="2"/>
+                                <rect x="10" y="7" width="2" height="2"/>
+                            </svg>
+                            組織管理
+                        </button>
+                        <button class="popover-menu-item" id="btnChangePassword" title="變更密碼">
+                            <!-- key icon -->
+                            <svg class="popover-menu-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="5" cy="8" r="3"/>
+                                <line x1="8" y1="8" x2="14" y2="8"/>
+                                <line x1="12" y1="8" x2="12" y2="10"/>
+                                <line x1="14" y1="8" x2="14" y2="10"/>
+                            </svg>
+                            變更密碼
+                        </button>
+                        <a href="/static/help.html" class="popover-menu-item" style="text-decoration:none;color:inherit;" title="說明中心">
+                            <svg class="popover-menu-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="8" cy="8" r="7"/>
+                                <path d="M5.5 6a2.5 2.5 0 0 1 5 0c0 1.5-2.5 2-2.5 3.5"/>
+                                <circle cx="8" cy="12.5" r="0.5" fill="currentColor" stroke="none"/>
+                            </svg>
+                            說明中心
+                        </a>
+                        <button class="popover-menu-item" id="btnOpenFeedbackMain" title="意見回饋">
+                            <svg class="popover-menu-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <rect x="1" y="3" width="14" height="10" rx="1"/>
+                                <polyline points="1 3 8 9 15 3"/>
+                            </svg>
+                            意見回饋
+                        </button>
+                        <div class="popover-divider"></div>
+                        <div class="logout-dropdown-wrapper" id="logoutDropdownWrapper">
+                            <button class="popover-menu-item popover-menu-item-logout" id="btnLogout">
+                                <!-- logout: box + right arrow -->
+                                <svg class="popover-menu-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M6 3H3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h3"/>
+                                    <polyline points="10 11 14 8 10 5"/>
+                                    <line x1="14" y1="8" x2="6" y2="8"/>
+                                </svg>
+                                登出
+                            </button>
+                            <div class="logout-dropdown" id="logoutDropdown">
+                                <button class="logout-dropdown-item" id="btnLogoutAll" style="display:flex;align-items:center;">
+                                    <!-- logout all: two screens + arrow -->
+                                    <svg class="popover-menu-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;margin-right:6px;">
+                                        <rect x="1" y="4" width="8" height="6" rx="1"/>
+                                        <rect x="7" y="6" width="6" height="5" rx="1"/>
+                                        <polyline points="11 13 13 11 11 9"/>
+                                    </svg>
+                                    登出全部裝置
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- 未登入時顯示 -->
+                    <button class="popover-login-btn" id="btnShowLogin" style="display:flex;align-items:center;justify-content:center;">
+                        <!-- login: left arrow into box -->
+                        <svg class="popover-menu-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;margin-right:6px;">
+                            <path d="M10 3h3a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-3"/>
+                            <polyline points="6 11 2 8 6 5"/>
+                            <line x1="2" y1="8" x2="10" y2="8"/>
+                        </svg>
+                        登入
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================== 右側 Tab 面板系統 ==================== -->
+    <div class="right-tabs-container" id="rightTabsContainer">
+        <!-- Tab 標籤列 -->
+        <div class="right-tabs-labels">
+            <button class="right-tab-label" data-tab="sources">
+                <img src="/static/images/Icon_Filter.png" alt="" class="right-tab-label-icon">
+                <span>來源篩選</span>
+            </button>
+            <button class="right-tab-label" data-tab="files">
+                <img src="/static/images/Icon_Folder_Black.png" alt="" class="right-tab-label-icon">
+                <span>我的檔案</span>
+            </button>
+            <button class="right-tab-label" data-tab="history">
+                <img src="/static/images/Icon_History_Black.png" alt="" class="right-tab-label-icon">
+                <span>搜尋紀錄</span>
+            </button>
+            <button class="right-tab-label" data-tab="pinned-news">
+                <img src="/static/images/Icon_Pin.png" alt="" class="right-tab-label-icon inline-icon">
+                <span>釘選新聞</span>
+            </button>
+        </div>
+
+        <!-- 來源篩選面板 (VS Code Explorer 風格 Tree View) -->
+        <div class="right-tab-panel" id="tabPanelSources" data-tab="sources">
+            <div class="right-tab-panel-header">
+                <div class="right-tab-panel-title">
+                    <img src="/static/images/Icon_Filter.png" alt="" style="width:16px;height:16px;">
+                    <span>來源篩選</span>
+                </div>
+                <button class="right-tab-panel-close" data-close-tab><img src="/static/images/Icon_cancel.png" alt="Close" class="right-tab-close-icon"></button>
+            </div>
+            <div class="right-tab-panel-content">
+                <!-- Tree View 工具列 -->
+                <div class="tree-view-toolbar">
+                    <button class="tree-toolbar-btn" id="btnAddSourceFolder" title="新增分類資料夾">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M.54 3.87.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3H13.5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2V3.87z"/>
+                            <path d="M8 7a.5.5 0 0 1 .5.5V9H10a.5.5 0 0 1 0 1H8.5v1.5a.5.5 0 0 1-1 0V10H6a.5.5 0 0 1 0-1h1.5V7.5A.5.5 0 0 1 8 7z" fill="white"/>
+                        </svg>
+                    </button>
+                    <button class="tree-toolbar-btn" id="btnExpandAllSources" title="展開全部">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                            <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+                        </svg>
+                    </button>
+                    <button class="tree-toolbar-btn" id="btnCollapseAllSources" title="收合全部">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                            <path fill-rule="evenodd" d="M7.646 4.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1-.708.708L8 5.707l-5.646 5.647a.5.5 0 0 1-.708-.708l6-6z"/>
+                        </svg>
+                    </button>
+                    <div class="tree-toolbar-spacer"></div>
+                    <button class="tree-toolbar-btn" id="btnToggleAllSites" title="全選/全不選">
+                        全選
+                    </button>
+                </div>
+                <!-- Tree View 容器 -->
+                <div class="tree-view-container" id="sourceTreeView">
+                    <div class="tree-view-loading">載入中...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 我的檔案面板 (VS Code Explorer 風格 Tree View) -->
+        <div class="right-tab-panel" id="tabPanelFiles" data-tab="files">
+            <div class="right-tab-panel-header">
+                <div class="right-tab-panel-title">
+                    <img src="/static/images/Icon_Folder_Black.png" alt="" style="width:16px;height:16px;">
+                    <span>我的檔案</span>
+                </div>
+                <button class="right-tab-panel-close" data-close-tab><img src="/static/images/Icon_cancel.png" alt="Close" class="right-tab-close-icon"></button>
+            </div>
+            <div class="right-tab-panel-content">
+                <!-- Tree View 工具列 -->
+                <div class="tree-view-toolbar">
+                    <button class="tree-toolbar-btn" id="btnAddFileFolder" title="新增分類資料夾">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M.54 3.87.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3H13.5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2V3.87z"/>
+                            <path d="M8 7a.5.5 0 0 1 .5.5V9H10a.5.5 0 0 1 0 1H8.5v1.5a.5.5 0 0 1-1 0V10H6a.5.5 0 0 1 0-1h1.5V7.5A.5.5 0 0 1 8 7z" fill="white"/>
+                        </svg>
+                    </button>
+                    <button class="tree-toolbar-btn" id="btnExpandAllFiles" title="展開全部">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                            <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+                        </svg>
+                    </button>
+                    <button class="tree-toolbar-btn" id="btnCollapseAllFiles" title="收合全部">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                            <path fill-rule="evenodd" d="M7.646 4.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1-.708.708L8 5.707l-5.646 5.647a.5.5 0 0 1-.708-.708l6-6z"/>
+                        </svg>
+                    </button>
+                    <div class="tree-toolbar-spacer"></div>
+                    <button class="tree-toolbar-btn" id="btnUploadFile" title="上傳文件">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                            <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+                        </svg>
+                    </button>
+                </div>
+                <!-- Tree View 容器 -->
+                <div class="tree-view-container" id="fileTreeView">
+                    <div class="tree-view-empty">尚未上傳文件</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 問答紀錄面板 -->
+        <div class="right-tab-panel" id="tabPanelHistory" data-tab="history">
+            <div class="right-tab-panel-header">
+                <div class="right-tab-panel-title">
+                    <img src="/static/images/Icon_History_Black.png" alt="" style="width:16px;height:16px;">
+                    <span>搜尋紀錄</span>
+                </div>
+                <button class="right-tab-panel-close" data-close-tab><img src="/static/images/Icon_cancel.png" alt="Close" class="right-tab-close-icon"></button>
+            </div>
+            <div class="right-tab-panel-content">
+                <div class="saved-sessions-list" id="savedSessionsListNew" style="display: flex; flex-direction: column; gap: 8px;">
+                    <!-- 問答紀錄將動態載入 -->
+                </div>
+            </div>
+        </div>
+
+        <!-- 釘選新聞面板 -->
+        <div class="right-tab-panel" id="tabPanelPinnedNews" data-tab="pinned-news">
+            <div class="right-tab-panel-header">
+                <div class="right-tab-panel-title">
+                    <img src="/static/images/Icon_Pin.png" alt="" class="inline-icon">
+                    <span>釘選新聞</span>
+                </div>
+                <button class="right-tab-panel-close" data-close-tab><img src="/static/images/Icon_cancel.png" alt="Close" class="right-tab-close-icon"></button>
+            </div>
+            <div class="right-tab-panel-content">
+                <div class="pinned-news-list" id="pinnedNewsList">
+                    <div class="pinned-news-empty">尚未釘選任何新聞</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <main>
+        <div class="container">
+            <!-- Folder/Project Page (replaces main content when active) -->
+            <div class="folder-page" id="folderPage" style="display: none;">
+                <!-- Folder Main View -->
+                <div class="folder-main" id="folderMain">
+                    <button class="folder-back-btn" id="btnFolderBackToHome">&lt; 回到搜尋</button>
+                    <h1 class="folder-page-title">資料夾</h1>
+                    <div class="folder-search-bar">
+                        <img src="/static/images/Icon_Filter.png" alt="" class="folder-search-icon inline-icon">
+                        <input type="text" id="folderSearchInput" placeholder="搜尋資料夾" />
+                    </div>
+                    <div class="folder-sort-tabs">
+                        <button class="folder-sort-tab active" data-sort="all">全列表</button>
+                        <button class="folder-sort-tab" data-sort="created">建立時間</button>
+                        <button class="folder-sort-tab" data-sort="updated">最後更新</button>
+                    </div>
+                    <div class="folder-grid" id="folderGrid">
+                        <!-- Folder cards rendered dynamically -->
+                    </div>
+                    <button class="folder-add-btn" id="btnAddFolder">+ 新增資料夾</button>
+                </div>
+
+                <!-- Folder Detail View -->
+                <div class="folder-detail" id="folderDetail" style="display: none;">
+                    <button class="folder-back-btn" id="btnFolderBack">&lt; 回上頁</button>
+                    <h1 class="folder-detail-title" id="folderDetailTitle"></h1>
+                    <div class="folder-detail-sessions" id="folderDetailSessions">
+                        <!-- Sessions inside folder rendered dynamically -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Initial State -->
+            <div class="initial-state" id="initialState" style="display:none">
+                <div class="brand-visual-area">
+                    <div class="brand-banner-container">
+                        <img src="/static/images/Banner.png" alt="" class="brand-banner-img">
+                        <img src="/static/images/Logo_W.png" alt="臺灣讀豹" class="brand-logo-img">
+                        <img src="/static/images/Leopard.png" alt="讀豹" class="brand-leopard-img">
+                    </div>
+                </div>
+                <!-- Logo 未來放在 Banner 圖片上面 -->
+                <!-- Brand tail decoration -->
+                <div class="brand-tail-container">
+                    <img src="/static/images/Tail.png" alt="" class="brand-tail-img">
+                </div>
+            </div>
+
+            <!-- Search Container -->
+            <div class="search-container" id="searchContainer" style="display:none">
+                <div class="search-box">
+                <!-- 字體大小按鈕（黏在 search-box 正上方右側） -->
+                <button class="btn-font-size" id="btnFontSize" title="大字體模式">Aa</button>
+                    <textarea
+                        class="search-input"
+                        id="searchInput"
+                        placeholder="問我任何新聞相關問題，例如：最近台灣資安政策有什麼進展？"
+                    ></textarea>
+
+                    <!-- 新版底部列：左側上傳、右側模式按鈕 -->
+                    <div class="search-bottom-bar">
+                        <div class="search-bottom-left">
+                            <!-- 圖片上傳按鈕（僅在自由對話和進階搜尋模式顯示） -->
+                            <button class="btn-upload-inline" id="btnUploadInline">
+                                <span>上傳檔案</span>
+                            </button>
+                            <!-- 包含我的文件 checkbox -->
+                            <label class="user-files-toggle">
+                                <input type="checkbox" id="includePrivateSourcesCheckbox" checked>
+                                <span>包含我的文件</span>
+                            </label>
+                        </div>
+                        <div class="search-bottom-right">
+                            <!-- 模式切換按鈕 -->
+                            <div class="mode-toggle-inline" id="modeToggleInline">
+                                <button class="mode-btn-inline active" data-mode="search">新聞搜尋</button>
+                                <button class="mode-btn-inline" data-mode="deep_research">進階搜尋</button>
+                                <button class="mode-btn-inline" data-mode="live_research">Live 研究<span class="mode-beta-badge">Beta</span></button>
+                                <button class="mode-btn-inline" data-mode="chat">自由對話</button>
+                            </div>
+                            <button class="btn-search" id="btnSearch">搜尋</button>
+                            <button class="btn-stop-generate" id="btnStopGenerate" style="display: none;">停止生成</button>
+                        </div>
+                    </div>
+
+                    <!-- 進階搜尋 Popup（非 modal，點擊關閉按鈕才關閉） -->
+                    <div class="advanced-search-popup" id="advancedSearchPopup">
+                        <div class="popup-header">
+                            <img src="/static/images/Icon_搜索.png" alt="搜尋" class="popup-header-icon">
+                            <span class="popup-title">進階搜尋</span>
+                        </div>
+                        <div class="popup-content">
+                            <!-- 研究模式 -->
+                            <div class="popup-section">
+                                <div class="popup-section-title">研究模式</div>
+                                <label class="advanced-checkbox-item advanced-source-row">
+                                    <input type="checkbox" id="sourceFilterToggle">
+                                    <img src="/static/images/Icon_搜索.png" alt="來源篩選" class="advanced-checkbox-icon">
+                                    <span class="advanced-checkbox-text">來源篩選</span>
+                                </label>
+                            </div>
+
+                            <div class="popup-divider"></div>
+
+                            <!-- 進階設定 -->
+                            <div class="popup-section">
+                                <div class="popup-section-title">進階設定</div>
+                                <div class="advanced-checkbox-group">
+                                    <label class="advanced-checkbox-item advanced-option-row">
+                                        <input type="checkbox" id="kgToggle">
+                                        <img src="/static/images/Icon_知識圖.png" alt="知識圖譜" class="advanced-checkbox-icon">
+                                        <span class="advanced-checkbox-text">啟用知識圖譜</span>
+                                    </label>
+                                    <label class="advanced-checkbox-item advanced-option-row">
+                                        <input type="checkbox" id="webSearchToggle">
+                                        <img src="/static/images/Icon_網路.png" alt="網路搜尋" class="advanced-checkbox-icon">
+                                        <span class="advanced-checkbox-text">啟用網路搜尋</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <!-- 關閉按鈕 -->
+                            <div class="popup-footer">
+                                <button class="popup-close-btn" id="popupClose">關閉</button>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- Popup overlay removed (non-modal popup) -->
+
+            <!-- Loading State -->
+            <div class="loading-state" id="loadingState">
+                <div class="loading-spinner"></div>
+                <div class="loading-text">正在分析您的問題...</div>
+            </div>
+
+            <!-- Chat Container for Free Conversation Mode (independent of resultsSection) -->
+            <div class="chat-container" id="chatContainer">
+                <!-- Pinned Messages Banner (Line-style) -->
+                <div class="pinned-banner" id="pinnedBanner" style="display: none;">
+                    <div class="pinned-banner-current" id="pinnedBannerCurrent">
+                        <img src="/static/images/Icon_Pin.png" alt="" class="pinned-banner-icon inline-icon">
+                        <span class="pinned-banner-text" id="pinnedBannerText"></span>
+                        <button class="pinned-banner-toggle" id="pinnedBannerToggle">
+                            <span class="pinned-banner-count" id="pinnedBannerCount">1</span>
+                            <span class="pinned-banner-arrow">▼</span>
+                        </button>
+                    </div>
+                    <div class="pinned-banner-dropdown" id="pinnedBannerDropdown">
+                        <!-- Pinned items will be populated dynamically -->
+                    </div>
+                </div>
+                <div class="chat-messages" id="chatMessages">
+                    <!-- Chat messages will be populated dynamically -->
+                </div>
+                <div class="chat-loading" id="chatLoading">
+                    <div class="chat-loading-spinner"></div>
+                    <div>AI 思考中...</div>
+                </div>
+                <div class="chat-input-container" id="chatInputContainer" style="display: none;">
+                    <!-- Input will be moved here in chat mode -->
+                </div>
+            </div>
+
+            <!-- Results Section -->
+            <div class="results-section" id="resultsSection">
+                <!-- KG Restore Bar (shown when KG is hidden by user) -->
+                <div class="kg-restore-bar" id="kgRestoreBar">
+                    <span class="emoji-bw">📊</span> 知識圖譜已隱藏 — 點擊此處重新顯示
+                </div>
+
+                <!-- Knowledge Graph Display (Phase KG Enhanced) -->
+                <div class="kg-display-container" id="kgDisplayContainer" style="display: none;">
+                    <div class="kg-display-header">
+                        <div class="kg-display-title">
+                            <span class="kg-display-icon"><span class="emoji-bw">📊</span></span>
+                            <span>知識圖譜</span>
+                            <span class="kg-display-metadata" id="kgMetadata"></span>
+                        </div>
+                        <div style="display: flex; gap: 12px; align-items: center;">
+                            <!-- Edit Controls (shown in edit mode) -->
+                            <div class="kg-edit-controls" id="kgEditControls" style="display: none;">
+                                <button class="kg-edit-btn kg-edit-connect-btn" id="kgConnectBtn" title="連線模式：點 A → 點 B 建立有向邊">
+                                    連線
+                                </button>
+                                <button class="kg-edit-btn kg-edit-add-node-btn" id="kgAddNodeBtn" title="新增節點">
+                                    + 節點
+                                </button>
+                            </div>
+                            <div class="kg-edit-action-controls" id="kgEditActionControls" style="display: none;">
+                                <button class="kg-edit-btn kg-edit-confirm-btn" id="kgConfirmEditBtn">確認送出</button>
+                                <button class="kg-edit-btn kg-edit-cancel-btn" id="kgCancelEditBtn">取消</button>
+                            </div>
+                            <button class="kg-edit-toggle-btn" id="kgEditToggleBtn" title="進入編輯模式">
+                                編輯
+                            </button>
+                            <!-- View Toggle (existing) -->
+                            <div class="kg-view-toggle" id="kgViewToggle">
+                                <button class="kg-view-btn active" data-view="graph">圖形</button>
+                                <button class="kg-view-btn" data-view="list">列表</button>
+                            </div>
+                            <button class="kg-toggle-button" id="kgToggleButton">
+                                <span id="kgToggleIcon">▼</span> 收起
+                            </button>
+                            <button class="kg-hide-btn" id="kgHideBtn" title="隱藏知識圖譜">
+                                <img src="/static/images/Icon_cancel.png" alt="" class="inline-icon"> 隱藏
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Bug #17: Wrapper for toggle collapse (header stays visible) -->
+                    <div id="kgContentWrapper">
+                        <!-- Graph View -->
+                        <div class="kg-graph-container" id="kgGraphView">
+                            <div class="kg-tooltip" id="kgTooltip"></div>
+                            <!-- Node edit popover (shown on node click in edit mode) -->
+                            <div class="kg-edit-popover" id="kgNodePopover" style="display:none;">
+                                <div class="kg-popover-header">
+                                    <span class="kg-popover-title">編輯節點</span>
+                                    <button class="kg-popover-close" id="kgNodePopoverClose">&times;</button>
+                                </div>
+                                <div class="kg-popover-body">
+                                    <label class="kg-popover-label">名稱</label>
+                                    <input type="text" class="kg-popover-input" id="kgNodeNameInput" placeholder="節點名稱" maxlength="80">
+                                    <label class="kg-popover-label">類型</label>
+                                    <select class="kg-popover-select" id="kgNodeTypeSelect">
+                                        <option value="person">人物</option>
+                                        <option value="organization">組織</option>
+                                        <option value="event">事件</option>
+                                        <option value="location">地點</option>
+                                        <option value="metric">指標</option>
+                                        <option value="technology">技術</option>
+                                        <option value="concept">概念</option>
+                                        <option value="product">產品</option>
+                                        <option value="facility">設施</option>
+                                        <option value="service">服務</option>
+                                    </select>
+                                    <label class="kg-popover-label">描述（選填）</label>
+                                    <input type="text" class="kg-popover-input" id="kgNodeDescInput" placeholder="簡短描述" maxlength="200">
+                                </div>
+                                <div class="kg-popover-footer">
+                                    <button class="kg-popover-btn kg-popover-save-btn" id="kgNodeSaveBtn">儲存</button>
+                                    <button class="kg-popover-btn kg-popover-delete-btn" id="kgNodeDeleteBtn">刪除節點</button>
+                                </div>
+                                <input type="hidden" id="kgNodeEditingId">
+                            </div>
+                            <!-- Edge edit popover (shown on edge click in edit mode) -->
+                            <div class="kg-edit-popover" id="kgEdgePopover" style="display:none;">
+                                <div class="kg-popover-header">
+                                    <span class="kg-popover-title">編輯關係</span>
+                                    <button class="kg-popover-close" id="kgEdgePopoverClose">&times;</button>
+                                </div>
+                                <div class="kg-popover-body">
+                                    <div class="kg-popover-edge-desc" id="kgEdgeDesc"></div>
+                                    <label class="kg-popover-label">關係類型</label>
+                                    <select class="kg-popover-select" id="kgEdgeRelationType">
+                                        <option value="causes">導致 (causes)</option>
+                                        <option value="enables">促成 (enables)</option>
+                                        <option value="prevents">阻止 (prevents)</option>
+                                        <option value="precedes">先於 (precedes)</option>
+                                        <option value="concurrent">同時 (concurrent)</option>
+                                        <option value="part_of">屬於 (part_of)</option>
+                                        <option value="owns">擁有 (owns)</option>
+                                        <option value="related_to">相關 (related_to)</option>
+                                        <option value="custom">自訂...</option>
+                                    </select>
+                                    <input type="text" class="kg-popover-input" id="kgEdgeRelationCustom" style="display:none;" placeholder="輸入自訂關係類型" maxlength="60">
+                                    <label class="kg-popover-label">描述（選填）</label>
+                                    <input type="text" class="kg-popover-input" id="kgEdgeDescInput" placeholder="簡短描述" maxlength="200">
+                                </div>
+                                <div class="kg-popover-footer">
+                                    <button class="kg-popover-btn kg-popover-save-btn" id="kgEdgeSaveBtn">儲存</button>
+                                    <button class="kg-popover-btn kg-popover-delete-btn" id="kgEdgeDeleteBtn">刪除關係</button>
+                                </div>
+                                <input type="hidden" id="kgEdgeEditingId">
+                            </div>
+                        </div>
+                        <!-- List View -->
+                        <div class="kg-display-content" id="kgDisplayContent" style="display: none;">
+                            <!-- KG list content will be populated here -->
+                        </div>
+                        <!-- Legend -->
+                        <div class="kg-legend" id="kgLegend" style="padding: 12px 20px;"></div>
+                        <div class="kg-display-empty" id="kgDisplayEmpty" style="display: none;">
+                            <span class="emoji-bw">ℹ️</span> 此查詢不適合生成知識圖譜（例如：純粹的意見問答或單一數據查詢）
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AI Summary -->
+                <div class="ai-summary" id="aiSummarySection" style="display: none;">
+                    <div class="ai-summary-header">
+                        讀豹生成摘要
+                    </div>
+                    <div id="aiSummaryContent">
+                        <!-- Summary will be populated dynamically from API -->
+                    </div>
+                </div>
+
+                <!-- View Tabs -->
+                <div class="view-tabs">
+                    <button class="tab active" data-view="list">新聞列表</button>
+                    <button class="tab" data-view="timeline">新聞時間軸</button>
+                    <button class="tab" data-view="research">深度研究報告</button>
+                    <button class="tab" data-view="live-research">Live 研究<span class="tab-beta-badge">Beta</span></button>
+                </div>
+
+                <!-- Summary Toggle (for both list and timeline views) -->
+                <div class="summary-toggle active" id="summaryToggle">
+                    <button class="btn-toggle-summary" id="btnToggleSummary"><span class="emoji-bw">📝</span> 展開摘要</button>
+                </div>
+
+                <!-- Summary Loading -->
+                <div class="summary-loading" id="summaryLoading">
+                    摘要生成中...
+                </div>
+
+                <!-- List View -->
+                <div class="news-list" id="listView">
+                    <!-- News cards will be populated dynamically from API -->
+                </div>
+
+                <!-- Timeline View -->
+                <div class="timeline-view" id="timelineView">
+                    <!-- Timeline items will be populated dynamically from API -->
+                </div>
+
+                <!-- Research View (Deep Research Report) -->
+                <div class="research-view" id="researchView">
+                    <!-- Deep research report will be populated dynamically -->
+                </div>
+
+                <!-- Live Research View (Beta) -->
+                <div class="live-research-view" id="liveResearchView">
+                    <!-- Stage 進度條 -->
+                    <div class="lr-stage-progress" id="lrStageProgress">
+                        <div class="lr-stage-dot" data-stage="1">1</div>
+                        <div class="lr-stage-connector"></div>
+                        <div class="lr-stage-dot" data-stage="2">2</div>
+                        <div class="lr-stage-connector"></div>
+                        <div class="lr-stage-dot" data-stage="3">3</div>
+                        <div class="lr-stage-connector"></div>
+                        <div class="lr-stage-dot" data-stage="4">4</div>
+                        <div class="lr-stage-connector"></div>
+                        <div class="lr-stage-dot" data-stage="5">5</div>
+                        <div class="lr-stage-connector"></div>
+                        <div class="lr-stage-dot" data-stage="6">6</div>
+                    </div>
+
+                    <!-- Stage 標籤 -->
+                    <div class="lr-stage-labels" id="lrStageLabels">
+                        <span data-stage="1">建立結構</span>
+                        <span data-stage="2">資料蒐集</span>
+                        <span data-stage="3">寫作準備</span>
+                        <span data-stage="4">格式確認</span>
+                        <span data-stage="5">分段輸出</span>
+                        <span data-stage="6">匯出</span>
+                    </div>
+
+                    <!-- Stage 5 控制列：VP-7 per-section checkpoint 是唯一中斷安全網；
+                         placebo 停止按鈕已移除（移除記錄：2026-06-04，fix(lr)）。 -->
+                    <div class="lr-stage-controls" id="lrStageControls"></div>
+
+                    <!-- 讀豹對話區（narration + checkpoint） -->
+                    <div class="lr-chat" id="lrChat">
+                        <!-- 動態填充：narration 訊息 + checkpoint 提案 -->
+                    </div>
+
+                    <!-- Checkpoint 回覆區（只在 checkpoint 時顯示） -->
+                    <div class="lr-checkpoint-reply" id="lrCheckpointReply" style="display:none;">
+                        <textarea id="lrReplyInput" placeholder="輸入你的回覆..." rows="3"></textarea>
+                        <div class="lr-reply-actions">
+                            <button id="lrBtnReply" class="lr-btn-primary">送出</button>
+                            <button id="lrBtnAutoContine" class="lr-btn-secondary">讀豹決定</button>
+                        </div>
+                    </div>
+
+                    <!-- Track D D2b (sprint 2026-05-28): LR Knowledge Graph Full Display -->
+                    <!-- D-CEO-Q1 LOCKED Option (a): 複用 DR displayKnowledgeGraph 模組 + prefix 化 -->
+                    <!-- D-CEO-Q2 LOCKED Option (c): #lrSections 之前 collapsible 預設展開 -->
+                    <!-- D-CEO-Q3 LOCKED: LR ≥ DR 互動 — 含 Hide/Restore (Step 1b IIFE) -->
+                    <!--                                  + Collapse with header retained (Step 1c IIFE) -->
+                    <!--                                  + node drag / edge editing / popover (DR 既有, knowledge-graph.js 自帶) -->
+                    <!-- D-CEO-Q4 LOCKED Option (β): LR 獨立 #lrKGDisplayContainer + DR module 參數化 -->
+                    <!-- HTML 結構平行 DR #kgDisplayContainer (line 504-623), id 改 lrKG prefix -->
+                    <div class="kg-restore-bar" id="lrKGRestoreBar">
+                        <span class="emoji-bw">📊</span> 知識圖譜已隱藏 — 點擊此處重新顯示
+                    </div>
+
+                    <div class="kg-display-container" id="lrKGDisplayContainer" style="display: none;">
+                        <div class="kg-display-header">
+                            <div class="kg-display-title">
+                                <span class="kg-display-icon"><span class="emoji-bw">📊</span></span>
+                                <span>知識圖譜</span>
+                                <span class="kg-display-metadata" id="lrKGMetadata"></span>
+                            </div>
+                            <div style="display: flex; gap: 12px; align-items: center;">
+                                <!-- Edit Controls (shown in edit mode) -->
+                                <div class="kg-edit-controls" id="lrKGEditControls" style="display: none;">
+                                    <button class="kg-edit-btn kg-edit-connect-btn" id="lrKGConnectBtn" title="連線模式：點 A → 點 B 建立有向邊">
+                                        連線
+                                    </button>
+                                    <button class="kg-edit-btn kg-edit-add-node-btn" id="lrKGAddNodeBtn" title="新增節點">
+                                        + 節點
+                                    </button>
+                                </div>
+                                <div class="kg-edit-action-controls" id="lrKGEditActionControls" style="display: none;">
+                                    <button class="kg-edit-btn kg-edit-confirm-btn" id="lrKGConfirmEditBtn">確認送出</button>
+                                    <button class="kg-edit-btn kg-edit-cancel-btn" id="lrKGCancelEditBtn">取消</button>
+                                </div>
+                                <button class="kg-edit-toggle-btn" id="lrKGEditToggleBtn" title="進入編輯模式">
+                                    編輯
+                                </button>
+                                <!-- View Toggle -->
+                                <div class="kg-view-toggle" id="lrKGViewToggle">
+                                    <button class="kg-view-btn active" data-view="graph">圖形</button>
+                                    <button class="kg-view-btn" data-view="list">列表</button>
+                                </div>
+                                <!-- R2-C1 Collapse with header retained -->
+                                <button class="kg-toggle-button" id="lrKGToggleButton">
+                                    <span id="lrKGToggleIcon">▼</span> 收起
+                                </button>
+                                <!-- R2-I2 Hide button -->
+                                <button class="kg-hide-btn" id="lrKGHideBtn" title="隱藏知識圖譜">
+                                    <img src="/static/images/Icon_cancel.png" alt="" class="inline-icon"> 隱藏
+                                </button>
+                            </div>
+                        </div>
+                        <!-- Wrapper for toggle collapse (header stays visible, parallel DR Bug #17 pattern) -->
+                        <div id="lrKGContentWrapper">
+                            <!-- Graph View -->
+                            <div class="kg-graph-container" id="lrKGGraphView">
+                                <div class="kg-tooltip" id="lrKGTooltip"></div>
+                                <!-- Node edit popover -->
+                                <div class="kg-edit-popover" id="lrKGNodePopover" style="display:none;">
+                                    <div class="kg-popover-header">
+                                        <span class="kg-popover-title">編輯節點</span>
+                                        <button class="kg-popover-close" id="lrKGNodePopoverClose">&times;</button>
+                                    </div>
+                                    <div class="kg-popover-body">
+                                        <label class="kg-popover-label">名稱</label>
+                                        <input type="text" class="kg-popover-input" id="lrKGNodeNameInput" placeholder="節點名稱" maxlength="80">
+                                        <label class="kg-popover-label">類型</label>
+                                        <select class="kg-popover-select" id="lrKGNodeTypeSelect">
+                                            <option value="person">人物</option>
+                                            <option value="organization">組織</option>
+                                            <option value="event">事件</option>
+                                            <option value="location">地點</option>
+                                            <option value="metric">指標</option>
+                                            <option value="technology">技術</option>
+                                            <option value="concept">概念</option>
+                                            <option value="product">產品</option>
+                                            <option value="facility">設施</option>
+                                            <option value="service">服務</option>
+                                        </select>
+                                        <label class="kg-popover-label">描述（選填）</label>
+                                        <input type="text" class="kg-popover-input" id="lrKGNodeDescInput" placeholder="簡短描述" maxlength="200">
+                                    </div>
+                                    <div class="kg-popover-footer">
+                                        <button class="kg-popover-btn kg-popover-save-btn" id="lrKGNodeSaveBtn">儲存</button>
+                                        <button class="kg-popover-btn kg-popover-delete-btn" id="lrKGNodeDeleteBtn">刪除節點</button>
+                                    </div>
+                                    <input type="hidden" id="lrKGNodeEditingId">
+                                </div>
+                                <!-- Edge edit popover -->
+                                <div class="kg-edit-popover" id="lrKGEdgePopover" style="display:none;">
+                                    <div class="kg-popover-header">
+                                        <span class="kg-popover-title">編輯關係</span>
+                                        <button class="kg-popover-close" id="lrKGEdgePopoverClose">&times;</button>
+                                    </div>
+                                    <div class="kg-popover-body">
+                                        <div class="kg-popover-edge-desc" id="lrKGEdgeDesc"></div>
+                                        <label class="kg-popover-label">關係類型</label>
+                                        <select class="kg-popover-select" id="lrKGEdgeRelationType">
+                                            <option value="causes">導致 (causes)</option>
+                                            <option value="enables">促成 (enables)</option>
+                                            <option value="prevents">阻止 (prevents)</option>
+                                            <option value="precedes">先於 (precedes)</option>
+                                            <option value="concurrent">同時 (concurrent)</option>
+                                            <option value="part_of">屬於 (part_of)</option>
+                                            <option value="owns">擁有 (owns)</option>
+                                            <option value="related_to">相關 (related_to)</option>
+                                            <option value="custom">自訂...</option>
+                                        </select>
+                                        <input type="text" class="kg-popover-input" id="lrKGEdgeRelationCustom" style="display:none;" placeholder="輸入自訂關係類型" maxlength="60">
+                                        <label class="kg-popover-label">描述（選填）</label>
+                                        <input type="text" class="kg-popover-input" id="lrKGEdgeDescInput" placeholder="簡短描述" maxlength="200">
+                                    </div>
+                                    <div class="kg-popover-footer">
+                                        <button class="kg-popover-btn kg-popover-save-btn" id="lrKGEdgeSaveBtn">儲存</button>
+                                        <button class="kg-popover-btn kg-popover-delete-btn" id="lrKGEdgeDeleteBtn">刪除關係</button>
+                                    </div>
+                                    <input type="hidden" id="lrKGEdgeEditingId">
+                                </div>
+                            </div>
+                            <!-- List View -->
+                            <div class="kg-display-content" id="lrKGDisplayContent" style="display: none;">
+                                <!-- KG list content will be populated here -->
+                            </div>
+                            <!-- Legend -->
+                            <div class="kg-legend" id="lrKGLegend" style="padding: 12px 20px;"></div>
+                            <div class="kg-display-empty" id="lrKGDisplayEmpty" style="display: none;">
+                                <span class="emoji-bw">ℹ️</span> 此查詢不適合生成知識圖譜
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Section 內容顯示區（Stage 5 產出） -->
+                    <div class="lr-sections" id="lrSections" style="display:none;">
+                        <!-- 動態填充：每個 section 的標題 + 內容 -->
+                    </div>
+
+                    <!-- 最終報告匯出區 -->
+                    <div class="lr-export" id="lrExport" style="display:none;"></div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <!-- Share Modal -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-header">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:8px;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                分享結果
+            </div>
+            <div class="modal-content">
+                <div class="modal-description">將搜尋結果複製到：</div>
+                <div class="copy-options">
+                    <button class="btn-copy" id="btnCopyPlainText">
+                        <span class="btn-copy-icon">
+                            <img src="/static/images/Icon_Copy.png" class="btn-copy-icon-img">
+                        </span>
+                        複製摘要文字
+                    </button>
+                    <button class="btn-copy" id="btnCopyChatGPT">
+                        <span class="btn-copy-icon">
+                            <img src="/static/images/Icon_Chatgpt.png" class="btn-copy-icon-img">
+                        </span>
+                        複製並開啟 ChatGPT
+                    </button>
+                    <button class="btn-copy" id="btnCopyClaude">
+                        <span class="btn-copy-icon">
+                            <img src="/static/images/Icon_Claude.png" class="btn-copy-icon-img">
+                        </span>
+                        複製並開啟 Claude
+                    </button>
+                    <button class="btn-copy" id="btnCopyGemini">
+                        <span class="btn-copy-icon">
+                            <img src="/static/images/Icon_Gemini.png" class="btn-copy-icon-img">
+                        </span>
+                        複製並開啟 Gemini
+                    </button>
+                    <button class="btn-copy" id="btnCopyNotebookLM">
+                        <span class="btn-copy-icon">
+                            <img src="/static/images/Icon_Notebooklm.png" class="btn-copy-icon-img">
+                        </span>
+                        複製並開啟 NotebookLM
+                    </button>
+                    <button class="btn-copy" id="btnCopyNote">
+                        <span class="btn-copy-icon">
+                            <img src="/static/images/Icon_note.png" class="btn-copy-icon-img">
+                        </span>
+                        複製並開啟筆記軟體
+                    </button>
+                </div>
+                <div class="modal-tip">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="#FDCB6E" stroke="none" style="display:inline-block;vertical-align:middle;margin-right:6px;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    內容已包含搜尋結果和自由對話紀錄
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-close-modal" id="btnCloseModal">關閉</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- History Search Popup -->
+    <div class="history-popup-overlay" id="historyPopupOverlay">
+        <div class="history-popup">
+            <div class="history-popup-header">
+                <span class="history-popup-title">輸入關鍵字搜尋紀錄</span>
+                <button class="history-popup-close" id="historyPopupClose">&times;</button>
+            </div>
+            <div class="history-popup-search">
+                <input type="text" id="historyPopupSearchInput" placeholder="搜尋歷史記錄...">
+            </div>
+            <div class="history-popup-list" id="historyPopupList">
+                <div class="history-popup-empty">尚無搜尋記錄</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Analytics Tracker -->
+    <script src="/static/analytics-tracker-sse.js"></script>
+
+    <!-- Marked.js for Markdown rendering -->
+    <script src="/static/marked.min.js"></script>
+
+    <!-- DOMPurify for sanitizing HTML output from marked.js -->
+    <script src="/static/dompurify.min.js"></script>
+
+    <script type="module" src="/static/news-search.js?v=20260611a"></script>
+
+    <!-- D-11 Programmatic Probe — external parser-blocking self-gated script (Phase 1).
+         MUST load BEFORE main.js module so the probe object & EventTarget monkey-patch
+         are installed before any module top-level code runs. Probe activates only when
+         URL has ?phaseProbe=1 or localStorage.__nlweb_dev_mode === '1'. -->
+    <script src="/static/js/phase-gate-probe.js?v=20260521e"></script>
+
+    <!-- ES-module bootstrap entrypoint (Phase 3 Path B). main.js controls all internal module
+         import ordering; external classic <script src> above remain HTML-loaded. -->
+    <script type="module" src="/static/js/main.js?v=20260611a"></script>
+
+    <!-- Org Management Modal -->
+    <div class="org-modal-overlay" id="orgModalOverlay" style="display:none;">
+        <div class="org-modal">
+            <div class="org-modal-header">
+                <h2 class="org-modal-title" id="orgModalTitle">組織管理</h2>
+                <button class="org-modal-close" id="btnCloseOrgModal">&times;</button>
+            </div>
+            <div class="org-modal-body">
+                <div class="org-section">
+                    <h3 class="org-section-title">成員列表</h3>
+                    <div id="orgMembersList"><div class="org-loading">載入中...</div></div>
+                </div>
+                <div class="org-section" id="orgInviteSection" style="display:none;">
+                    <h3 class="org-section-title">邀請成員</h3>
+                    <form class="org-invite-form" id="orgInviteForm">
+                        <input type="text" id="inviteName" placeholder="員工姓名" required>
+                        <input type="email" id="inviteEmail" placeholder="email@example.com" required>
+                        <select id="inviteRole">
+                            <option value="member">成員</option>
+                            <option value="admin">管理員</option>
+                        </select>
+                        <button type="submit" class="btn-invite">建立帳號</button>
+                    </form>
+                    <div class="org-invite-feedback" id="orgInviteFeedback" style="display:none;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Accept Invite Toast -->
+    <div class="accept-invite-toast" id="acceptInviteToast" style="display:none;">
+        <div class="accept-invite-content">
+            <p id="acceptInviteMsg">您已收到組織邀請，是否接受加入？</p>
+            <div class="accept-invite-actions">
+                <button class="btn-accept-invite" id="btnAcceptInvite">接受邀請</button>
+                <button class="btn-decline-invite" id="btnDeclineInvite">略過</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Change Password Modal -->
+    <div class="auth-modal-overlay" id="changePwdModalOverlay" style="display:none;">
+        <div class="auth-modal">
+            <button class="auth-modal-close" id="btnCloseChangePwdModal">&times;</button>
+            <div class="auth-tabs"><span class="auth-tab active">變更密碼</span></div>
+            <form class="auth-form" id="changePwdForm">
+                <div class="auth-form-group">
+                    <label for="currentPassword">目前密碼</label>
+                    <input type="password" id="currentPassword" required autocomplete="current-password" placeholder="目前密碼">
+                </div>
+                <div class="auth-form-group">
+                    <label for="newPassword">新密碼</label>
+                    <input type="password" id="newPassword" required autocomplete="new-password" placeholder="至少 8 字元，含大寫與數字">
+                </div>
+                <div class="auth-form-group">
+                    <label for="confirmNewPassword">確認新密碼</label>
+                    <input type="password" id="confirmNewPassword" required autocomplete="new-password" placeholder="再輸入一次新密碼">
+                </div>
+                <div class="auth-error" id="changePwdError" style="display:none;"></div>
+                <div class="auth-success" id="changePwdSuccess" style="display:none;"></div>
+                <button type="submit" class="auth-submit-btn">確認變更</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Auth Login/Register Modal -->
+    <div class="auth-modal-overlay" id="authModalOverlay" style="display:none;">
+        <div class="auth-modal">
+            <button class="auth-modal-close" id="btnCloseAuthModal">&times;</button>
+            <div class="auth-tabs">
+                <button class="auth-tab active" id="tabLogin" data-tab="login">登入</button>
+            </div>
+            <!-- Login Form -->
+            <form class="auth-form" id="loginForm">
+                <div class="auth-form-group">
+                    <label for="loginEmail">Email</label>
+                    <input type="email" id="loginEmail" required autocomplete="email" placeholder="you@example.com">
+                </div>
+                <div class="auth-form-group">
+                    <label for="loginPassword">密碼</label>
+                    <input type="password" id="loginPassword" required autocomplete="current-password" placeholder="********">
+                </div>
+                <div class="auth-error" id="loginError" style="display:none;"></div>
+                <button type="submit" class="auth-submit-btn">登入</button>
+                <a href="#" class="auth-link" id="btnForgotPassword">忘記密碼?</a>
+            </form>
+            <!-- Register removed — B2B onboarding uses /setup?token=xxx -->
+            <!-- Forgot Password Form -->
+            <form class="auth-form" id="forgotPasswordForm" style="display:none;">
+                <div class="auth-form-group">
+                    <label for="forgotEmail">Email</label>
+                    <input type="email" id="forgotEmail" required placeholder="you@example.com">
+                </div>
+                <div class="auth-error" id="forgotError" style="display:none;"></div>
+                <div class="auth-success" id="forgotSuccess" style="display:none;"></div>
+                <button type="submit" class="auth-submit-btn">發送重設連結</button>
+                <a href="#" class="auth-link" id="btnBackToLogin">返回登入</a>
+            </form>
+        </div>
+    </div>
+
+    <!-- Feedback Modal (main page) -->
+    <div class="feedback-modal-overlay" id="feedbackModalOverlay" style="display:none;">
+        <div class="feedback-modal">
+            <div class="feedback-modal-header">
+                <span>意見回饋</span>
+                <button class="feedback-modal-close" id="btnCloseFeedbackMain">&times;</button>
+            </div>
+            <div class="feedback-modal-body" id="feedbackModalBody">
+                <div class="fb-form-group">
+                    <label>問題類別 <span style="color:red">*</span></label>
+                    <div class="fb-radio-group" id="mainFbCategories">
+                        <button class="fb-radio-btn" data-val="bug">Bug 回報</button>
+                        <button class="fb-radio-btn" data-val="feature">功能建議</button>
+                        <button class="fb-radio-btn" data-val="content">內容錯誤</button>
+                        <button class="fb-radio-btn" data-val="other">其他</button>
+                    </div>
+                </div>
+                <div class="fb-form-group">
+                    <label>評分 <span style="color:red">*</span></label>
+                    <div class="fb-stars" id="mainFbStars">
+                        <span class="fb-star" data-val="1">★</span>
+                        <span class="fb-star" data-val="2">★</span>
+                        <span class="fb-star" data-val="3">★</span>
+                        <span class="fb-star" data-val="4">★</span>
+                        <span class="fb-star" data-val="5">★</span>
+                    </div>
+                </div>
+                <div class="fb-form-group">
+                    <label>說明 <span style="color:red">*</span>（10–500 字）</label>
+                    <textarea class="fb-textarea" id="mainFbContent" rows="3" placeholder="請描述您的問題或建議..." maxlength="500"></textarea>
+                </div>
+                <div class="fb-form-group">
+                    <label>截圖（選填，JPG/PNG）</label>
+                    <input type="file" id="mainFbScreenshot" accept="image/jpeg,image/png" style="font-size:13px;">
+                </div>
+                <div class="fb-form-group">
+                    <label>Email（選填）</label>
+                    <input type="email" id="mainFbEmail" placeholder="your@email.com" class="fb-email-input">
+                </div>
+                <div class="fb-error" id="mainFbError"></div>
+            </div>
+            <div class="feedback-modal-footer" id="feedbackModalFooter">
+                <button class="btn-cancel" id="btnCancelFeedbackMain">取消</button>
+                <button class="btn-save" id="btnSubmitFeedbackMain">送出意見回饋</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/feedback-modal.js"></script>
+
+</body>
+</html>

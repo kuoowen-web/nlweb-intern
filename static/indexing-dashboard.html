@@ -1,0 +1,2843 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Indexing Dashboard - NLWeb</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #1e3a5f 0%, #2d5a7b 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            margin-bottom: 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: #1e3a5f;
+            font-size: 28px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+        }
+
+        .connection-status.connected {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .connection-status.disconnected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .connected .status-dot {
+            background: #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        .disconnected .status-dot {
+            background: #ef4444;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Tab Navigation */
+        .tab-nav {
+            background: white;
+            padding: 0 20px;
+            border-radius: 12px 12px 0 0;
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1);
+            display: flex;
+            gap: 5px;
+        }
+
+        .tab-btn {
+            background: none;
+            border: none;
+            padding: 15px 25px;
+            font-weight: 600;
+            color: #666;
+            cursor: pointer;
+            font-size: 15px;
+            border-bottom: 3px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .tab-btn:hover {
+            color: #1e3a5f;
+        }
+
+        .tab-btn.active {
+            color: #1e3a5f;
+            border-bottom-color: #1e3a5f;
+        }
+
+        .tab-content {
+            display: none;
+            background: white;
+            border-radius: 0 0 12px 12px;
+            padding: 30px;
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1);
+            margin-bottom: 30px;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+            padding: 25px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+        }
+
+        .stat-label {
+            font-size: 13px;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #1e3a5f;
+        }
+
+        .stat-sub {
+            font-size: 12px;
+            color: #94a3b8;
+            margin-top: 5px;
+        }
+
+        /* Source Breakdown */
+        .source-breakdown {
+            background: #f8fafc;
+            border-radius: 12px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .source-breakdown h3 {
+            color: #1e3a5f;
+            font-size: 16px;
+            margin-bottom: 15px;
+        }
+
+        .source-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+        }
+
+        .source-item {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 12px 15px;
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .source-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .source-name {
+            font-weight: 600;
+            color: #334155;
+            font-size: 15px;
+        }
+
+        .source-count {
+            font-weight: bold;
+            color: #1e3a5f;
+            background: #e0f2fe;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 13px;
+        }
+
+        .source-dates {
+            display: flex;
+            gap: 15px;
+            font-size: 12px;
+            color: #64748b;
+        }
+
+        .source-dates span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .date-label {
+            color: #94a3b8;
+        }
+
+        /* Crawler Controls */
+        .crawler-controls {
+            background: #f8fafc;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 25px;
+        }
+
+        .control-row {
+            display: flex;
+            gap: 15px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .control-group > label {
+            font-size: 13px;
+            font-weight: 600;
+            color: #64748b;
+        }
+
+        .control-group > select,
+        .control-group > input {
+            padding: 10px 15px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+            min-width: 150px;
+        }
+
+        .control-group > select:focus,
+        .control-group > input:focus {
+            outline: none;
+            border-color: #1e3a5f;
+        }
+
+        .btn {
+            padding: 10px 25px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #1e3a5f;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #2d5a7b;
+            transform: translateY(-2px);
+        }
+
+        .btn-primary:disabled {
+            background: #94a3b8;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #334155;
+        }
+
+        .btn-secondary:hover {
+            background: #cbd5e1;
+        }
+
+        /* Task List */
+        .task-list {
+            margin-top: 25px;
+        }
+
+        .task-list h3 {
+            color: #1e3a5f;
+            font-size: 18px;
+            margin-bottom: 15px;
+        }
+
+        /* Task Filter Bar */
+        .task-filter-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .task-status-tabs {
+            display: flex;
+            gap: 4px;
+            background: #f1f5f9;
+            padding: 4px;
+            border-radius: 8px;
+        }
+
+        .task-status-tab {
+            padding: 6px 14px;
+            border: none;
+            border-radius: 6px;
+            background: transparent;
+            color: #64748b;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+
+        .task-status-tab:hover {
+            color: #334155;
+            background: #e2e8f0;
+        }
+
+        .task-status-tab.active {
+            background: white;
+            color: #1e3a5f;
+            font-weight: 600;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+
+        .task-status-tab .tab-count {
+            display: inline-block;
+            min-width: 18px;
+            text-align: center;
+            padding: 1px 5px;
+            border-radius: 10px;
+            font-size: 11px;
+            margin-left: 4px;
+            background: #e2e8f0;
+            color: #64748b;
+        }
+
+        .task-status-tab.active .tab-count {
+            background: #1e3a5f;
+            color: white;
+        }
+
+        .task-source-filter select {
+            padding: 7px 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 13px;
+            background: white;
+            color: #334155;
+            cursor: pointer;
+            min-width: 140px;
+        }
+
+        .task-source-filter select:focus {
+            outline: none;
+            border-color: #1e3a5f;
+        }
+
+        .task-item {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 15px;
+            transition: box-shadow 0.2s;
+        }
+
+        .task-item:hover {
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
+        }
+
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .task-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .task-source {
+            font-weight: 600;
+            color: #1e3a5f;
+            font-size: 16px;
+        }
+
+        .task-mode {
+            background: #e0f2fe;
+            color: #0369a1;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .task-status {
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .task-status.running {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .task-status.completed {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .task-status.failed {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .task-status.stopping {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .task-status.early_stopped {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .early-stop-reason {
+            color: #92400e;
+            background: #fef3c7;
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-top: 10px;
+            font-size: 13px;
+        }
+
+        .task-progress {
+            margin-bottom: 15px;
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: #e2e8f0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #1e3a5f, #2d5a7b);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 8px;
+            font-size: 13px;
+            color: #64748b;
+        }
+
+        .task-stats {
+            display: flex;
+            gap: 20px;
+            font-size: 13px;
+            color: #64748b;
+        }
+
+        .task-stats span {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .task-stats .success { color: #059669; }
+        .task-stats .failed { color: #dc2626; }
+        .task-stats .skipped { color: #d97706; }
+
+        .task-actions {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #94a3b8;
+        }
+
+        .empty-state p {
+            font-size: 15px;
+        }
+
+        /* Refresh indicator */
+        .refresh-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #64748b;
+            font-size: 13px;
+        }
+
+        .refresh-info button {
+            background: none;
+            border: none;
+            color: #1e3a5f;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        .refresh-info button:hover {
+            transform: rotate(180deg);
+            transition: transform 0.3s;
+        }
+
+        /* Error message */
+        .error-banner {
+            background: #fee2e2;
+            border: 1px solid #fecaca;
+            color: #991b1b;
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .error-banner.show {
+            display: block;
+        }
+
+        /* Error badge */
+        .error-badge {
+            background: #ef4444;
+            color: white;
+            font-size: 11px;
+            padding: 2px 6px;
+            border-radius: 10px;
+            margin-left: 5px;
+        }
+
+        /* Coverage / Reference Points */
+        .coverage-source {
+            background: #f8fafc;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .coverage-source h3 {
+            color: #1e3a5f;
+            font-size: 16px;
+            margin-bottom: 5px;
+        }
+
+        .coverage-source .coverage-subtitle {
+            color: #94a3b8;
+            font-size: 13px;
+            margin-bottom: 15px;
+        }
+
+        .coverage-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .coverage-table th,
+        .coverage-table td {
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 13px;
+        }
+
+        .coverage-table th {
+            background: #f1f5f9;
+            font-weight: 600;
+            color: #64748b;
+            text-transform: uppercase;
+            font-size: 11px;
+        }
+
+        .ref-status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .ref-status.found {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .ref-status.confirmed_404 {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .ref-status.not_scanned {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .coverage-summary {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+
+        .coverage-summary-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #475569;
+        }
+
+        .coverage-summary-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .coverage-month-bar {
+            display: flex;
+            gap: 3px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .coverage-month-cell {
+            width: 32px;
+            height: 24px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            color: white;
+            font-weight: 500;
+            cursor: default;
+        }
+
+        .coverage-month-cell.has-data {
+            background: #22c55e;
+        }
+
+        .coverage-month-cell.no-data {
+            background: #e2e8f0;
+            color: #94a3b8;
+        }
+
+        /* Error table */
+        .error-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+        .error-table th,
+        .error-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .error-table th {
+            background: #f8fafc;
+            font-weight: 600;
+            color: #64748b;
+            font-size: 13px;
+            text-transform: uppercase;
+        }
+
+        .error-table tr:hover {
+            background: #f8fafc;
+        }
+
+        .error-type-badge {
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .error-type-badge.blocked {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .error-type-badge.parse_error,
+        .error-type-badge.parse_exception {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .error-type-badge.fetch_error {
+            background: #e0e7ff;
+            color: #3730a3;
+        }
+
+        .error-type-badge.save_error {
+            background: #fce7f3;
+            color: #9d174d;
+        }
+
+        .url-cell {
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: monospace;
+            font-size: 13px;
+        }
+
+        .error-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .error-filters {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .error-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .retry-count {
+            font-size: 12px;
+            color: #64748b;
+            background: #f1f5f9;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        /* Error type dropdown */
+        .error-type-dropdown {
+            position: relative;
+        }
+
+        .dropdown-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 10px 15px;
+            min-width: 160px;
+            background: white;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: border-color 0.2s;
+            white-space: nowrap;
+        }
+
+        .dropdown-toggle:hover {
+            border-color: #cbd5e1;
+        }
+
+        .dropdown-toggle.open {
+            border-color: #1e3a5f;
+            border-bottom-left-radius: 0;
+            border-bottom-right-radius: 0;
+        }
+
+        .dropdown-toggle .arrow {
+            transition: transform 0.2s;
+        }
+
+        .dropdown-toggle.open .arrow {
+            transform: rotate(180deg);
+        }
+
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            min-width: 200px;
+            background: white;
+            border: 2px solid #1e3a5f;
+            border-top: none;
+            border-bottom-left-radius: 8px;
+            border-bottom-right-radius: 8px;
+            padding: 8px 0;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+
+        .dropdown-menu.open {
+            display: block;
+        }
+
+        .dropdown-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 15px;
+            cursor: pointer;
+            transition: background 0.15s;
+            white-space: nowrap;
+        }
+
+        .dropdown-item:hover {
+            background: #f8fafc;
+        }
+
+        .dropdown-item input[type="checkbox"] {
+            flex-shrink: 0;
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+            accent-color: #1e3a5f;
+        }
+
+        .dropdown-item label {
+            flex: 1;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 400;
+            color: #334155;
+            white-space: nowrap;
+            display: inline;
+        }
+
+        .dropdown-item .count {
+            flex-shrink: 0;
+            font-size: 12px;
+            color: #64748b;
+            background: #f1f5f9;
+            padding: 2px 8px;
+            border-radius: 10px;
+            min-width: 28px;
+            text-align: center;
+        }
+
+        .selected-count {
+            font-weight: 500;
+            color: #64748b;
+            font-size: 14px;
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        /* Filter summary badges */
+        .filter-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 10px;
+        }
+
+        .filter-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            background: #e0f2fe;
+            color: #0369a1;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .filter-badge .remove {
+            cursor: pointer;
+            opacity: 0.7;
+        }
+
+        .filter-badge .remove:hover {
+            opacity: 1;
+        }
+
+        /* Multi-select styling */
+        select[multiple] {
+            padding: 8px;
+        }
+
+        select[multiple] option {
+            padding: 8px 12px;
+            margin: 2px 0;
+            border-radius: 4px;
+        }
+
+        select[multiple] option:checked {
+            background: linear-gradient(135deg, #1e3a5f 0%, #2d5a7b 100%);
+            color: white;
+        }
+
+        /* Backfill source cards */
+        .backfill-source-card {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+
+        .backfill-source-card.complete {
+            border-color: #10b981;
+            background: #f0fdf4;
+        }
+
+        /* Source coverage - clickable cards */
+        .coverage-source-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .coverage-source-card {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            overflow: hidden;
+            transition: box-shadow 0.2s;
+        }
+
+        .coverage-source-card:hover {
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+
+        .coverage-source-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 18px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .coverage-source-header:hover {
+            background: #f8fafc;
+        }
+
+        .coverage-source-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .coverage-source-left .arrow {
+            font-size: 12px;
+            color: #94a3b8;
+            transition: transform 0.2s;
+        }
+
+        .coverage-source-card.expanded .coverage-source-left .arrow {
+            transform: rotate(90deg);
+        }
+
+        .coverage-source-name {
+            font-weight: 600;
+            color: #334155;
+            font-size: 15px;
+        }
+
+        .coverage-source-total {
+            font-weight: bold;
+            color: #1e3a5f;
+            background: #e0f2fe;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 13px;
+        }
+
+        .coverage-monthly-panel {
+            display: none;
+            border-top: 1px solid #e2e8f0;
+            padding: 12px 18px;
+            background: #f8fafc;
+        }
+
+        .coverage-source-card.expanded .coverage-monthly-panel {
+            display: block;
+        }
+
+        .coverage-monthly-loading {
+            text-align: center;
+            color: #94a3b8;
+            padding: 15px;
+            font-size: 13px;
+        }
+
+        .coverage-monthly-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 6px;
+        }
+
+        .coverage-month-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 10px;
+            background: white;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+            font-size: 13px;
+        }
+
+        .coverage-month-label {
+            color: #64748b;
+            font-family: monospace;
+        }
+
+        .coverage-month-count {
+            font-weight: 600;
+            color: #1e3a5f;
+        }
+
+        .coverage-month-item.low {
+            border-color: #fbbf24;
+            background: #fffbeb;
+        }
+
+        .coverage-month-item.zero {
+            border-color: #f87171;
+            background: #fef2f2;
+        }
+
+        .coverage-month-item.zero .coverage-month-count {
+            color: #dc2626;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>Indexing Dashboard</h1>
+                <p>Crawler and indexing pipeline management</p>
+            </div>
+            <div id="connectionStatus" class="connection-status disconnected">
+                <span class="status-dot"></span>
+                <span class="status-text">Disconnected</span>
+            </div>
+        </div>
+
+        <div id="errorBanner" class="error-banner"></div>
+
+        <div class="tab-nav">
+            <button class="tab-btn active" data-tab="statistics">Statistics</button>
+            <button class="tab-btn" data-tab="crawler">Crawler</button>
+            <button class="tab-btn" data-tab="fullscan">Full Scan</button>
+            <button class="tab-btn" data-tab="coverage">Coverage</button>
+            <button class="tab-btn" data-tab="errors">Errors <span id="errorBadge" class="error-badge" style="display:none">0</span></button>
+        </div>
+
+        <!-- Statistics Tab -->
+        <div id="statistics-tab" class="tab-content active">
+            <div class="stats-grid" id="statsGrid">
+                <div class="stat-card">
+                    <div class="stat-label">Total Articles</div>
+                    <div class="stat-value" id="totalArticles">-</div>
+                    <div class="stat-sub">In Registry</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Vectors</div>
+                    <div class="stat-value" id="totalVectors">-</div>
+                    <div class="stat-sub">In Qdrant</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Sources</div>
+                    <div class="stat-value" id="totalSources">-</div>
+                    <div class="stat-sub">Available</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Last Updated</div>
+                    <div class="stat-value" id="lastUpdated" style="font-size: 18px;">-</div>
+                    <div class="stat-sub">
+                        <span class="refresh-info">
+                            Auto-refresh: 30s
+                            <button id="loadStatsBtn" title="Refresh now">&#8635;</button>
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="source-breakdown">
+                <h3>Articles by Source</h3>
+                <div class="source-list" id="sourceList">
+                    <!-- Populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Crawler Tab -->
+        <div id="crawler-tab" class="tab-content">
+            <div class="crawler-controls">
+                <div class="control-row">
+                    <div class="control-group">
+                        <label>Source</label>
+                        <select id="crawlerSource">
+                            <!-- Populated by JavaScript -->
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Mode</label>
+                        <select id="crawlerMode" title="Auto: Daily updates | List Page: CNA category pages">
+                            <option value="auto">Auto (Latest)</option>
+                            <option value="list_page">List Page (CNA)</option>
+                        </select>
+                    </div>
+                    <div class="control-group" id="countGroup">
+                        <label>Max Count</label>
+                        <input type="number" id="crawlerCount" value="500" min="1" max="5000">
+                    </div>
+                    <div class="control-group" id="stopSkipsGroup">
+                        <label>Stop After Skips</label>
+                        <input type="number" id="stopAfterSkips" value="10" min="1" max="100" title="Stop after N consecutive already-crawled articles">
+                    </div>
+                    <div class="control-group" id="listPageLimitGroup" style="display: none;">
+                        <label>Limit (0=all)</label>
+                        <input type="number" id="listPageLimit" value="0" min="0" title="Max articles to crawl (0 = no limit)">
+                    </div>
+                </div>
+                <div class="control-row" style="margin-top: 15px;">
+                    <div class="control-group">
+                        <label>Chunk Size</label>
+                        <input type="number" id="chunkSize" value="0" min="0" max="50000" title="Split output every N articles (0 = no limit)">
+                    </div>
+                    <div class="control-group">
+                        <label style="display: flex; align-items: center; gap: 8px;">
+                            <input type="checkbox" id="chunkByMonth" style="width: 16px; height: 16px;">
+                            Chunk by Month
+                        </label>
+                    </div>
+                    <button class="btn btn-primary" id="startCrawlerBtn">
+                        Start Crawler
+                    </button>
+                </div>
+            </div>
+
+            <div class="task-list">
+                <h3>Crawler Tasks</h3>
+                <div class="task-filter-bar">
+                    <div class="task-status-tabs">
+                        <button class="task-status-tab active" data-status="all">All <span class="tab-count" id="taskCount-all">0</span></button>
+                        <button class="task-status-tab" data-status="running">Running <span class="tab-count" id="taskCount-running">0</span></button>
+                        <button class="task-status-tab" data-status="completed">Completed <span class="tab-count" id="taskCount-completed">0</span></button>
+                        <button class="task-status-tab" data-status="failed">Failed <span class="tab-count" id="taskCount-failed">0</span></button>
+                        <button class="task-status-tab" data-status="stopped">Stopped <span class="tab-count" id="taskCount-stopped">0</span></button>
+                    </div>
+                    <div class="task-source-filter">
+                        <select id="taskSourceFilter">
+                            <option value="">All Sources</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="taskList">
+                    <div class="empty-state">
+                        <p>No crawler tasks. Start one above to begin crawling.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Full Scan Tab -->
+        <div id="fullscan-tab" class="tab-content">
+            <div class="crawler-controls">
+                <h3 style="margin-bottom: 15px; color: #1e3a5f;">Full Scan (Complete ID Range)</h3>
+                <p style="margin-bottom: 20px; color: #64748b; font-size: 14px;">
+                    Scan every ID in the valid range. No interpolation, no early stop on 404. Guaranteed complete coverage.
+                </p>
+
+                <div class="control-row">
+                    <div class="control-group">
+                        <label>Sources</label>
+                        <select id="fullscanSources" multiple style="min-height: 120px; min-width: 200px;">
+                            <option value="udn" selected>UDN (Sequential: 7.8M+)</option>
+                            <option value="ltn" selected>LTN (Sequential: 3M+)</option>
+                            <option value="einfo" selected>EInfo (Sequential: 230K+)</option>
+                            <option value="cna">CNA (Date-based)</option>
+                            <option value="esg_businesstoday">ESG BT (Date-based)</option>
+                            <option value="chinatimes">Chinatimes (Date-based)</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Start Date (date-based)</label>
+                        <input type="text" id="fullscanDateFrom" value="2024-01-01" placeholder="YYYY-MM-DD">
+                    </div>
+                    <div class="control-group">
+                        <label>End Date (date-based)</label>
+                        <input type="text" id="fullscanDateTo" value="" placeholder="YYYY-MM-DD (today)">
+                    </div>
+                    <button class="btn btn-primary" id="startFullscanBtn">
+                        Start Full Scan
+                    </button>
+                </div>
+            </div>
+
+            <!-- Source Coverage Status -->
+            <div class="source-breakdown" style="margin-top: 20px;">
+                <h3>Source Coverage Status</h3>
+                <p style="color: #64748b; font-size: 13px; margin-bottom: 12px;">Click a source to see monthly article counts</p>
+                <div id="fullscanSourceStatus" class="coverage-source-list">
+                    <div class="empty-state"><p>Loading...</p></div>
+                </div>
+            </div>
+
+            <!-- Active Full Scan Tasks -->
+            <div class="task-list" style="margin-top: 25px;">
+                <h3>Full Scan Tasks</h3>
+                <div id="fullscanTaskList">
+                    <div class="empty-state">
+                        <p>No full scan tasks running. Select sources and click Start Full Scan.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Coverage Tab -->
+        <div id="coverage-tab" class="tab-content">
+            <h2 style="color: #1e3a5f; margin-bottom: 10px;">Coverage Reference Points</h2>
+            <p style="color: #64748b; font-size: 14px; margin-bottom: 20px;">
+                Validates known article IDs at specific dates to verify full scan coverage.
+                <strong>found</strong> = successfully crawled,
+                <strong>confirmed_404</strong> = article does not exist,
+                <strong>not_scanned</strong> = not yet scanned.
+            </p>
+            <div id="coverageContent">
+                <p style="color: #94a3b8;">Loading...</p>
+            </div>
+        </div>
+
+        <!-- Errors Tab -->
+        <div id="errors-tab" class="tab-content">
+            <div class="error-controls">
+                <div class="error-filters">
+                    <div class="control-group">
+                        <label>Source</label>
+                        <select id="errorSourceFilter">
+                            <option value="">All Sources</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Error Types</label>
+                        <div class="error-type-dropdown" id="errorTypeDropdown">
+                            <div class="dropdown-toggle" id="errorTypeDropdownToggle">
+                                <span id="dropdownLabel">All Types</span>
+                                <span class="arrow">&#9662;</span>
+                            </div>
+                            <div class="dropdown-menu" id="dropdownMenu">
+                                <div class="dropdown-item">
+                                    <input type="checkbox" id="type_blocked" value="blocked" checked>
+                                    <label for="type_blocked">Blocked</label>
+                                    <span class="count" id="count_blocked">0</span>
+                                </div>
+                                <div class="dropdown-item">
+                                    <input type="checkbox" id="type_parse_error" value="parse_error" checked>
+                                    <label for="type_parse_error">Parse Error</label>
+                                    <span class="count" id="count_parse_error">0</span>
+                                </div>
+                                <div class="dropdown-item">
+                                    <input type="checkbox" id="type_parse_exception" value="parse_exception" checked>
+                                    <label for="type_parse_exception">Parse Exception</label>
+                                    <span class="count" id="count_parse_exception">0</span>
+                                </div>
+                                <div class="dropdown-item">
+                                    <input type="checkbox" id="type_fetch_error" value="fetch_error" checked>
+                                    <label for="type_fetch_error">Fetch Error</label>
+                                    <span class="count" id="count_fetch_error">0</span>
+                                </div>
+                                <div class="dropdown-item">
+                                    <input type="checkbox" id="type_save_error" value="save_error" checked>
+                                    <label for="type_save_error">Save Error</label>
+                                    <span class="count" id="count_save_error">0</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <button class="btn btn-secondary" id="loadAllErrorsBtn">Refresh</button>
+                </div>
+                <div class="error-actions">
+                    <span class="selected-count" id="selectedCount">0 URLs</span>
+                    <button class="btn btn-primary" id="retryAllBtn" disabled>
+                        Retry All
+                    </button>
+                    <button class="btn btn-danger" id="clearErrorsBtn">
+                        Clear All
+                    </button>
+                </div>
+            </div>
+
+            <div class="stats-grid" style="margin-bottom: 20px;">
+                <div class="stat-card">
+                    <div class="stat-label">Total Failed</div>
+                    <div class="stat-value" id="totalFailed">0</div>
+                    <div class="stat-sub">URLs with errors</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">By Source</div>
+                    <div id="failedBySource" style="font-size: 14px; margin-top: 10px;">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">By Error Type</div>
+                    <div id="failedByType" style="font-size: 14px; margin-top: 10px;">-</div>
+                </div>
+            </div>
+
+            <div id="errorTableContainer">
+                <table class="error-table">
+                    <thead>
+                        <tr>
+                            <th>URL</th>
+                            <th>Source</th>
+                            <th>Error Type</th>
+                            <th>Message</th>
+                            <th>Retries</th>
+                            <th>Failed At</th>
+                        </tr>
+                    </thead>
+                    <tbody id="errorTableBody">
+                        <tr>
+                            <td colspan="6" class="empty-state">
+                                <p>No failed URLs</p>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const API_BASE = '';
+
+        let websocket = null;
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 5;
+
+        // Debounce helper: delays execution until calls stop for `delay` ms
+        let _fullscanDebounceTimer = null;
+        function loadFullScanStatusDebounced(delay = 3000) {
+            if (_fullscanDebounceTimer) clearTimeout(_fullscanDebounceTimer);
+            _fullscanDebounceTimer = setTimeout(() => {
+                _fullscanDebounceTimer = null;
+                loadFullScanStatus();
+            }, delay);
+        }
+
+        // ==================== Tab Switching ====================
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+
+            event.target.classList.add('active');
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+
+            if (tabName === 'crawler') {
+                loadSources();
+            } else if (tabName === 'fullscan') {
+                loadFullScanStatus();
+            } else if (tabName === 'coverage') {
+                loadReferencePoints();
+            } else if (tabName === 'errors') {
+                loadAllErrors();
+                populateErrorSourceFilter();
+            }
+        }
+
+        // ==================== Statistics ====================
+        async function loadStats() {
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/stats`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+                const data = await res.json();
+
+                // Update stats cards
+                document.getElementById('totalArticles').textContent =
+                    formatNumber(data.registry?.total_articles || 0);
+                document.getElementById('totalVectors').textContent =
+                    formatNumber(data.qdrant?.vectors_count || 0);
+                document.getElementById('lastUpdated').textContent =
+                    new Date(data.timestamp * 1000).toLocaleTimeString();
+
+                // Update source breakdown with date ranges
+                const sourceList = document.getElementById('sourceList');
+                const bySource = data.registry?.by_source || {};
+                const dateRanges = data.registry?.date_ranges || {};
+
+                if (Object.keys(bySource).length === 0) {
+                    sourceList.innerHTML = '<div class="empty-state"><p>No articles crawled yet</p></div>';
+                } else {
+                    sourceList.innerHTML = Object.entries(bySource)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([source, count]) => {
+                            const range = dateRanges[source] || {};
+                            const oldest = range.oldest ? formatDateShort(range.oldest) : '-';
+                            const newest = range.newest ? formatDateShort(range.newest) : '-';
+
+                            return `
+                                <div class="source-item">
+                                    <div class="source-header">
+                                        <span class="source-name">${source}</span>
+                                        <span class="source-count">${formatNumber(count)}</span>
+                                    </div>
+                                    <div class="source-dates">
+                                        <span><span class="date-label">Oldest:</span> ${oldest}</span>
+                                        <span><span class="date-label">Newest:</span> ${newest}</span>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('');
+                }
+
+                hideError();
+            } catch (error) {
+                console.error('Failed to load stats:', error);
+                showError(`Failed to load statistics: ${error.message}`);
+            }
+        }
+
+        async function loadSources() {
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/sources`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+                const data = await res.json();
+
+                const select = document.getElementById('crawlerSource');
+                select.innerHTML = data.sources.map(s =>
+                    `<option value="${s.id}">${s.name} (${s.id})</option>`
+                ).join('');
+
+                document.getElementById('totalSources').textContent = data.count;
+            } catch (error) {
+                console.error('Failed to load sources:', error);
+            }
+        }
+
+        // ==================== Crawler Control ====================
+        document.getElementById('crawlerMode').addEventListener('change', function() {
+            const mode = this.value;
+            const isAuto = mode === 'auto';
+            const isListPage = mode === 'list_page';
+
+            document.getElementById('countGroup').style.display = isAuto ? 'flex' : 'none';
+            document.getElementById('stopSkipsGroup').style.display = isAuto ? 'flex' : 'none';
+            document.getElementById('listPageLimitGroup').style.display = isListPage ? 'flex' : 'none';
+        });
+
+        async function startCrawler() {
+            const source = document.getElementById('crawlerSource').value;
+            const mode = document.getElementById('crawlerMode').value;
+
+            const body = { source, mode };
+
+            if (mode === 'auto') {
+                body.count = parseInt(document.getElementById('crawlerCount').value);
+                body.stop_after_skips = parseInt(document.getElementById('stopAfterSkips').value);
+            } else if (mode === 'list_page') {
+                const limit = parseInt(document.getElementById('listPageLimit').value) || 0;
+                if (limit > 0) body.limit = limit;
+            }
+
+            // Chunk settings
+            const chunkSize = parseInt(document.getElementById('chunkSize').value);
+            if (chunkSize > 0) {
+                body.chunk_size = chunkSize;
+            }
+            if (document.getElementById('chunkByMonth').checked) {
+                body.chunk_by_month = true;
+            }
+
+            const btn = document.getElementById('startCrawlerBtn');
+            btn.disabled = true;
+            btn.textContent = 'Starting...';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/crawler/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || `HTTP ${res.status}`);
+                }
+
+                hideError();
+                // Task will be updated via WebSocket
+            } catch (error) {
+                console.error('Failed to start crawler:', error);
+                showError(`Failed to start crawler: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Start Crawler';
+            }
+        }
+
+        async function stopCrawler(taskId) {
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/crawler/stop`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ task_id: taskId })
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || `HTTP ${res.status}`);
+                }
+            } catch (error) {
+                console.error('Failed to stop crawler:', error);
+                showError(`Failed to stop crawler: ${error.message}`);
+            }
+        }
+
+        async function resumeCrawler(taskId) {
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/crawler/resume`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ task_id: taskId })
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || `HTTP ${res.status}`);
+                }
+
+                hideError();
+                // New task will appear via WebSocket update
+            } catch (error) {
+                console.error('Failed to resume crawler:', error);
+                showError(`Failed to resume: ${error.message}`);
+            }
+        }
+
+        // ==================== Task Filters ====================
+        let allCrawlerTasks = [];
+        let taskStatusFilter = 'all';
+
+        function setTaskStatusFilter(status, btn) {
+            taskStatusFilter = status;
+            document.querySelectorAll('.task-status-tab').forEach(t => t.classList.remove('active'));
+            btn.classList.add('active');
+            applyTaskFilters();
+        }
+
+        function applyTaskFilters() {
+            const sourceFilter = document.getElementById('taskSourceFilter').value;
+
+            let filtered = allCrawlerTasks;
+
+            // Status filter
+            if (taskStatusFilter !== 'all') {
+                if (taskStatusFilter === 'stopped') {
+                    filtered = filtered.filter(t => ['stopping', 'early_stopped'].includes(t.status));
+                } else {
+                    filtered = filtered.filter(t => t.status === taskStatusFilter);
+                }
+            }
+
+            // Source filter
+            if (sourceFilter) {
+                filtered = filtered.filter(t => t.source === sourceFilter);
+            }
+
+            renderFilteredTasks(filtered);
+        }
+
+        function updateTaskCounts() {
+            const counts = { all: allCrawlerTasks.length, running: 0, completed: 0, failed: 0, stopped: 0 };
+            allCrawlerTasks.forEach(t => {
+                if (t.status === 'running') counts.running++;
+                else if (t.status === 'completed') counts.completed++;
+                else if (t.status === 'failed') counts.failed++;
+                else if (['stopping', 'early_stopped'].includes(t.status)) counts.stopped++;
+            });
+            Object.entries(counts).forEach(([key, val]) => {
+                const el = document.getElementById(`taskCount-${key}`);
+                if (el) el.textContent = val;
+            });
+        }
+
+        function updateTaskSourceDropdown() {
+            const select = document.getElementById('taskSourceFilter');
+            const current = select.value;
+            const sources = [...new Set(allCrawlerTasks.map(t => t.source))].sort();
+
+            select.innerHTML = '<option value="">All Sources</option>' +
+                sources.map(s => `<option value="${s}"${s === current ? ' selected' : ''}>${s}</option>`).join('');
+        }
+
+        function renderTasks(tasks) {
+            allCrawlerTasks = tasks || [];
+            updateTaskCounts();
+            updateTaskSourceDropdown();
+            applyTaskFilters();
+        }
+
+        function renderFilteredTasks(tasks) {
+            const container = document.getElementById('taskList');
+
+            if (!tasks || tasks.length === 0) {
+                const msg = taskStatusFilter === 'all'
+                    ? 'No crawler tasks. Start one above to begin crawling.'
+                    : `No ${taskStatusFilter} tasks.`;
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <p>${msg}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Sort by started_at descending
+            tasks.sort((a, b) => b.started_at - a.started_at);
+
+            container.innerHTML = tasks.map(task => {
+                const progress = task.total > 0 ? (task.progress / task.total * 100).toFixed(0) : 0;
+                const duration = formatDuration(task.duration_seconds);
+
+                // Build checkpoint display for full_scan tasks
+                let checkpointHtml = '';
+                if (task.mode === 'full_scan') {
+                    let checkpointText = '';
+                    if (task.last_scanned_id) {
+                        checkpointText = `ID: ${formatNumber(task.last_scanned_id)} / ${task.scan_start} → ${task.scan_end}`;
+                    } else if (task.last_scanned_date) {
+                        checkpointText = `Date: ${task.last_scanned_date} / ${task.scan_start} → ${task.scan_end}`;
+                    }
+                    if (checkpointText) {
+                        const elapsed = task.duration_seconds || 1;
+                        const totalProcessed = (task.stats?.success || 0) + (task.stats?.failed || 0) +
+                            (task.stats?.not_found || 0) + (task.stats?.skipped || 0);
+                        const speed = (totalProcessed / elapsed).toFixed(1);
+                        checkpointHtml = `<div class="checkpoint-info" style="color: #94a3b8; font-size: 12px; margin-top: 4px;">${checkpointText} | ${speed} req/s</div>`;
+                    }
+                }
+
+                return `
+                    <div class="task-item" data-task-id="${task.task_id}">
+                        <div class="task-header">
+                            <div class="task-info">
+                                <span class="task-source">${task.source}</span>
+                                <span class="task-mode">${task.mode}</span>
+                            </div>
+                            <span class="task-status ${task.status}">${task.status}</span>
+                        </div>
+
+                        <div class="task-progress">
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: ${progress}%"></div>
+                            </div>
+                            <div class="progress-text">
+                                <span>${task.progress} / ${task.total}</span>
+                                <span>${duration}</span>
+                            </div>
+                            ${checkpointHtml}
+                        </div>
+
+                        <div class="task-stats">
+                            <span class="success">Success: ${task.stats?.success || 0}</span>
+                            <span class="failed">Failed: ${task.stats?.failed || 0}</span>
+                            <span class="skipped">Skipped: ${task.stats?.skipped || 0}</span>
+                            ${task.stats?.not_found ? `<span class="not-found" style="color: #94a3b8;">404: ${task.stats.not_found}</span>` : ''}
+                            ${task.stats?.blocked ? `<span class="blocked" style="color: #f59e0b;">Blocked: ${task.stats.blocked}</span>` : ''}
+                            ${task.stats?.out_of_range ? `<span style="color: #94a3b8;">Out of Range: ${task.stats.out_of_range}</span>` : ''}
+                            ${task.stats?.sitemaps_processed ? `<span style="color: #6366f1;">Sitemaps: ${task.stats.sitemaps_processed}</span>` : ''}
+                            ${task.stats?.list_pages_processed ? `<span style="color: #8b5cf6;">List Pages: ${task.stats.list_pages_processed}</span>` : ''}
+                        </div>
+
+                        ${task.status === 'running' ? `
+                            <div class="task-actions">
+                                <button class="btn btn-danger task-stop-btn" data-task-id="${task.task_id}">
+                                    Stop
+                                </button>
+                            </div>
+                        ` : ''}
+
+                        ${['failed', 'early_stopped', 'stopping'].includes(task.status) && task.params && Object.keys(task.params).length > 0 ? `
+                            <div class="task-actions">
+                                <button class="btn btn-primary task-resume-btn" data-task-id="${task.task_id}">
+                                    Resume
+                                </button>
+                            </div>
+                        ` : ''}
+
+                        ${task.error ? `
+                            <div style="color: #dc2626; margin-top: 10px; font-size: 13px;">
+                                Error: ${task.error}
+                            </div>
+                        ` : ''}
+
+                        ${task.early_stop_reason ? `
+                            <div class="early-stop-reason">
+                                ⚠️ ${task.early_stop_reason}
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+
+            // Bind stop/resume task buttons (CSP-safe, no inline onclick)
+            container.querySelectorAll('.task-stop-btn').forEach(btn => {
+                btn.addEventListener('click', function() { stopCrawler(this.dataset.taskId); });
+            });
+            container.querySelectorAll('.task-resume-btn').forEach(btn => {
+                btn.addEventListener('click', function() { resumeCrawler(this.dataset.taskId); });
+            });
+        }
+
+        // ==================== WebSocket ====================
+        function connectWebSocket() {
+            // Build WebSocket URL based on current location
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsHost = window.location.host;
+            const wsUrl = `${wsProtocol}//${wsHost}/api/indexing/ws`;
+
+            try {
+                websocket = new WebSocket(wsUrl);
+
+                websocket.onopen = () => {
+                    console.log('WebSocket connected');
+                    reconnectAttempts = 0;
+                    updateConnectionStatus(true);
+                };
+
+                websocket.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+
+                        if (data.type === 'init') {
+                            console.log(`[WS] init: ${data.tasks.length} tasks`);
+                            renderTasks(data.tasks);
+                        } else if (data.type === 'status_update') {
+                            const t = data.task;
+                            console.log(`[WS] update: ${t.source} ${t.status} success=${t.stats?.success||0}`);
+                            updateTask(data.task);
+                        }
+                    } catch (err) {
+                        console.error('[WS] onmessage error:', err);
+                    }
+                };
+
+                websocket.onclose = () => {
+                    console.log('WebSocket disconnected');
+                    updateConnectionStatus(false);
+
+                    // Attempt reconnect
+                    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        reconnectAttempts++;
+                        setTimeout(connectWebSocket, 2000 * reconnectAttempts);
+                    }
+                };
+
+                websocket.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                };
+            } catch (error) {
+                console.error('Failed to connect WebSocket:', error);
+                updateConnectionStatus(false);
+            }
+        }
+
+        function updateConnectionStatus(connected) {
+            const el = document.getElementById('connectionStatus');
+            el.className = `connection-status ${connected ? 'connected' : 'disconnected'}`;
+            el.querySelector('.status-text').textContent = connected ? 'Connected' : 'Disconnected';
+        }
+
+        function updateTask(task) {
+            // Update allCrawlerTasks array
+            const idx = allCrawlerTasks.findIndex(t => t.task_id === task.task_id);
+            if (idx >= 0) {
+                allCrawlerTasks[idx] = { ...allCrawlerTasks[idx], ...task };
+            } else {
+                allCrawlerTasks.push(task);
+            }
+
+            // Update in-place if visible in DOM for smooth updates
+            const container = document.getElementById('taskList');
+            const existingTask = container.querySelector(`[data-task-id="${task.task_id}"]`);
+
+            if (existingTask) {
+                const progress = task.total > 0 ? (task.progress / task.total * 100).toFixed(0) : 0;
+                existingTask.querySelector('.progress-fill').style.width = `${progress}%`;
+                existingTask.querySelector('.task-status').className = `task-status ${task.status}`;
+                existingTask.querySelector('.task-status').textContent = task.status;
+
+                const statsEl = existingTask.querySelector('.task-stats');
+                statsEl.querySelector('.success').textContent = `Success: ${task.stats?.success || 0}`;
+                statsEl.querySelector('.failed').textContent = `Failed: ${task.stats?.failed || 0}`;
+                statsEl.querySelector('.skipped').textContent = `Skipped: ${task.stats?.skipped || 0}`;
+                // Update optional stats if elements exist
+                const nfEl = statsEl.querySelector('.not-found');
+                if (nfEl && task.stats?.not_found) nfEl.textContent = `404: ${task.stats.not_found}`;
+                const blEl = statsEl.querySelector('.blocked');
+                if (blEl && task.stats?.blocked) blEl.textContent = `Blocked: ${task.stats.blocked}`;
+
+                const progressText = existingTask.querySelector('.progress-text');
+                progressText.children[0].textContent = `${task.progress} / ${task.total}`;
+                progressText.children[1].textContent = formatDuration(task.duration_seconds);
+
+                // Update checkpoint display for full_scan tasks
+                if (task.mode === 'full_scan') {
+                    let checkpointText = '';
+                    if (task.last_scanned_id) {
+                        checkpointText = `ID: ${formatNumber(task.last_scanned_id)} / ${task.scan_start} → ${task.scan_end}`;
+                    } else if (task.last_scanned_date) {
+                        checkpointText = `Date: ${task.last_scanned_date} / ${task.scan_start} → ${task.scan_end}`;
+                    }
+                    if (checkpointText) {
+                        const elapsed = task.duration_seconds || 1;
+                        const totalProcessed = (task.stats?.success || 0) + (task.stats?.failed || 0) +
+                            (task.stats?.not_found || 0) + (task.stats?.skipped || 0);
+                        const speed = (totalProcessed / elapsed).toFixed(1);
+                        const fullText = `${checkpointText} | ${speed} req/s`;
+                        let cpEl = existingTask.querySelector('.checkpoint-info');
+                        if (cpEl) {
+                            cpEl.textContent = fullText;
+                        } else {
+                            const progressDiv = existingTask.querySelector('.task-progress');
+                            cpEl = document.createElement('div');
+                            cpEl.className = 'checkpoint-info';
+                            cpEl.style.cssText = 'color: #94a3b8; font-size: 12px; margin-top: 4px;';
+                            cpEl.textContent = fullText;
+                            progressDiv.appendChild(cpEl);
+                        }
+                    }
+                }
+
+                // Remove stop button if not running
+                if (task.status !== 'running') {
+                    const actions = existingTask.querySelector('.task-actions');
+                    if (actions) actions.remove();
+                }
+            }
+
+            // Always update counts (status may have changed)
+            updateTaskCounts();
+            updateTaskSourceDropdown();
+
+            // Refresh stats after task completes (including early_stopped)
+            if (task.status === 'completed' || task.status === 'failed' || task.status === 'early_stopped') {
+                loadStats();
+                // Re-render with full data to show early_stop_reason / resume buttons
+                fetch(`${API_BASE}/api/indexing/crawler/status`)
+                    .then(res => res.json())
+                    .then(data => renderTasks(data.tasks));
+
+                // Also refresh full scan status if it's a full scan task
+                if (task.mode === 'full_scan') {
+                    loadFullScanStatus();
+                }
+            }
+
+            // New task not yet in DOM - re-render with filters
+            if (!existingTask && task.status === 'running') {
+                applyTaskFilters();
+            }
+
+            // Update full scan task in real-time (debounced to avoid HTTP flood)
+            if (task.mode === 'full_scan') {
+                const scanContainer = document.getElementById('fullscanTaskList');
+                if (scanContainer) {
+                    loadFullScanStatusDebounced();
+                }
+            }
+        }
+
+        // ==================== Errors Tab ====================
+
+        // Store all errors (unfiltered) and current filtered errors
+        let allErrors = [];
+        let filteredErrors = [];
+        let errorStats = {};
+        const ERROR_LOAD_LIMIT = 1000;  // Max errors to load from API
+
+        // Dropdown toggle
+        function toggleErrorTypeDropdown() {
+            const toggle = document.querySelector('.dropdown-toggle');
+            const menu = document.getElementById('dropdownMenu');
+            toggle.classList.toggle('open');
+            menu.classList.toggle('open');
+        }
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function(e) {
+            const dropdown = document.getElementById('errorTypeDropdown');
+            if (dropdown && !dropdown.contains(e.target)) {
+                document.querySelector('.dropdown-toggle')?.classList.remove('open');
+                document.getElementById('dropdownMenu')?.classList.remove('open');
+            }
+        });
+
+        function updateDropdownLabel() {
+            const checkboxes = document.querySelectorAll('#dropdownMenu input[type="checkbox"]');
+            const checked = Array.from(checkboxes).filter(cb => cb.checked);
+            const label = document.getElementById('dropdownLabel');
+
+            if (checked.length === 0) {
+                label.textContent = 'None Selected';
+            } else if (checked.length === checkboxes.length) {
+                label.textContent = 'All Types';
+            } else {
+                label.textContent = `${checked.length} Type${checked.length > 1 ? 's' : ''} Selected`;
+            }
+        }
+
+        function getSelectedErrorTypes() {
+            const checkboxes = document.querySelectorAll('#dropdownMenu input[type="checkbox"]:checked');
+            return Array.from(checkboxes).map(cb => cb.value);
+        }
+
+        // Load ALL errors from server (no filtering on server side)
+        async function loadAllErrors() {
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/errors?limit=${ERROR_LOAD_LIMIT}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+                const data = await res.json();
+                allErrors = data.errors || [];
+                errorStats = data.stats || {};
+
+                // Update stats display
+                const total = errorStats.total || 0;
+                document.getElementById('totalFailed').textContent = formatNumber(total);
+
+                // Update error badge
+                const badge = document.getElementById('errorBadge');
+                if (total > 0) {
+                    badge.textContent = total > 99 ? '99+' : total;
+                    badge.style.display = 'inline';
+                } else {
+                    badge.style.display = 'none';
+                }
+
+                // Update by source stats
+                const bySource = errorStats.by_source || {};
+                document.getElementById('failedBySource').innerHTML =
+                    Object.entries(bySource)
+                        .map(([s, c]) => `<span style="margin-right: 10px;">${s}: <strong>${c}</strong></span>`)
+                        .join('') || '-';
+
+                // Update by type stats and dropdown counts
+                const byType = errorStats.by_error_type || {};
+                document.getElementById('failedByType').innerHTML =
+                    Object.entries(byType)
+                        .map(([t, c]) => `<span style="margin-right: 10px;">${t}: <strong>${c}</strong></span>`)
+                        .join('') || '-';
+
+                // Update dropdown counts
+                ['blocked', 'parse_error', 'parse_exception', 'fetch_error', 'save_error'].forEach(type => {
+                    const countEl = document.getElementById(`count_${type}`);
+                    if (countEl) {
+                        countEl.textContent = byType[type] || 0;
+                    }
+                });
+
+                hideError();
+                applyFilters();
+
+            } catch (error) {
+                console.error('Failed to load errors:', error);
+                showError(`Failed to load errors: ${error.message}`);
+            }
+        }
+
+        // Apply filters locally (client-side filtering)
+        function applyFilters() {
+            const selectedSource = document.getElementById('errorSourceFilter').value;
+            const selectedTypes = getSelectedErrorTypes();
+
+            // Filter the errors
+            filteredErrors = allErrors.filter(err => {
+                // Filter by source
+                if (selectedSource && err.source_id !== selectedSource) {
+                    return false;
+                }
+                // Filter by error type
+                if (selectedTypes.length > 0 && !selectedTypes.includes(err.error_type)) {
+                    return false;
+                }
+                return true;
+            });
+
+            // Calculate expected total based on selected filters
+            const total = errorStats.total || 0;
+            let expectedTotal = 0;
+
+            if (!selectedSource && selectedTypes.length === 5) {
+                // No filters: expected = total
+                expectedTotal = total;
+            } else {
+                // Estimate based on selected types
+                const byType = errorStats.by_error_type || {};
+                selectedTypes.forEach(type => {
+                    expectedTotal += byType[type] || 0;
+                });
+                // If source filter is active, we can't easily estimate
+                // Just use filtered count as approximation
+                if (selectedSource) {
+                    expectedTotal = filteredErrors.length;
+                }
+            }
+
+            // Update UI - show total count for retry all
+            const countEl = document.getElementById('selectedCount');
+            const totalForRetry = expectedTotal > 0 ? expectedTotal : filteredErrors.length;
+
+            if (totalForRetry > filteredErrors.length) {
+                countEl.innerHTML = `Showing ${filteredErrors.length} of <strong>${totalForRetry}</strong> URLs`;
+            } else {
+                countEl.textContent = `${filteredErrors.length} URLs`;
+            }
+
+            document.getElementById('retryAllBtn').disabled = totalForRetry === 0;
+
+            renderErrorTable(filteredErrors);
+        }
+
+        function renderErrorTable(errors) {
+            const tbody = document.getElementById('errorTableBody');
+
+            if (!errors || errors.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6" class="empty-state">
+                            <p>No failed URLs matching filter</p>
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = errors.map(err => `
+                <tr>
+                    <td class="url-cell" title="${escapeHtml(err.url)}">${truncateUrl(err.url)}</td>
+                    <td>${err.source_id}</td>
+                    <td><span class="error-type-badge ${err.error_type}">${err.error_type}</span></td>
+                    <td style="max-width: 200px; font-size: 12px; color: #64748b;">${escapeHtml(err.error_message || '-')}</td>
+                    <td><span class="retry-count">${err.retry_count}</span></td>
+                    <td style="font-size: 12px; color: #64748b;">${formatTimestamp(err.failed_at)}</td>
+                </tr>
+            `).join('');
+        }
+
+        async function populateErrorSourceFilter() {
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/sources`);
+                if (!res.ok) return;
+
+                const data = await res.json();
+                const select = document.getElementById('errorSourceFilter');
+
+                // Keep first option (All Sources)
+                const firstOption = select.options[0];
+                select.innerHTML = '';
+                select.appendChild(firstOption);
+
+                data.sources.forEach(s => {
+                    const opt = document.createElement('option');
+                    opt.value = s.id;
+                    opt.textContent = s.name;
+                    select.appendChild(opt);
+                });
+            } catch (error) {
+                console.error('Failed to populate source filter:', error);
+            }
+        }
+
+        async function retryAllErrors() {
+            const total = errorStats.total || 0;
+            const selectedSource = document.getElementById('errorSourceFilter').value;
+            const selectedTypes = getSelectedErrorTypes();
+
+            // Calculate expected count based on filters
+            let expectedCount = 0;
+            if (!selectedSource && selectedTypes.length === 5) {
+                expectedCount = total;
+            } else {
+                const byType = errorStats.by_error_type || {};
+                selectedTypes.forEach(type => {
+                    expectedCount += byType[type] || 0;
+                });
+            }
+
+            if (expectedCount === 0) {
+                showError('No URLs to retry');
+                return;
+            }
+
+            const filterDesc = [];
+            if (selectedSource) filterDesc.push(`source: ${selectedSource}`);
+            if (selectedTypes.length < 5) filterDesc.push(`types: ${selectedTypes.join(', ')}`);
+            const filterText = filterDesc.length > 0 ? `\nFilters: ${filterDesc.join(', ')}` : '';
+
+            if (!confirm(`Retry ALL ${expectedCount} matching URLs?${filterText}\n\nThis will process all errors on the server, not just the displayed ones.`)) {
+                return;
+            }
+
+            const btn = document.getElementById('retryAllBtn');
+            btn.disabled = true;
+            btn.textContent = `Retrying ${expectedCount} URLs...`;
+
+            try {
+                // Use retry_all mode - server handles everything
+                const requestBody = {
+                    retry_all: true
+                };
+                if (selectedSource) {
+                    requestBody.source = selectedSource;
+                }
+                if (selectedTypes.length < 5 && selectedTypes.length > 0) {
+                    requestBody.error_types = selectedTypes;
+                }
+
+                const res = await fetch(`${API_BASE}/api/indexing/errors/retry`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || `HTTP ${res.status}`);
+                }
+
+                hideError();
+
+                // Refresh the error list
+                await loadAllErrors();
+
+                // Switch to crawler tab to see the task
+                document.querySelector('.tab-btn:nth-child(2)').click();
+
+            } catch (error) {
+                console.error('Failed to start retry:', error);
+                showError(`Failed to start retry: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Retry All';
+            }
+        }
+
+        async function clearErrors() {
+            const source = document.getElementById('errorSourceFilter').value;
+            const selectedTypes = getSelectedErrorTypes();
+
+            const filterDesc = [];
+            if (source) filterDesc.push(`source: ${source}`);
+            if (selectedTypes.length < 5 && selectedTypes.length > 0) filterDesc.push(`types: ${selectedTypes.join(', ')}`);
+            const filterText = filterDesc.length > 0 ? `\nFilters: ${filterDesc.join(', ')}` : '';
+
+            const msg = filterText
+                ? `Clear matching failed URLs?${filterText}`
+                : 'Clear ALL failed URLs?';
+
+            if (!confirm(msg)) return;
+
+            try {
+                const body = {};
+                if (source) body.source = source;
+                if (selectedTypes.length < 5 && selectedTypes.length > 0) {
+                    body.error_types = selectedTypes;
+                }
+
+                const res = await fetch(`${API_BASE}/api/indexing/errors/clear`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || `HTTP ${res.status}`);
+                }
+
+                hideError();
+                await loadAllErrors();
+
+            } catch (error) {
+                console.error('Failed to clear errors:', error);
+                showError(`Failed to clear errors: ${error.message}`);
+            }
+        }
+
+        function truncateUrl(url) {
+            if (!url) return '-';
+            if (url.length <= 60) return url;
+            return url.substring(0, 57) + '...';
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function formatTimestamp(ts) {
+            if (!ts) return '-';
+            try {
+                const date = new Date(ts);
+                return date.toLocaleString();
+            } catch {
+                return ts;
+            }
+        }
+
+        // ==================== Full Scan Tab ====================
+
+        async function loadFullScanStatus() {
+            try {
+                // Load watermarks in parallel with full scan status
+                const [statusRes] = await Promise.all([
+                    fetch(`${API_BASE}/api/indexing/fullscan/status`),
+                    loadWatermarks(),
+                ]);
+                if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`);
+
+                const data = await statusRes.json();
+
+                // Render source status (uses watermarkCache populated by loadWatermarks)
+                renderFullScanSourceStatus(data.sources);
+
+                // Render active tasks
+                renderFullScanTasks(data.tasks);
+
+            } catch (error) {
+                console.error('Failed to load full scan status:', error);
+            }
+        }
+
+        // Cache for monthly data per source
+        const monthlyDataCache = {};
+
+        // Cache for watermark data
+        let watermarkCache = {};
+
+        async function loadWatermarks() {
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/watermarks`);
+                if (!res.ok) return {};
+                const data = await res.json();
+                watermarkCache = data.watermarks || {};
+                return watermarkCache;
+            } catch (e) {
+                console.error('Failed to load watermarks:', e);
+                return {};
+            }
+        }
+
+        function renderFullScanSourceStatus(sources) {
+            const container = document.getElementById('fullscanSourceStatus');
+
+            if (!sources || Object.keys(sources).length === 0) {
+                container.innerHTML = '<div class="empty-state"><p>No source data</p></div>';
+                return;
+            }
+
+            container.innerHTML = Object.entries(sources)
+                .map(([sourceId, info]) => {
+                    const typeLabel = info.type === 'sequential'
+                        ? `Sequential (start: ${formatNumber(info.start_id || 0)})`
+                        : 'Date-based';
+                    const wm = watermarkCache[sourceId];
+                    let wmLabel = '';
+                    if (wm) {
+                        if (wm.last_scanned_id) {
+                            wmLabel = `Last scan: ID ${formatNumber(wm.last_scanned_id)}`;
+                        } else if (wm.last_scanned_date) {
+                            wmLabel = `Last scan: ${wm.last_scanned_date}`;
+                        }
+                    }
+                    return `
+                        <div class="coverage-source-card" id="coverage-${sourceId}">
+                            <div class="coverage-source-header" data-source-id="${sourceId}">
+                                <div class="coverage-source-left">
+                                    <span class="arrow">&#9654;</span>
+                                    <span class="coverage-source-name">${info.name}</span>
+                                    <span style="color: #94a3b8; font-size: 12px; margin-left: 8px;">${typeLabel}</span>
+                                    ${wmLabel ? `<span style="color: #059669; font-size: 11px; margin-left: 10px;">${wmLabel}</span>` : ''}
+                                </div>
+                                <span class="coverage-source-total" id="coverage-total-${sourceId}">...</span>
+                            </div>
+                            <div class="coverage-monthly-panel" id="coverage-panel-${sourceId}">
+                                <div class="coverage-monthly-loading">Loading...</div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+            // Bind coverage source header click handlers (CSP-safe, no inline onclick)
+            container.querySelectorAll('.coverage-source-header[data-source-id]').forEach(header => {
+                header.addEventListener('click', function() {
+                    toggleSourceCoverage(this.dataset.sourceId);
+                });
+            });
+
+            loadSourceTotals();
+        }
+
+        async function loadSourceTotals() {
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/stats`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const bySource = data.registry?.by_source || {};
+
+                for (const [sourceId, count] of Object.entries(bySource)) {
+                    const el = document.getElementById(`coverage-total-${sourceId}`);
+                    if (el) el.textContent = formatNumber(count);
+                }
+            } catch (e) {
+                console.error('Failed to load source totals:', e);
+            }
+        }
+
+        async function toggleSourceCoverage(sourceId) {
+            const card = document.getElementById(`coverage-${sourceId}`);
+            if (!card) return;
+
+            const wasExpanded = card.classList.contains('expanded');
+
+            document.querySelectorAll('.coverage-source-card.expanded').forEach(c => {
+                c.classList.remove('expanded');
+            });
+
+            if (wasExpanded) return;
+
+            card.classList.add('expanded');
+
+            if (!monthlyDataCache[sourceId]) {
+                await loadMonthlyCoverage(sourceId);
+            } else {
+                renderMonthlyCoverage(sourceId, monthlyDataCache[sourceId]);
+            }
+        }
+
+        async function loadMonthlyCoverage(sourceId) {
+            const panel = document.getElementById(`coverage-panel-${sourceId}`);
+            panel.innerHTML = '<div class="coverage-monthly-loading">Loading...</div>';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/stats/monthly/${sourceId}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+                const data = await res.json();
+                monthlyDataCache[sourceId] = data.months || [];
+                renderMonthlyCoverage(sourceId, monthlyDataCache[sourceId]);
+            } catch (e) {
+                panel.innerHTML = `<div class="coverage-monthly-loading" style="color: #dc2626;">Failed to load: ${e.message}</div>`;
+            }
+        }
+
+        function renderMonthlyCoverage(sourceId, months) {
+            const panel = document.getElementById(`coverage-panel-${sourceId}`);
+
+            if (!months || months.length === 0) {
+                panel.innerHTML = '<div class="coverage-monthly-loading">No articles with dates found</div>';
+                return;
+            }
+
+            const counts = months.map(m => m.count).sort((a, b) => a - b);
+            const median = counts[Math.floor(counts.length / 2)];
+            const lowThreshold = median * 0.3;
+
+            panel.innerHTML = `
+                <div class="coverage-monthly-grid">
+                    ${months.map(m => {
+                        let cls = '';
+                        if (m.count === 0) cls = 'zero';
+                        else if (m.count < lowThreshold && lowThreshold > 5) cls = 'low';
+
+                        return `
+                            <div class="coverage-month-item ${cls}">
+                                <span class="coverage-month-label">${m.month}</span>
+                                <span class="coverage-month-count">${formatNumber(m.count)}</span>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        }
+
+        function renderFullScanTasks(tasks) {
+            const container = document.getElementById('fullscanTaskList');
+
+            if (!tasks || tasks.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <p>No full scan tasks running. Select sources and click Start Full Scan.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            tasks.sort((a, b) => b.started_at - a.started_at);
+
+            container.innerHTML = tasks.map(task => {
+                const progress = task.total > 0
+                    ? (task.progress / task.total * 100).toFixed(1)
+                    : 0;
+                const duration = formatDuration(task.duration_seconds);
+
+                // Build checkpoint display
+                let checkpointText = '';
+                if (task.last_scanned_id) {
+                    checkpointText = `ID: ${formatNumber(task.last_scanned_id)} / ${task.scan_start} -> ${task.scan_end}`;
+                } else if (task.last_scanned_date) {
+                    checkpointText = `Date: ${task.last_scanned_date} / ${task.scan_start} -> ${task.scan_end}`;
+                }
+
+                // Calculate speed (req/s)
+                const elapsed = task.duration_seconds || 1;
+                const totalProcessed = (task.stats?.success || 0) + (task.stats?.failed || 0) +
+                    (task.stats?.not_found || 0) + (task.stats?.skipped || 0);
+                const speed = (totalProcessed / elapsed).toFixed(1);
+
+                return `
+                    <div class="task-item" data-task-id="${task.task_id}">
+                        <div class="task-header">
+                            <div class="task-info">
+                                <span class="task-source">${task.source}</span>
+                                <span class="task-mode">Full Scan</span>
+                            </div>
+                            <span class="task-status ${task.status}">${task.status}</span>
+                        </div>
+
+                        <div class="task-progress">
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: ${progress}%"></div>
+                            </div>
+                            <div class="progress-text">
+                                <span>${progress}%${checkpointText ? ' | ' + checkpointText : ''}</span>
+                                <span>${duration} | ${speed} req/s</span>
+                            </div>
+                        </div>
+
+                        <div class="task-stats">
+                            <span class="success">Found: ${formatNumber(task.stats?.success || 0)}</span>
+                            <span class="skipped">Skipped: ${formatNumber(task.stats?.skipped || 0)}</span>
+                            <span style="color: #94a3b8;">404: ${formatNumber(task.stats?.not_found || 0)}</span>
+                            <span class="failed">Failed: ${task.stats?.failed || 0}</span>
+                        </div>
+
+                        ${task.status === 'running' ? `
+                            <div class="task-actions">
+                                <button class="btn btn-danger task-stop-btn" data-task-id="${task.task_id}">
+                                    Stop
+                                </button>
+                            </div>
+                        ` : ''}
+
+                        ${['failed', 'early_stopped', 'stopping'].includes(task.status) && task.params && Object.keys(task.params).length > 0 ? `
+                            <div class="task-actions">
+                                <button class="btn btn-primary task-resume-btn" data-task-id="${task.task_id}">
+                                    Resume
+                                </button>
+                            </div>
+                        ` : ''}
+
+                        ${task.error ? `
+                            <div style="color: #dc2626; margin-top: 10px; font-size: 13px;">
+                                Error: ${task.error}
+                            </div>
+                        ` : ''}
+
+                        ${task.early_stop_reason ? `
+                            <div class="early-stop-reason">
+                                ${task.early_stop_reason}
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+
+            // Bind stop/resume buttons (CSP-safe, no inline onclick)
+            container.querySelectorAll('.task-stop-btn').forEach(btn => {
+                btn.addEventListener('click', function() { stopCrawler(this.dataset.taskId); });
+            });
+            container.querySelectorAll('.task-resume-btn').forEach(btn => {
+                btn.addEventListener('click', function() { resumeCrawler(this.dataset.taskId); });
+            });
+        }
+
+        async function startFullScan() {
+            const sourcesSelect = document.getElementById('fullscanSources');
+            const selectedSources = Array.from(sourcesSelect.selectedOptions).map(opt => opt.value);
+
+            if (selectedSources.length === 0) {
+                showError('Please select at least one source');
+                return;
+            }
+
+            const startDate = document.getElementById('fullscanDateFrom').value.trim() || '2024-01-01';
+            const endDate = document.getElementById('fullscanDateTo').value.trim() || new Date().toISOString().slice(0, 10);
+
+            // Build watermark info for confirmation
+            await loadWatermarks();
+            let wmInfo = '';
+            for (const src of selectedSources) {
+                const wm = watermarkCache[src];
+                if (wm && wm.last_scanned_id) {
+                    wmInfo += `  ${src}: starting from ID ${(wm.last_scanned_id + 1).toLocaleString()} (last: ${wm.last_scanned_id.toLocaleString()})\n`;
+                } else if (wm && wm.last_scanned_date) {
+                    const nextDay = new Date(new Date(wm.last_scanned_date).getTime() + 86400000).toISOString().slice(0, 10);
+                    wmInfo += `  ${src}: starting from ${nextDay} (last: ${wm.last_scanned_date})\n`;
+                } else {
+                    wmInfo += `  ${src}: starting from default (no previous scan)\n`;
+                }
+            }
+
+            const msg = `Start full scan for ${selectedSources.length} source(s)?\n\n` +
+                `Sources:\n${wmInfo}\n` +
+                `Date range (date-based sources): ${startDate} to ${endDate}\n\n` +
+                `Sequential sources will auto-detect the latest ID.\n` +
+                `This may take several days for large ranges.`;
+
+            if (!confirm(msg)) return;
+
+            const btn = document.getElementById('startFullscanBtn');
+            btn.disabled = true;
+            btn.textContent = 'Starting...';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/fullscan/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sources: selectedSources,
+                        start_date: startDate,
+                        end_date: endDate,
+                    })
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || `HTTP ${res.status}`);
+                }
+
+                hideError();
+                await loadFullScanStatus();
+
+            } catch (error) {
+                console.error('Failed to start full scan:', error);
+                showError(`Failed to start full scan: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Start Full Scan';
+            }
+        }
+
+        // ==================== Utilities ====================
+        function formatNumber(num) {
+            return num.toLocaleString();
+        }
+
+        function formatDateShort(dateStr) {
+            if (!dateStr) return '-';
+            try {
+                const date = new Date(dateStr);
+                // Format as YYYY-MM-DD
+                return date.toISOString().split('T')[0];
+            } catch {
+                // If it's already in a short format, return as is
+                return dateStr.split('T')[0] || dateStr;
+            }
+        }
+
+        function formatDuration(seconds) {
+            if (!seconds || seconds < 0) return '0s';
+
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+
+            if (mins > 0) {
+                return `${mins}m ${secs}s`;
+            }
+            return `${secs}s`;
+        }
+
+        function showError(message) {
+            const banner = document.getElementById('errorBanner');
+            banner.textContent = message;
+            banner.classList.add('show');
+        }
+
+        function hideError() {
+            document.getElementById('errorBanner').classList.remove('show');
+        }
+
+        // ==================== Initialization ====================
+        window.addEventListener('DOMContentLoaded', () => {
+            // Bind tab nav buttons (CSP-safe, no inline onclick)
+            document.querySelectorAll('.tab-btn[data-tab]').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    switchTab(this.dataset.tab);
+                });
+            });
+
+            // Bind task status filter tabs
+            document.querySelectorAll('.task-status-tab[data-status]').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    setTaskStatusFilter(this.dataset.status, this);
+                });
+            });
+
+            // Bind static control buttons
+            document.getElementById('loadStatsBtn').addEventListener('click', loadStats);
+            document.getElementById('startCrawlerBtn').addEventListener('click', startCrawler);
+            document.getElementById('startFullscanBtn').addEventListener('click', startFullScan);
+            document.getElementById('taskSourceFilter').addEventListener('change', applyTaskFilters);
+            document.getElementById('errorSourceFilter').addEventListener('change', applyFilters);
+            document.getElementById('errorTypeDropdownToggle').addEventListener('click', toggleErrorTypeDropdown);
+            document.getElementById('loadAllErrorsBtn').addEventListener('click', loadAllErrors);
+            document.getElementById('retryAllBtn').addEventListener('click', retryAllErrors);
+            document.getElementById('clearErrorsBtn').addEventListener('click', clearErrors);
+
+            // Bind error type checkboxes (stopPropagation + onChange)
+            document.querySelectorAll('#dropdownMenu .dropdown-item').forEach(item => {
+                item.addEventListener('click', function(e) { e.stopPropagation(); });
+            });
+            document.querySelectorAll('#dropdownMenu input[type="checkbox"]').forEach(cb => {
+                cb.addEventListener('change', function() {
+                    updateDropdownLabel();
+                    applyFilters();
+                });
+            });
+
+            loadStats();
+            loadSources();
+            loadErrorBadge();
+            connectWebSocket();
+            updateDropdownLabel();
+
+            // Auto-refresh stats every 30 seconds
+            setInterval(loadStats, 30000);
+            // Also refresh error badge
+            setInterval(loadErrorBadge, 30000);
+        });
+
+        // ==================== Coverage / Reference Points ====================
+        async function loadReferencePoints() {
+            const container = document.getElementById('coverageContent');
+            container.innerHTML = '<p style="color: #94a3b8;">Loading reference points...</p>';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/reference-points`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+
+                if (data.error) {
+                    container.innerHTML = `<p style="color: #ef4444;">Error: ${data.error}</p>`;
+                    return;
+                }
+
+                let html = '';
+
+                for (const [sourceId, info] of Object.entries(data)) {
+                    const { name, configured, discovered, summary, discovered_months } = info;
+
+                    html += `<div class="coverage-source">`;
+                    html += `<h3>${name} (${sourceId})</h3>`;
+
+                    // Summary line
+                    if (summary.total > 0) {
+                        html += `<div class="coverage-summary">`;
+                        html += `<div class="coverage-summary-item">
+                            <span class="coverage-summary-dot" style="background:#22c55e"></span>
+                            Found: ${summary.found}/${summary.total}
+                        </div>`;
+                        if (summary.confirmed_404 > 0) {
+                            html += `<div class="coverage-summary-item">
+                                <span class="coverage-summary-dot" style="background:#f59e0b"></span>
+                                404: ${summary.confirmed_404}
+                            </div>`;
+                        }
+                        if (summary.not_scanned > 0) {
+                            html += `<div class="coverage-summary-item">
+                                <span class="coverage-summary-dot" style="background:#ef4444"></span>
+                                Not scanned: ${summary.not_scanned}
+                            </div>`;
+                        }
+                        html += `</div>`;
+
+                        // Configured reference points table
+                        html += `<table class="coverage-table">`;
+                        html += `<thead><tr>
+                            <th>Date</th><th>Article ID</th><th>Note</th><th>Status</th><th>Published</th>
+                        </tr></thead><tbody>`;
+                        for (const pt of configured) {
+                            const statusClass = pt.status;
+                            const statusLabel = pt.status === 'found' ? 'Found'
+                                : pt.status === 'confirmed_404' ? '404'
+                                : 'Not Scanned';
+                            html += `<tr>
+                                <td>${pt.date}</td>
+                                <td><code>${pt.id}</code></td>
+                                <td>${pt.note || ''}</td>
+                                <td><span class="ref-status ${statusClass}">${statusLabel}</span></td>
+                                <td>${pt.date_published || '-'}</td>
+                            </tr>`;
+                        }
+                        html += `</tbody></table>`;
+                    } else {
+                        html += `<p class="coverage-subtitle">No configured reference points. Using auto-discovery only.</p>`;
+                    }
+
+                    // Discovered coverage (month heatmap)
+                    if (discovered && discovered.length > 0) {
+                        html += `<div style="margin-top: 15px;">`;
+                        html += `<p style="color: #64748b; font-size: 13px; margin-bottom: 8px;">
+                            Auto-discovered: ${discovered_months} months with data
+                        </p>`;
+                        html += `<div class="coverage-month-bar">`;
+                        for (const d of discovered) {
+                            const label = d.date.substring(2); // "24-01" from "2024-01"
+                            html += `<div class="coverage-month-cell has-data" title="${d.date}: ${d.url}">${label}</div>`;
+                        }
+                        html += `</div></div>`;
+                    } else {
+                        html += `<p class="coverage-subtitle" style="margin-top: 10px;">No articles found in registry for this source.</p>`;
+                    }
+
+                    html += `</div>`;
+                }
+
+                container.innerHTML = html || '<p style="color: #94a3b8;">No data available.</p>';
+            } catch (error) {
+                console.error('Failed to load reference points:', error);
+                container.innerHTML = `<p style="color: #ef4444;">Failed to load: ${error.message}</p>`;
+            }
+        }
+
+        async function loadErrorBadge() {
+            try {
+                const res = await fetch(`${API_BASE}/api/indexing/errors?limit=1`);
+                if (!res.ok) return;
+
+                const data = await res.json();
+                const badge = document.getElementById('errorBadge');
+                const total = data.stats?.total || 0;
+
+                if (total > 0) {
+                    badge.textContent = total > 99 ? '99+' : total;
+                    badge.style.display = 'inline';
+                } else {
+                    badge.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Failed to load error badge:', error);
+            }
+        }
+    </script>
+</body>
+
+</html>

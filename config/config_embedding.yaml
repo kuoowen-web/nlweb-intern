@@ -1,0 +1,48 @@
+preferred_provider: openrouter
+providers:
+  azure_openai:
+    api_key_env: AZURE_OPENAI_API_KEY
+    api_endpoint_env: AZURE_OPENAI_ENDPOINT
+    api_version_env: "2024-10-21"  # Specific API version for embeddings
+    model: text-embedding-3-small
+
+  elasticsearch:
+    # Elasticsearch endpoint (localhost or remote URL with Elastic Cloud/Serverless)
+    api_endpoint_env: ELASTICSEARCH_URL
+    # Authentication credentials
+    api_key_env: ELASTICSEARCH_API_KEY
+    # Model name (inference endpoint)
+    model: .multilingual-e5-small-elasticsearch
+    # Service configuration
+    config: 
+      service: elasticsearch
+      service_settings:
+        num_allocations: 1
+        num_threads: 1
+        model_id: .multilingual-e5-small_linux-x86_64
+
+  gemini:
+    api_key_env: GEMINI_API_KEY
+    model: gemini-embedding-exp-03-07
+
+  openai:
+    api_key_env: OPENAI_API_KEY
+    api_endpoint_env: OPENAI_ENDPOINT
+    model: text-embedding-3-small
+
+  snowflake:
+    api_key_env: SNOWFLAKE_PAT
+    api_endpoint_env: SNOWFLAKE_ACCOUNT_URL
+    api_version_env: "2024-10-01"
+    model: snowflake-arctic-embed-m-v1.5
+
+  huggingface:
+    api_key_env: HF_TOKEN
+    model: BAAI/bge-m3
+
+  qwen3:
+    model: Qwen/Qwen3-Embedding-4B
+
+  openrouter:
+    api_key_env: OPENROUTER_API_KEY
+    model: qwen/qwen3-embedding-4b

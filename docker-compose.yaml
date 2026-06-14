@@ -1,0 +1,52 @@
+# Production mode: docker compose up
+# Development mode: docker compose --profile dev up nlweb-dev
+services:
+  # --- Production ---
+  nlweb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nlweb
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - PORT=8000
+      - NLWEB_CONFIG_DIR=/app/config
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    user: nlweb
+
+  # --- Development (live code reload) ---
+  nlweb-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nlweb-dev
+    profiles: ["dev"]
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app/python
+      - PORT=8000
+      - NLWEB_CONFIG_DIR=/app/config
+      - NLWEB_LOGGING_PROFILE=development
+    volumes:
+      - ./code:/app:cached        # Mount source code (live edit)
+      - ./config:/app/config:ro
+      - ./static:/app/static
+      - ./data:/app/data
+    command: python python/app-aiohttp.py
+    restart: unless-stopped

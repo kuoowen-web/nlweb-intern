@@ -1,0 +1,54 @@
+# NLWeb Local Dev — 只啟 PostgreSQL container；app 走 native python
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml logs -f postgres
+#   docker compose -f docker-compose.dev.yml down       # 停（保留 volume）
+#   docker compose -f docker-compose.dev.yml down -v    # 停並砍 volume（重建乾淨環境）
+
+services:
+  postgres:
+    build:
+      context: ./infra
+      dockerfile: Dockerfile
+    image: nlweb-postgres-dev:pg17-bigm
+    container_name: nlweb-dev-postgres
+    restart: unless-stopped
+    shm_size: '1g'
+    environment:
+      POSTGRES_USER: nlweb
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: nlweb
+    ports:
+      - "5432:5432"   # expose 給 host 上的 native python server
+    volumes:
+      - nlweb_pgdata_dev:/var/lib/postgresql/data
+      - ./infra/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    command:
+      - "postgres"
+      # Dev 規格（本機 16GB RAM 一般筆電/桌機）
+      - "-c"
+      - "shared_buffers=1GB"
+      - "-c"
+      - "work_mem=64MB"
+      - "-c"
+      - "maintenance_work_mem=256MB"
+      - "-c"
+      - "effective_cache_size=4GB"
+      - "-c"
+      - "max_connections=30"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "shared_preload_libraries=pg_bigm"
+      - "-c"
+      - "client_encoding=utf8"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nlweb -d nlweb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  nlweb_pgdata_dev:
+    driver: local
+    name: nlweb_pgdata_dev

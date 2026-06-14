@@ -1,0 +1,4 @@
+Contact: mailto:support@twdubao.com
+Preferred-Languages: zh-TW, en
+Canonical: https://twdubao.com/.well-known/security.txt
+Expires: 2027-03-24T00:00:00.000Z

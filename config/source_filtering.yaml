@@ -1,0 +1,47 @@
+# Source tier filtering configuration
+source_tier_config:
+  strict:
+    tier_thresholds:
+      min_tier: 1
+      max_tier: 2
+    min_tier_1_ratio: 0.6
+    fallback_on_insufficient: true
+    fallback_max_tier: 3
+
+  discovery:
+    tier_thresholds:
+      min_tier: 1
+      max_tier: 4
+    min_tier_1_ratio: 0.3
+    fallback_on_insufficient: false
+
+  monitor:
+    tier_thresholds:
+      min_tier: 1
+      max_tier: 3
+    min_tier_1_ratio: 0.4
+    fallback_on_insufficient: true
+    fallback_max_tier: 4
+
+# Source tier definitions
+tier_definitions:
+  1:
+    name: "Official/Primary"
+    description: "Official government, company statements, peer-reviewed"
+    examples: ["政府公告", "公司財報", "學術論文"]
+  2:
+    name: "Major News"
+    description: "Major news outlets with editorial standards"
+    examples: ["Reuters", "聯合報", "中央社"]
+  3:
+    name: "Industry/Trade"
+    description: "Industry publications and trade media"
+    examples: ["TechCrunch", "科技新報"]
+  4:
+    name: "General Media"
+    description: "General online media and blogs"
+    examples: ["Medium", "個人部落格"]
+  5:
+    name: "Social/User"
+    description: "Social media and user-generated content"
+    examples: ["Twitter", "Reddit", "PTT"]

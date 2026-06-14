@@ -1,0 +1,19 @@
+[Unit]
+Description=NLWeb Crawler (single source)
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/nlweb/code/python
+Environment=PATH=/home/%i/nlweb/venv/bin:/usr/bin
+Environment=CRAWLER_ENV=gcp
+ExecStart=/home/%i/nlweb/crawler/remote/launch-crawler.sh ltn
+Restart=on-failure
+RestartSec=60
+StandardOutput=append:/home/%i/nlweb/data/crawler/logs/service-stdout.log
+StandardError=append:/home/%i/nlweb/data/crawler/logs/service-stderr.log
+MemoryMax=800M
+
+[Install]
+WantedBy=multi-user.target

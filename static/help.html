@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>說明中心 — 臺灣讀豹</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png?v=20260604a">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png?v=20260604a">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon-180.png?v=20260604a">
+  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <link rel="stylesheet" href="/static/help.css">
+  <script src="/static/js/feedback-utils.js"></script>
+</head>
+<body>
+
+<header class="hc-header">
+  <a href="/static/news-search-prototype.html" class="hc-back-btn">← 返回搜尋</a>
+  <span class="hc-header-title">說明中心</span>
+</header>
+
+<div class="hc-container">
+
+  <div class="hc-tabs">
+    <button class="hc-tab active" data-tab="help">使用說明</button>
+    <button class="hc-tab" data-tab="faq">常見問題</button>
+    <button class="hc-tab" data-tab="contact">聯絡客服</button>
+  </div>
+
+  <!-- Panel: 使用說明 -->
+  <div class="hc-panel active" id="panel-help">
+
+    <div class="hc-section">
+      <h2>搜尋功能</h2>
+      <p>讀豹使用 AI 自然語言搜尋，你可以用日常問句直接提問，不需要精確的關鍵字。</p>
+      <ul>
+        <li>輸入問題後按 Enter 或點擊送出按鈕</li>
+        <li>支援中文、英文混合查詢</li>
+        <li>可以問「最近台積電有什麼新聞？」或「AI 對台灣就業有什麼影響？」</li>
+        <li>結果依相關度排序，同時顯示來源與發布時間</li>
+      </ul>
+    </div>
+
+    <div class="hc-section">
+      <h2>閱讀結果</h2>
+      <ul>
+        <li>每則結果顯示標題、摘要、來源媒體與發布日期</li>
+        <li>點擊標題可開啟原始新聞頁面</li>
+        <li>AI 摘要會整合多則相關報導，提供綜合觀點</li>
+        <li>「來源」面板顯示所有參考文章</li>
+      </ul>
+    </div>
+
+    <div class="hc-section">
+      <h2>登入與帳號管理</h2>
+      <ul>
+        <li>點擊右上角「登入」按鈕以電子郵件登入</li>
+        <li>登入後可儲存對話紀錄，跨裝置同步</li>
+        <li>點擊左下角設定可「變更密碼」或「登出」</li>
+        <li>忘記密碼請使用登入頁的「忘記密碼」功能</li>
+      </ul>
+    </div>
+
+    <div class="hc-section">
+      <h2>對話紀錄</h2>
+      <ul>
+        <li>登入後所有搜尋對話自動儲存至左側邊欄</li>
+        <li>點擊歷史對話可繼續追問</li>
+        <li>使用「分享」按鈕可產生分享連結</li>
+        <li>新增搜尋請點擊「+ 新對話」</li>
+      </ul>
+    </div>
+
+    <div class="hc-section">
+      <h2>組織功能（企業版）</h2>
+      <ul>
+        <li>企業用戶可建立組織，統一管理成員帳號</li>
+        <li>管理員可透過右上角「組織」按鈕邀請成員</li>
+        <li>成員可共享對話紀錄</li>
+        <li>如需開通企業版，請聯絡客服</li>
+      </ul>
+    </div>
+
+    <div class="hc-section">
+      <h2>進階篩選</h2>
+      <ul>
+        <li>在搜尋框下方可展開篩選選項</li>
+        <li>支援依日期範圍、來源媒體篩選</li>
+        <li>篩選條件會保留在當次對話中</li>
+      </ul>
+    </div>
+
+    <div class="hc-section">
+      <h2>快捷鍵</h2>
+      <table class="shortcut-table">
+        <tr><td><span class="hc-kbd">Enter</span></td><td>送出搜尋</td></tr>
+        <tr><td><span class="hc-kbd">Shift</span> + <span class="hc-kbd">Enter</span></td><td>換行（多行輸入）</td></tr>
+        <tr><td><span class="hc-kbd">Esc</span></td><td>關閉對話框 / 收起面板</td></tr>
+      </table>
+    </div>
+
+  </div>
+
+  <!-- Panel: FAQ -->
+  <div class="hc-panel" id="panel-faq">
+
+    <div class="faq-filter-tabs">
+      <button class="faq-filter-btn active" data-cat="all">全部</button>
+      <button class="faq-filter-btn" data-cat="general">一般</button>
+      <button class="faq-filter-btn" data-cat="search">搜尋</button>
+      <button class="faq-filter-btn" data-cat="account">帳號</button>
+      <button class="faq-filter-btn" data-cat="privacy">隱私</button>
+      <button class="faq-filter-btn" data-cat="other">其他</button>
+    </div>
+
+    <div id="faqList">
+      <p style="color:#999;text-align:center;padding:32px 0;">載入中...</p>
+    </div>
+
+  </div>
+
+  <!-- Panel: 聯絡客服 -->
+  <div class="hc-panel" id="panel-contact">
+
+    <div class="contact-card">
+      <h3>電子郵件客服</h3>
+      <p>如有任何問題，歡迎透過電子郵件聯絡我們：</p>
+      <a href="mailto:support@twdubao.com" class="contact-email">support@twdubao.com</a>
+      <p class="contact-reply-note">我們將在 <strong>2 個工作天</strong>內回覆您的來信。</p>
+    </div>
+
+    <div class="contact-card">
+      <h3>意見回饋</h3>
+      <p>若您發現問題、有功能建議，或希望回報內容錯誤，歡迎透過意見回饋表單告訴我們：</p>
+      <button class="btn-open-feedback" id="btnOpenFeedback">送出意見回饋</button>
+    </div>
+
+  </div>
+
+</div>
+
+<!-- Feedback Modal -->
+<div class="feedback-overlay" id="feedbackOverlay">
+  <div class="feedback-box">
+    <div class="feedback-box-header">
+      <span>意見回饋</span>
+      <button class="feedback-box-close" id="btnCloseFeedback">&times;</button>
+    </div>
+    <div class="feedback-box-body" id="feedbackBody">
+      <div class="fb-form-group">
+        <label>問題類別 <span style="color:red">*</span></label>
+        <div class="fb-radio-group" id="fbCategories">
+          <button class="fb-radio-btn" data-val="bug">Bug 回報</button>
+          <button class="fb-radio-btn" data-val="feature">功能建議</button>
+          <button class="fb-radio-btn" data-val="content">內容錯誤</button>
+          <button class="fb-radio-btn" data-val="other">其他</button>
+        </div>
+      </div>
+      <div class="fb-form-group">
+        <label>評分 <span style="color:red">*</span></label>
+        <div class="fb-stars" id="fbStars">
+          <span class="fb-star" data-val="1">★</span>
+          <span class="fb-star" data-val="2">★</span>
+          <span class="fb-star" data-val="3">★</span>
+          <span class="fb-star" data-val="4">★</span>
+          <span class="fb-star" data-val="5">★</span>
+        </div>
+      </div>
+      <div class="fb-form-group">
+        <label>說明 <span style="color:red">*</span>（10–500 字）</label>
+        <textarea class="fb-textarea" id="fbContent" placeholder="請描述您的問題或建議..." maxlength="500"></textarea>
+      </div>
+      <div class="fb-form-group">
+        <label>截圖（選填，JPG/PNG）</label>
+        <input type="file" id="fbScreenshot" accept="image/jpeg,image/png" style="font-size:13px;">
+      </div>
+      <div class="fb-form-group">
+        <label>Email（選填）</label>
+        <input type="email" id="fbEmail" placeholder="your@email.com" class="fb-email-input">
+      </div>
+      <div class="fb-error" id="fbError"></div>
+    </div>
+    <div class="feedback-box-footer" id="feedbackFooter">
+      <button class="btn-cancel" id="btnCancelFeedback">取消</button>
+      <button class="btn-save" id="btnSubmitFeedback">送出意見回饋</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/help.js"></script>
+
+</body>
+</html>

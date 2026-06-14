@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="0; url=/static/news-search-prototype.html">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>台灣新聞 AI 搜尋引擎</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png?v=20260604a">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png?v=20260604a">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon-180.png?v=20260604a">
+  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft JhengHei', sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: #f5f5f5;
+    }
+    .loading {
+      text-align: center;
+    }
+    .spinner {
+      border: 4px solid #f3f3f3;
+      border-top: 4px solid #2563eb;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 20px;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    a {
+      color: #2563eb;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="loading">
+    <div class="spinner"></div>
+    <p>正在載入台灣新聞 AI 搜尋引擎...</p>
+    <p><a href="/static/news-search-prototype.html">如果沒有自動跳轉，請點擊這裡</a></p>
+  </div>
+  <!-- Redirect handled by meta refresh above -->
+</body>
+</html>

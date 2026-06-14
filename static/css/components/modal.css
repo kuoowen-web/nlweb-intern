@@ -1,0 +1,269 @@
+/* static/css/components/modal.css
+ *
+ * Generic modal + feedback-modal + auth-modal component styles.
+ *
+ * Phase 2 (2026-05-21):
+ *   Extracted from static/news-search.css legacy region (multiple ranges:
+ *   1453-1502 + 1520-1526, 2377-2412, 2486-2536, 5865-5894 partial,
+ *   5924-5945, 5982-5996, 6236-6284, 6929-6970, 7034-7060).
+ *   Loaded via @import in static/news-search.css barrel-plus-legacy header
+ *   (after tokens.css, base.css, sidebar.css, popover.css).
+ *
+ * Scope:
+ *   - .modal-overlay / .modal-overlay.active (generic backdrop)
+ *   - .modal / .modal.modal-large (generic dialog box)
+ *   - .modal-header / .modal-header svg (compound, modal-scoped) / .modal-content /
+ *     .modal-description / .modal-tip / .modal-actions
+ *   - .feedback-modal-overlay / .feedback-modal / .feedback-modal-header / -close / -body / -footer
+ *   - .auth-modal-overlay / .auth-modal / .auth-modal-close
+ *   - UI Redesign Phase 4 overrides + Phase 7 Mod 3 Share Modal overrides for .modal-* / .feedback-modal* / .auth-modal*
+ *
+ * Owner: ui/modals.js (when JS Phase 2b lands).
+ *
+ * Dependencies:
+ *   Requires tokens.css for color/radius variables.
+ *   Requires base.css for global reset.
+ *
+ * Anti-pattern (avoid):
+ *   - Do NOT move .feedback-textarea / .feedback-cancel / .feedback-submit / .btn-close-modal /
+ *     .btn-copy / .copy-options / .auth-tab* / .auth-form-group* / .auth-link / .auth-error /
+ *     .auth-submit-btn / .org-modal* STANDALONE selectors here — those are feature-level (auth flow,
+ *     org management, share modal content) handled in later phases.
+ */
+
+/* Feedback Modal (Bug #14) */
+.feedback-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+}
+.feedback-modal {
+    background: #fff;
+    border-radius: 12px;
+    width: 420px;
+    max-width: 90vw;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    overflow: hidden;
+}
+.feedback-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--color-border);
+    font-weight: 600;
+    font-size: 15px;
+}
+.feedback-modal-close {
+    background: none;
+    border: none;
+    font-size: 22px;
+    cursor: pointer;
+    color: var(--color-text-tertiary);
+    padding: 0 4px;
+    line-height: 1;
+}
+.feedback-modal-close:hover {
+    color: var(--color-text);
+}
+.feedback-modal-body {
+    padding: 16px 20px;
+}
+.feedback-modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 20px;
+    border-top: 1px solid var(--color-border);
+}
+/* Modal */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+}
+.modal-overlay.active {
+    display: flex;
+}
+.modal {
+    background: white;
+    border-radius: 12px;
+    padding: 32px;
+    max-width: 500px;
+    width: 90%;
+}
+.modal.modal-large {
+    max-width: 700px;
+}
+.modal-header {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 24px;
+    text-align: center;
+}
+.modal-content {
+    margin-bottom: 24px;
+}
+.modal-description {
+    color: var(--color-text-tertiary);
+    margin-bottom: 16px;
+}
+.modal-tip {
+    background: var(--color-primary-light);
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    color: var(--color-text-tertiary);
+    margin-top: 16px;
+}
+.modal-actions {
+    display: flex;
+    justify-content: center;
+}
+/* --- Modals --- */
+.modal {
+    background: #FFFFFF !important;
+    border-radius: 10px !important;
+}
+.modal-header {
+    color: #2D3436 !important;
+}
+.modal-description {
+    color: #636e72 !important;
+}
+.modal-tip {
+    background: #FBF5E6 !important;
+    color: #2D3436 !important;
+}
+/* Feedback modal */
+.feedback-modal {
+    background: #FFFFFF !important;
+    border-radius: 10px !important;
+}
+.feedback-modal-header {
+    color: #2D3436 !important;
+    border-bottom-color: #B2BEC3 !important;
+}
+.feedback-modal-close {
+    color: #2D3436 !important;
+}
+.feedback-modal-close:hover {
+    color: #FDCB6E !important;
+}
+.feedback-modal-footer {
+    border-top-color: #B2BEC3 !important;
+}
+/* Auth modal */
+.auth-modal-overlay {
+    background: rgba(0, 0, 0, 0.5) !important;
+}
+.auth-modal {
+    background: #FFFFFF !important;
+    border-radius: 10px !important;
+}
+.auth-modal-close {
+    color: #2D3436 !important;
+}
+.auth-modal-close:hover {
+    color: #FDCB6E !important;
+}
+/* Base overlay layout (was missing — only color override existed) */
+.auth-modal-overlay {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    background: rgba(0, 0, 0, 0.5) !important;
+    z-index: 1000 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+/* Hide the overlay when not active (display:none set inline by JS overrides flex) */
+.auth-modal-overlay[style*="display: none"],
+.auth-modal-overlay[style*="display:none"] {
+    display: none !important;
+}
+/* Auth modal box */
+.auth-modal {
+    background: #FFFFFF !important;
+    border-radius: 12px !important;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25) !important;
+    width: 400px !important;
+    max-width: 90vw !important;
+    padding: 28px 32px !important;
+    position: relative !important;
+    z-index: 1001 !important;
+    max-height: 90vh !important;
+    overflow-y: auto !important;
+}
+/* Close button — top-right corner */
+.auth-modal-close {
+    position: absolute !important;
+    top: 14px !important;
+    right: 18px !important;
+    background: none !important;
+    border: none !important;
+    font-size: 22px !important;
+    cursor: pointer !important;
+    color: #2D3436 !important;
+    line-height: 1 !important;
+    padding: 0 !important;
+}
+/* Modal header: dark bg + white text */
+.modal-header {
+    background: #2D3436 !important;
+    color: #FFFFFF !important;
+    border-radius: 10px 10px 0 0 !important;
+    margin: -32px -32px 24px -32px !important;
+    padding: 24px 24px !important;
+    font-size: 18px !important;
+    font-weight: 600 !important;
+    text-align: left !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+}
+/* Modal header icon: 8px gap before text (handled by gap above) */
+.modal-header svg {
+    flex-shrink: 0 !important;
+    margin-right: 0 !important;
+}
+/* "將搜尋結果複製到：" label: 16px above and below */
+.modal-description {
+    margin-top: 0 !important;
+    margin-bottom: 16px !important;
+    padding-top: 0 !important;
+}
+/* Close button area: 24px from tip above, 24px from modal border below */
+.modal-actions {
+    margin-top: 24px !important;
+    margin-bottom: 0 !important;
+    padding-bottom: 0 !important;
+}
+/* Modal tip: star + yellow bg */
+.modal-tip {
+    background: #FFEAA7 !important;
+    color: #2D3436 !important;
+    border-radius: 6px !important;
+    padding: 10px 14px !important;
+    font-size: 13px !important;
+    display: flex !important;
+    align-items: center !important;
+    margin-top: 16px !important;
+}

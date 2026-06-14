@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head><title>WebSocket Test</title></head>
+<body>
+<h2>WebSocket Test</h2>
+<div id="status" style="font-size:20px;color:red">Disconnected</div>
+<pre id="log" style="max-height:400px;overflow:auto;background:#f0f0f0;padding:10px"></pre>
+<script>
+const log = document.getElementById('log');
+const status = document.getElementById('status');
+
+function addLog(msg) {
+    const ts = new Date().toLocaleTimeString();
+    log.textContent = `[${ts}] ${msg}\n` + log.textContent;
+}
+
+const wsUrl = `ws://${window.location.host}/api/indexing/ws`;
+addLog(`Connecting to: ${wsUrl}`);
+
+const ws = new WebSocket(wsUrl);
+
+ws.onopen = () => {
+    status.textContent = 'Connected';
+    status.style.color = 'green';
+    addLog('CONNECTED');
+};
+
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === 'init') {
+        addLog(`INIT: ${data.tasks.length} tasks (${(event.data.length/1024).toFixed(1)} KB)`);
+    } else if (data.type === 'status_update') {
+        const t = data.task;
+        addLog(`UPDATE: ${t.source} | ${t.status} | success=${t.stats?.success||0} failed=${t.stats?.failed||0} skipped=${t.stats?.skipped||0}`);
+    } else {
+        addLog(`MSG: ${event.data.substring(0, 200)}`);
+    }
+};
+
+ws.onclose = (e) => {
+    status.textContent = 'Disconnected';
+    status.style.color = 'red';
+    addLog(`CLOSED: code=${e.code} reason=${e.reason} clean=${e.wasClean}`);
+};
+
+ws.onerror = (e) => {
+    addLog(`ERROR: ${JSON.stringify(e)}`);
+};
+</script>
+</body>
+</html>

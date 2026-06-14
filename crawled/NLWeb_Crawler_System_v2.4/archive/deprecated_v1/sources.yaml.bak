@@ -1,0 +1,15 @@
+# 爬蟲來源設定
+
+# P0 優先級 (最高)
+p0_sources:
+  - name: "example_p0"
+    url: "https://example.com/news"
+    parser: "ExampleParser"
+    update_frequency: "hourly"
+
+# P1 優先級
+p1_sources:
+  - name: "example_p1"
+    url: "https://example.org/news"
+    parser: "ExampleParser"
+    update_frequency: "daily"

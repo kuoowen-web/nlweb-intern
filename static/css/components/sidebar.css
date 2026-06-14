@@ -1,0 +1,328 @@
+/* static/css/components/sidebar.css
+ *
+ * Left sidebar component styles.
+ *
+ * Phase 2 (2026-05-21):
+ *   Extracted from static/news-search.css legacy region (multiple ranges:
+ *   3437-3524, 3705-3724, 3892-3997, 4009-4014, 4548-4558, 5707-5723,
+ *   5736-5738, 6345-6371, 6846-6880).
+ *   Loaded via @import in static/news-search.css barrel-plus-legacy header
+ *   (after tokens.css, base.css).
+ *
+ * Scope:
+ *   - .left-sidebar / .left-sidebar.visible (root container)
+ *   - .left-sidebar-expand-btn / .left-sidebar-collapse-btn (chrome buttons)
+ *   - .left-sidebar-header / .left-sidebar-content / .left-sidebar-footer
+ *   - .left-sidebar-section / .left-sidebar-section-header / .left-sidebar-section-title
+ *   - .left-sidebar-divider
+ *   - .left-sidebar-sessions / .left-sidebar-session-item / -title / -menu-btn / -dropdown / -rename
+ *   - .left-sidebar-session-item[draggable] / .dragging / .active
+ *   - .left-sidebar-buttons-area (UI Redesign Phase 4 override)
+ *   - .left-sidebar-sessions-tabs / .left-sidebar-sessions-tab (Phase 7 sessions tabs)
+ *   - Compound selectors anchored to sidebar (e.g. .left-sidebar-section .btn-toggle-categories
+ *     follow the sidebar anchor per plan primary-group rule)
+ *
+ * Owner: ui/sidebar.js (when JS Phase 2b lands; CSS is independent of JS module ownership).
+ *
+ * Dependencies:
+ *   Requires tokens.css already @imported (uses --color-text, --color-border, etc.).
+ *   Requires base.css for global reset / body styles.
+ *
+ * Anti-pattern (avoid):
+ *   - Do NOT move history-popup / history-item / categories-list / category-item /
+ *     btn-share-sidebar / btn-history-search / btn-new-conversation / btn-toggle-categories /
+ *     btn-settings / sidebar-icon / sidebar-footer-row STANDALONE selectors here — those are
+ *     feature-level top-level selectors handled in later phases (not Phase 2 chrome scope).
+ *     But compound selectors anchored to .left-sidebar-* DO follow per plan primary-group rule.
+ */
+
+/* 展開按鈕（固定在左側邊緣） */
+.left-sidebar-expand-btn {
+    position: fixed;
+    left: 0;
+    top: 16px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 8px;
+    background: white;
+    border: 1px solid var(--color-border);
+    border-left: none;
+    border-radius: 0 8px 8px 0;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+    transition: all 0.2s;
+    z-index: 94;
+    box-shadow: 2px 0 8px rgba(0,0,0,0.1);
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+}
+.left-sidebar-expand-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
+}
+/* 側邊欄展開時隱藏展開按鈕 */
+.left-sidebar.visible ~ .left-sidebar-expand-btn,
+.left-sidebar-expand-btn.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+/* 左側邊欄 */
+.left-sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 200px;
+    height: 100vh;
+    background: white;
+    border-right: 1px solid var(--color-border);
+    z-index: 95;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(-100%);
+    transition: transform 0.3s ease;
+}
+.left-sidebar.visible {
+    transform: translateX(0);
+}
+/* 左側邊欄頂部 */
+.left-sidebar-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--color-border);
+    background: #FFFFFF;
+}
+.left-sidebar-collapse-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: white;
+    border: 1px solid var(--color-border-light);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    transition: background 0.15s;
+}
+.left-sidebar-collapse-btn:hover {
+    background: var(--color-bg-hover);
+}
+/* 左側邊欄內容 */
+.left-sidebar-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+}
+/* 區塊標題 */
+.left-sidebar-section {
+    margin-bottom: 0;
+}
+.left-sidebar-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+.left-sidebar-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+/* 左側邊欄分隔線 */
+.left-sidebar-divider {
+    height: 1px;
+    background: #000000;
+    margin: 8px 0;
+}
+/* 左側邊欄 Session 列表 */
+.left-sidebar-sessions {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.left-sidebar-session-item {
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    border-radius: 6px;
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+.left-sidebar-session-item.active {
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+}
+.left-sidebar-session-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+/* Session context menu trigger */
+.left-sidebar-session-menu-btn {
+    display: none;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--color-text-muted);
+    padding: 2px 6px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    line-height: 1;
+}
+.left-sidebar-session-item:hover .left-sidebar-session-menu-btn {
+    display: block;
+}
+.left-sidebar-session-menu-btn:hover {
+    background: var(--color-border-light);
+    color: var(--color-text-secondary);
+}
+/* Session dropdown */
+.left-sidebar-session-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 4px;
+    background: white;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+    min-width: 120px;
+    z-index: 200;
+    display: none;
+    overflow: hidden;
+}
+.left-sidebar-session-dropdown.visible {
+    display: block;
+}
+.left-sidebar-session-dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--color-text-secondary);
+    text-align: left;
+}
+.left-sidebar-session-dropdown-item:hover {
+    background: var(--color-bg-hover);
+}
+.left-sidebar-session-dropdown-item.danger {
+    color: #ef4444;
+}
+.left-sidebar-session-dropdown-item.danger:hover {
+    background: var(--color-danger-bg);
+}
+/* Sidebar session rename input */
+.left-sidebar-session-rename {
+    flex: 1;
+    font-size: 13px;
+    color: var(--color-text);
+    border: 1px solid var(--color-primary);
+    border-radius: 4px;
+    padding: 2px 6px;
+    outline: none;
+    min-width: 0;
+    background: white;
+}
+/* 左側邊欄底部 */
+.left-sidebar-footer {
+    padding: 12px;
+    border-top: 1px solid var(--color-border);
+    position: relative;
+}
+.left-sidebar-session-item[draggable="true"] {
+    cursor: grab;
+}
+.left-sidebar-session-item[draggable="true"]:active {
+    cursor: grabbing;
+}
+.left-sidebar-session-item.dragging {
+    opacity: 0.4;
+}
+/* Left sidebar — paper texture covers the entire sidebar */
+.left-sidebar {
+    background-image: url('/static/images/Left_Bar.png') !important;
+    background-size: cover !important;
+    background-position: center !important;
+}
+.left-sidebar-buttons-area {
+    margin: -16px -16px 0 -16px;
+    padding: 24px 16px;
+    border-radius: 0 0 8px 8px;
+}
+/* Left sidebar spacing per design spec */
+.left-sidebar-content {
+    padding-top: 24px !important;
+}
+.left-sidebar-divider {
+    margin: 4px 0 !important;
+}
+/* ---- Left sidebar session items — text only, transparent bg (shows paper texture) ---- */
+.left-sidebar-session-item {
+    background: transparent !important;
+    color: var(--color-text) !important;
+    padding: 8px 14px !important;
+    margin-bottom: 4px !important;
+    border-radius: 6px !important;
+    border: none !important;
+    font-size: 13px !important;
+    line-height: 1.4 !important;
+    cursor: pointer !important;
+    position: relative !important;
+}
+.left-sidebar-session-item.active {
+    background: rgba(255, 255, 255, 0.45) !important;
+    outline: 1px solid #FDCB6E !important;
+}
+/* Session item title text */
+.left-sidebar-session-title {
+    color: var(--color-text) !important;
+}
+/* Session dropdown menu button */
+.left-sidebar-session-menu-btn {
+    color: var(--color-text-secondary) !important;
+}
+/* ---- Modification 1: Session Tabs — gold capsule style ---- */
+.left-sidebar-sessions-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 8px 0 4px;
+    flex-shrink: 0;
+}
+.left-sidebar-sessions-tab {
+    flex: 1;
+    padding: 6px 4px;
+    background: #FFEAA7;
+    border: 1px solid #B2BEC3;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: #2D3436;
+    text-align: center;
+    white-space: nowrap;
+    transition: all 0.15s;
+    font-family: var(--font-family);
+}
+.left-sidebar-sessions-tab:hover {
+    border-color: #FDCB6E;
+    background: #FDCB6E;
+}
+.left-sidebar-sessions-tab.active {
+    background: #FDCB6E !important;
+    border: 2px solid #2D3436 !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    color: #2D3436 !important;
+}

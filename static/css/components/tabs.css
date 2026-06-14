@@ -1,0 +1,205 @@
+/* static/css/components/tabs.css
+ *
+ * Right-side tab bar + panel component styles.
+ *
+ * Phase 2 (2026-05-21):
+ *   Extracted from static/news-search.css legacy region (multiple ranges:
+ *   3293-3433, 5740-5763, 6373-6377, 6898-6925).
+ *   Loaded via @import in static/news-search.css barrel-plus-legacy header
+ *   (after tokens.css, base.css, sidebar.css, popover.css, modal.css).
+ *
+ * Scope:
+ *   - .right-tabs-container / .right-tabs-labels (vertical tab strip on the right edge)
+ *   - .right-tab-label / :hover / .active / .right-tab-label-icon / img.right-tab-label-icon
+ *   - .right-tab-panel / .right-tab-panel.visible (slide-in panel chrome)
+ *   - .right-tab-panel-header / -title / -title img / -close / :hover
+ *   - .right-tab-close-icon
+ *   - .right-tab-panel-content
+ *   - UI Redesign Phase 4 + Fix 4 + Phase 7 Mod 2c overrides for right-tab-* selectors
+ *
+ * Owner: ui/right-tabs.js (when JS Phase 2b lands; openTab/closeAllTabs API surface).
+ *
+ * Dependencies:
+ *   Requires tokens.css for color tokens.
+ *   Tab panel content (live-research / knowledge-graph / source-tree / etc.) is owned
+ *   by individual feature CSS files (later phases), NOT this file.
+ *
+ * Anti-pattern (avoid):
+ *   - Do NOT move .view-tabs / .tab (those are the article view tabs — different component).
+ *   - Do NOT move .auth-tabs / .auth-tab (auth modal's own tab bar — auth.css later phase).
+ *   - Do NOT move .folder-sort-tab (folder feature, later phase).
+ *   - Do NOT move tab panel CONTENT selectors (kg-*, lr-*, source-tree, etc.).
+ */
+
+/* Tab 容器 - 固定在右側 */
+.right-tabs-container {
+    position: fixed;
+    right: 0;
+    top: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: row;
+    z-index: 90;
+}
+/* Tab 標籤列（垂直文字） */
+.right-tabs-labels {
+    display: flex;
+    flex-direction: column;
+    background: var(--color-bg-card);
+    border-left: 1px solid var(--color-border);
+}
+.right-tab-label {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    padding: 12px 8.5px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text-tertiary);
+    background: #FFEAA7;
+    border: 1px solid #B2BEC3;
+    border-radius: 0 10px 10px 0;
+    border-bottom: 1px solid #B2BEC3;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: auto;
+    max-height: none;
+}
+.right-tab-label:hover {
+    background: var(--color-border-light);
+    color: var(--color-text);
+}
+.right-tab-label.active {
+    background: #FDCB6E;
+    color: #2D3436;
+    border: 2px solid #2D3436;
+    border-radius: 0 10px 10px 0;
+    margin-left: -1px;
+}
+.right-tab-label-icon {
+    font-size: 16px;
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+img.right-tab-label-icon {
+    writing-mode: horizontal-tb;
+}
+/* Tab 面板（向左滑出） */
+.right-tab-panel {
+    position: absolute;
+    right: 100%;
+    top: 0;
+    width: 200px;
+    height: 100%;
+    background: white;
+    border-left: 1px solid var(--color-border);
+    box-shadow: -4px 0 12px rgba(0,0,0,0.1);
+    overflow-y: auto;
+    transform: translateX(100%);
+    opacity: 0;
+    visibility: hidden;
+    transition: transform 0.3s ease, opacity 0.3s ease, visibility 0.3s;
+}
+.right-tab-panel.visible {
+    transform: translateX(0);
+    opacity: 1;
+    visibility: visible;
+}
+.right-tab-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg-card);
+    position: relative;
+}
+.right-tab-panel-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.right-tab-panel-close {
+    background: none;
+    border: none;
+    font-size: 18px;
+    color: var(--color-text-tertiary);
+    cursor: pointer;
+    padding: 4px;
+    line-height: 1;
+    border-radius: 4px;
+    transition: all 0.2s;
+    position: absolute;
+    top: 11px;
+    right: 11px;
+}
+.right-tab-panel-close:hover {
+    background: var(--color-border-light);
+    color: var(--color-text);
+}
+.right-tab-close-icon {
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+    /* Icon_cancel.png is white; invert for light backgrounds */
+    filter: invert(1);
+}
+/* Dark-bg panels: all panels now use dark header — see Modification 2c below */
+.right-tab-panel-content {
+    padding: 16px;
+}
+/* Right sidebar tabs — container is transparent; only individual tabs have dark bg */
+.right-tabs-labels {
+    background: transparent !important;
+}
+.right-tab-label {
+    background: #FFEAA7 !important;
+    color: var(--color-text-tertiary) !important;
+    border: 1px solid #B2BEC3 !important;
+    border-radius: 0 10px 10px 0 !important;
+}
+.right-tab-label:hover {
+    background: #FFEAA7 !important;
+    color: var(--color-text) !important;
+}
+.right-tab-label.active {
+    background: #FDCB6E !important;
+    color: #2D3436 !important;
+    border: 2px solid #2D3436 !important;
+    border-radius: 0 10px 10px 0 !important;
+    margin-left: -1px !important;
+}
+/* ---- Right sidebar tabs — flat on left side, rounded on right ---- */
+.right-tab-label {
+    border-radius: 0 10px 10px 0 !important;
+    margin-right: 0 !important;
+}
+/* ---- Modification 2c: All right-tab panel headers — dark bg ---- */
+.right-tab-panel-header {
+    background: #2D3436 !important;
+    border-bottom-color: #2D3436 !important;
+}
+.right-tab-panel-title {
+    color: #FFFFFF !important;
+}
+.right-tab-panel-title img {
+    filter: invert(1) brightness(2);
+}
+.right-tab-panel-close {
+    color: #FFFFFF !important;
+}
+.right-tab-panel-close:hover {
+    background: rgba(255,255,255,0.15) !important;
+    color: #FFFFFF !important;
+}
+/* Icon_cancel.png is white — keep as-is for all dark headers */
+.right-tab-close-icon {
+    filter: none !important;
+}

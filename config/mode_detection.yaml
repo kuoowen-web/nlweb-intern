@@ -1,0 +1,53 @@
+# Mode detection patterns for research mode selection
+mode_patterns:
+  strict:
+    keywords:
+      - verify
+      - is it true
+      - fact check
+      - check if
+      - confirm
+      - 真的嗎
+      - 查證
+      - 事實查核
+      - 是否屬實
+      - 驗證
+    weight: 1.0
+    description: "Fact-checking and verification queries"
+
+  discovery:
+    keywords:
+      - explore
+      - overview
+      - understand
+      - what is
+      - explain
+      - 是什麼
+      - 探索
+      - 了解
+      - 介紹
+      - 說明
+    weight: 0.8
+    description: "Exploratory research queries"
+
+  monitor:
+    keywords:
+      - how has
+      - evolution
+      - trend
+      - sentiment
+      - tracking
+      - change
+      - progress
+      - development
+      - 演變
+      - 趨勢
+      - 變化
+      - 追蹤
+      - 發展
+      - 走勢
+    weight: 0.9
+    description: "Monitoring and trend analysis queries"
+
+# Default mode when no pattern matches
+default_mode: discovery

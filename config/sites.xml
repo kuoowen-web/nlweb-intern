@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Sites>
+  <Site name="chinatimes.com">
+    <itemType>Article</itemType>
+    <description>中時新聞網 - 綜合新聞</description>
+  </Site>
+
+  <Site name="cna.com.tw">
+    <itemType>Article</itemType>
+    <description>中央社 - 中央通訊社</description>
+  </Site>
+
+  <Site name="e-info.org.tw">
+    <itemType>Article</itemType>
+    <description>環境資訊中心 - 環境與生態新聞</description>
+  </Site>
+
+  <Site name="esg.businesstoday.com.tw">
+    <itemType>Article</itemType>
+    <description>今周刊 ESG - 財經商業新聞</description>
+  </Site>
+
+  <Site name="news.ltn.com.tw">
+    <itemType>Article</itemType>
+    <description>自由時報 - 綜合新聞</description>
+  </Site>
+
+  <Site name="health.ltn.com.tw">
+    <itemType>Article</itemType>
+    <description>自由時報 - 健康新聞</description>
+  </Site>
+
+  <Site name="art.ltn.com.tw">
+    <itemType>Article</itemType>
+    <description>自由時報 - 藝文新聞</description>
+  </Site>
+
+  <Site name="def.ltn.com.tw">
+    <itemType>Article</itemType>
+    <description>自由時報 - 國防新聞</description>
+  </Site>
+
+  <Site name="moea.gov.tw">
+    <itemType>Article</itemType>
+    <description>經濟部 - 政府公告與新聞</description>
+  </Site>
+
+  <Site name="udn.com">
+    <itemType>Article</itemType>
+    <description>聯合新聞網 - 綜合新聞</description>
+  </Site>
+</Sites>

@@ -1,0 +1,52 @@
+/* static/css/base.css
+ *
+ * Base global styles — universal reset + body + container + global utility classes.
+ *
+ * Phase 1 (2026-05-21):
+ *   Extracted from static/news-search.css line 73-101.
+ *   Loaded via @import in static/news-search.css barrel-plus-legacy header (after tokens.css).
+ *
+ * Scope:
+ *   - * { margin/padding/box-sizing reset }
+ *   - button/input/textarea/select font inheritance
+ *   - body (font, background, color, line-height)
+ *   - .container (max-width wrapper)
+ *   - .emoji-bw (global emoji grayscale wrapper)
+ *
+ * Dependencies:
+ *   Requires tokens.css already @imported (uses --font-family, --color-text variables).
+ *
+ * Anti-pattern (avoid):
+ *   - Do not add component selectors (.news-card, .modal, etc.) here. Use css/components/.
+ *   - Do not add layout-specific rules (main margins, sidebar offsets). Use css/pages/.
+ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+button, input, textarea, select {
+    font-family: var(--font-family);
+}
+
+body {
+    font-family: var(--font-family);
+    background: url('/static/images/BG.png') top center / 100% auto repeat-y;
+    background-color: #FBF5E6;
+    color: var(--color-text);
+    line-height: 1.6;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+/* Emoji grayscale wrapper */
+.emoji-bw {
+    filter: grayscale(100%);
+    display: inline-block;
+}

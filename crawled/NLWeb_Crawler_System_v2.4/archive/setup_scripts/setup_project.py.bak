@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+NLWeb 爬蟲系統 v2 - 專案結構建置腳本
+此腳本用於自動建立專案所需的目錄結構和基本檔案
+"""
+
+import os
+import sys
+
+def create_directory(path):
+    """建立目錄，如果不存在的話"""
+    if not os.path.exists(path):
+        os.makedirs(path)
+        print(f"已建立目錄: {path}")
+    else:
+        print(f"目錄已存在: {path}")
+
+def create_file(path, content=""):
+    """建立檔案，如果不存在的話"""
+    if not os.path.exists(path):
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        print(f"已建立檔案: {path}")
+    else:
+        print(f"檔案已存在: {path}")
+
+def create_init_file(directory):
+    """在指定目錄中建立 __init__.py 檔案"""
+    init_path = os.path.join(directory, "__init__.py")
+    create_file(init_path)
+
+def setup_project():
+    """建立專案結構"""
+    # 建立主要目錄
+    directories = [
+        "config",
+        "data/output_tsv",
+        "data/logs",
+        "data/history",
+        "src/core",
+        "src/parsers",
+        "src/utils",
+        "src/features",  # PM 特別要求的目錄
+        "tests"
+    ]
+    
+    for directory in directories:
+        create_directory(directory)
+    
+    # 為 Python 套件建立 __init__.py 檔案
+    python_packages = [
+        "src",
+        "src/core",
+        "src/parsers",
+        "src/utils",
+        "src/features"
+    ]
+    
+    for package in python_packages:
+        create_init_file(package)
+    
+    # 建立基本檔案
+    create_file("main.py", "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\n\"\"\"\nNLWeb 爬蟲系統 v2 - 主程式\n\"\"\"\n\ndef main():\n    print(\"NLWeb 爬蟲系統 v2 啟動中...\")\n\nif __name__ == \"__main__\":\n    main()\n")
+    create_file("README.md", "# NLWeb 爬蟲系統 v2\n\n## 簡介\n這是一個高紀律、模組化、且支援「內容分級 (Tiering)」的爬蟲系統。\n\n## 安裝與設定\n請參考 `docs/setup.md` 檔案。\n\n## 使用方式\n待補充\n")
+    
+    # 建立 docs 目錄與設定文件
+    create_directory("docs")
+    create_file("docs/setup.md", "# NLWeb 爬蟲系統 v2 - 環境設定指南\n\n## 系統需求\n- Python 3.9+\n- 相依套件請參考 requirements.txt\n\n## 安裝步驟\n1. 安裝 Python 3.9 或更高版本\n2. 安裝相依套件: `pip install -r requirements.txt`\n3. 執行主程式: `python main.py`\n")
+    
+    # 建立設定檔範本
+    create_file("config/settings.py", "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\n\"\"\"\n系統設定檔\n\"\"\"\n\n# 基本設定\nDEBUG = True\nLOG_LEVEL = \"INFO\"\n\n# 爬蟲設定\nREQUEST_TIMEOUT = 30  # 秒\nMAX_RETRY = 3\nDELAY_BETWEEN_REQUESTS = 1.0  # 秒\n")
+    create_file("config/sources.yaml", "# 爬蟲來源設定\n\n# P0 優先級 (最高)\np0_sources:\n  - name: \"example_p0\"\n    url: \"https://example.com/news\"\n    parser: \"ExampleParser\"\n    update_frequency: \"hourly\"\n\n# P1 優先級\np1_sources:\n  - name: \"example_p1\"\n    url: \"https://example.org/news\"\n    parser: \"ExampleParser\"\n    update_frequency: \"daily\"\n")
+    
+    # 建立測試環境檔案
+    create_file("test_env.py", """#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+\"\"\"
+環境測試腳本
+用於確認環境設定是否正確
+\"\"\"
+
+import asyncio
+import aiohttp
+import sys
+
+async def test_connection():
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://www.google.com') as response:
+                print(f"連線測試成功，狀態碼: {response.status}")
+                return response.status == 200
+    except Exception as e:
+        print(f"連線測試失敗: {str(e)}")
+        return False
+
+def test_imports():
+    required_packages = [
+        'aiohttp', 'aiofiles', 'asyncio', 'bs4', 'lxml', 
+        'ujson', 'yaml', 'dotenv', 'dateutil', 'pytz', 'tqdm'
+    ]
+    
+    missing_packages = []
+    
+    for package in required_packages:
+        try:
+            if package == 'bs4':
+                import bs4
+            elif package == 'yaml':
+                import yaml
+            elif package == 'dotenv':
+                import dotenv
+            elif package == 'dateutil':
+                import dateutil
+            else:
+                __import__(package)
+            print(f"✓ {package} 已安裝")
+        except ImportError:
+            missing_packages.append(package)
+            print(f"✗ {package} 未安裝")
+    
+    if missing_packages:
+        print(f"\\n缺少以下套件: {', '.join(missing_packages)}")
+        print("請執行: pip install -r requirements.txt")
+        return False
+    return True
+
+if __name__ == "__main__":
+    print("===== 環境測試開始 =====")
+    
+    # 測試套件安裝
+    print("\\n檢查必要套件:")
+    imports_ok = test_imports()
+    
+    # 測試網路連線
+    print("\\n檢查網路連線:")
+    connection_ok = asyncio.run(test_connection())
+    
+    # 顯示測試結果
+    print("\\n===== 環境測試結果 =====")
+    print(f"套件檢查: {'成功' if imports_ok else '失敗'}")
+    print(f"網路連線: {'成功' if connection_ok else '失敗'}")
+    
+    if imports_ok and connection_ok:
+        print("\\n環境設定正確，可以開始開發！")
+        sys.exit(0)
+    else:
+        print("\\n環境設定有問題，請解決上述問題後再繼續。")
+        sys.exit(1)
+""")
+
+    print("\n專案結構建置完成！")
+
+if __name__ == "__main__":
+    print("開始建立 NLWeb 爬蟲系統 v2 專案結構...")
+    setup_project()
+

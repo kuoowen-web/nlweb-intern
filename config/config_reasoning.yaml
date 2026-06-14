@@ -1,0 +1,187 @@
+reasoning:
+  enabled: true
+  max_iterations: 3
+  analyst_timeout: 300  # Increased for debugging
+  critic_timeout: 120   # Increased for debugging
+  writer_timeout: 90    # 縮短以讓 OpenAI Responses API hang 模式提早顯化，舊值 300 會遮蔽 5 分鐘 hang
+  outline_planner_timeout: 90  # gpt-5.1 reasoning model 跑多章 outline (prompt~9500) 慢，30s 不夠致 skeleton fallback；對齊 writer_timeout
+
+  # Feature flags for enhanced reasoning capabilities
+  features:
+    composable_pipeline: true  # true = new composable phase path, false = legacy (both use same impl; flag gates Task 6+ enhancements)
+    nonblocking_research: false  # true = research runs as named asyncio.Task (requires composable_pipeline=true); enables task cancellation + soft interrupt
+    user_friendly_sse: true   # Phase 1: User-friendly Chinese progress messages
+    plan_and_write: true      # Phase 3: Plan-and-Write for long reports (2000+ words)
+    argument_graphs: true     # Phase 2: Structured argument decomposition
+    structured_critique: true # Phase 2: Structured weakness detection
+    knowledge_graph_generation: false  # Phase KG: Entity-Relationship Knowledge Graph (per-request override via enable_kg param)
+    gap_knowledge_enrichment: true    # Stage 5: Gap Detection with LLM Knowledge & Web Search
+    cov_lite_enabled: true    # Phase 2 CoV: Chain of Verification for fact-checking claims
+    agent_isolation: false    # SEC-6: Context routing isolation (Phase 1)
+    # Live Research: conversation-driven research assistant mode
+    live_research: true           # Master switch: enable all Live Research behaviors
+    live_research_narration: true  # Sub-flag: Analyst/Critic narration (only effective when live_research=true)
+    live_research_propose_verify: true  # Sub-flag: Analyst Propose-Verify discipline (only effective when live_research=true)
+    live_research_consistency_monitor: true  # Sub-flag: Critic Consistency Monitor (only effective when live_research=true)
+    live_research_style_analysis: true  # Sub-flag: Style Analysis before writing (only effective when live_research=true)
+    live_research_per_section_writing: true  # Sub-flag: Per-section writing mode (only effective when live_research=true)
+    # Live Research Pipeline 參數
+    live_research_max_bab_iterations: 3  # B->A->B' loop 最大迭代次數
+    live_research_auto_continue_delay: 2  # 「你決定就好」後的延遲（秒，讓使用者能看到 narration）
+    live_research_dry_run: false  # true = 用 mock agents 跑 pipeline，不呼叫 LLM
+    live_research_mock_bab: false  # true = Stage 1+2 用 fixture ContextMap（省 BAB LLM 成本），Stage 3-6 跑真實 LLM
+    live_research_critic_publish_gate: true  # Track F F1 (sprint 2026-05-28): per-section Critic publish gate (claim-level fabrication)
+    # 注意：不需要 checkpoint_timeout — Chat-based 模型每個 request 獨立，session state 永久保留
+
+  # SEC-6: Agent Isolation Configuration
+  agent_isolation:
+    draft_length_warning_threshold: 20000
+    critic_reference_sheet_min_chars: 1000    # Below this, fallback to full context
+    critic_reference_sheet_min_citations: 2   # Below this, fallback to full context
+    reference_sheet_snippet_length: 500       # Max chars per source in reference sheet
+
+  # TypeAgent configuration (structured LLM output with automatic validation)
+  typeagent:
+    enabled: true             # Set to true to enable TypeAgent
+    max_retries: 3            # Max retry attempts for validation errors
+    instructor_mode: "tool_call"  # instructor mode: "tool_call" or "json_mode"
+
+  # Timezone for current time context (used in temporal queries)
+  timezone: "Asia/Taipei"
+
+  # Stage 5: Tier 6 Knowledge Enrichment Configuration
+  tier_6:
+    llm_knowledge:
+      enabled: true
+      confidence_cap: "medium"   # Max confidence for LLM-generated knowledge
+      max_answer_length: 300     # Max chars for inline LLM answers
+
+    web_search:
+      enabled: true
+      provider: "google"         # Stage 5: Google Custom Search (Bing deprecated)
+      max_results: 5             # DR 專用，維持 5（不動）。Free tier: 100 queries/day, max 10 per request
+      max_results_lr: 8          # LR 專用 (CEO 決策③, 2026-06-08/09): 3 → 8，補上游資料不足。
+                                 # LR _execute_web_search 只讀此鍵 (default 8, 不 fallback max_results)。
+                                 # BAB 每 query 撈 8 筆 (3 query → 24)。上限 10（Google CSE 硬限）。
+      timeout: 3.0               # Timeout in seconds (prevents slow API blocking)
+      fallback_to_local: true    # Continue with local sources on timeout
+      max_snippet_length: 200    # Token optimization: truncate snippets
+      cache:
+        enabled: true
+        ttl_hours: 1             # Cache validity period
+        max_size: 100            # Max cached queries
+
+    wikipedia:
+      enabled: true              # Enable Wikipedia as Tier 6 source
+      language: "zh"             # zh for Traditional Chinese, en for English
+      max_results: 3             # Max Wikipedia articles per query
+      max_summary_length: 500    # Max chars per summary
+      timeout: 5.0               # Timeout in seconds
+      cache:
+        enabled: true
+        ttl_hours: 24            # Wikipedia content changes less often
+        max_size: 200            # Max cached queries
+
+    gap_routing:
+      max_external_calls_per_run: 6   # C3 (2026-06-11): LR gap routing 單輪外部呼叫上限
+                                      # （Wikipedia/Web）；default-on 安全配套，防 Analyst
+                                      # 異常輸出大量 gap 燒 API 額度。code default 同為 6。
+
+    # Phase 1 - 股價 API
+    yfinance:
+      enabled: true
+      timeout: 5.0
+      include_fundamentals: true
+      cache:
+        enabled: true
+        ttl_hours: 0.25    # 15 分鐘
+        max_size: 100
+
+    twse:
+      enabled: true
+      timeout: 3.0
+      cache:
+        enabled: true
+        ttl_hours: 0.083   # 5 分鐘
+        max_size: 200
+
+    # Phase 2 - 天氣 API
+    cwb_weather:
+      enabled: true
+      api_key: ${CWB_API_KEY}   # 中央氣象署 API Key
+      timeout: 5.0
+      cache:
+        enabled: true
+        ttl_hours: 1
+        max_size: 100
+
+    # Phase 2 - 公司資料 API
+    wikidata:
+      enabled: true
+      timeout: 8.0
+      cache:
+        enabled: true
+        ttl_hours: 24
+        max_size: 200
+
+    tw_company:
+      enabled: true
+      timeout: 5.0
+      cache:
+        enabled: true
+        ttl_hours: 168     # 7 天
+        max_size: 200
+
+    # Phase 3 - 全球天氣 API
+    openweathermap:
+      enabled: false       # 需要 API Key 才能啟用
+      api_key: ${OPENWEATHERMAP_API_KEY}
+      language: "zh_tw"
+      timeout: 5.0
+      cache:
+        enabled: true
+        ttl_hours: 1
+        max_size: 100
+
+    # Enrichment strategy: how to use multiple Tier 6 sources
+    enrichment_strategy: "parallel"  # parallel (faster) or sequential (fallback)
+
+  # Auto-REJECT thresholds for Phase 2 structured critique
+  critique_thresholds:
+    critical_weakness_count: 2  # Auto-escalate to REJECT if >= N critical weaknesses
+    source_tier_violations: 1    # Max acceptable source tier violations
+
+  tracing:
+    console:
+      enabled: false
+      level: DEBUG  # ERROR, WARN, INFO, DEBUG, TRACE (local dev default: DEBUG)
+      colors: true
+    file:
+      enabled: true
+      save_event_stream: true
+      save_full_data: true
+
+source_tiers:
+  # Tier 1: Official
+  "cna.com.tw": {tier: 1, type: "official"}              # 中央社
+  "moea.gov.tw": {tier: 1, type: "government"}           # 經濟部
+
+  # Tier 2: Mainstream
+  "udn.com": {tier: 2, type: "news"}                     # 聯合新聞網
+  "news.ltn.com.tw": {tier: 2, type: "news"}             # 自由時報
+  "health.ltn.com.tw": {tier: 2, type: "news"}           # 自由時報健康
+  "art.ltn.com.tw": {tier: 2, type: "news"}              # 自由時報藝文
+  "def.ltn.com.tw": {tier: 2, type: "news"}              # 自由時報國防
+  "chinatimes.com": {tier: 2, type: "news"}              # 中時新聞網
+
+  # Tier 3: Digital / Specialty
+  "esg.businesstoday.com.tw": {tier: 3, type: "digital"} # 今周刊 ESG
+  "e-info.org.tw": {tier: 3, type: "digital"}            # 環境資訊中心
+
+mode_configs:
+  strict:
+    max_tier: 2
+  discovery:
+    max_tier: 5
+  monitor:
+    compare_tiers: [1, 5]

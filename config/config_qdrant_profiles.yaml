@@ -1,0 +1,28 @@
+# Qdrant Profile Definitions
+# Switch active profile via QDRANT_PROFILE environment variable (online|offline)
+# When QDRANT_PROFILE is not set, each system uses its own defaults (backward compatible).
+
+profiles:
+  offline:
+    description: "bge-m3 embedding (1024D) + nlweb collection"
+    qdrant:
+      url_env: QDRANT_URL
+      api_key_env: QDRANT_API_KEY
+      collection: nlweb
+    embedding:
+      provider: huggingface
+      model: BAAI/bge-m3
+      dimension: 1024
+    retrieval_endpoint: qdrant_url
+
+  online:
+    description: "OpenAI embedding (1536D) + nlweb_collection"
+    qdrant:
+      url_env: QDRANT_URL
+      api_key_env: QDRANT_API_KEY
+      collection: nlweb_collection
+    embedding:
+      provider: openai
+      model: text-embedding-3-small
+      dimension: 1536
+    retrieval_endpoint: qdrant_url

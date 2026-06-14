@@ -1,0 +1,1395 @@
+{
+  "1": [
+    {
+      "claim": "台灣農漁村綠能衝突的代表性案例包括台南沿海漁電共生案場與農電共生亂象。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣漁電共生在部分地區引發居民與養殖戶對土地使用與生計安全的強烈反彈。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前可用資料足以顯示台灣農漁村綠能衝突的存在，但不足以支撐完整的國內制度評估與國外比較借鏡分析。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "要完成能源轉型下農漁村綠能衝突的專題研究，必須補充台灣政策與國外 agrivoltaics 治理案例等關鍵文獻。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "deduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "在能源轉型壓力下，綠能進入農漁村時若缺乏嚴謹的土地與空間規劃，容易引發農漁民抗爭與土地正義爭議。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台南麻豆地區漁電共生案場引發居民組成自救會、擔憂被光電板包圍，反映選址與生活環境衝擊未被妥善溝通與規劃。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣農漁村地區在推動光電與漁電共生時已出現多起衝突與爭議，例如台南麻豆居民反對漁電共生案場與台鹽綠能契約爭議。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "這些衝突與爭議多與土地使用變更、租金與收益分配、養殖或農作實際經營狀況與查核標準、以及居民對景觀與生活品質的疑慮有關。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣農漁村綠能衝突的主要類型已可由現有資料與新聞初步盤點，例如農地光電爭地、漁電共生爭議及原住民族土地開發衝突。",
+      "confidence": "high",
+      "source_topic": "dfa226cc-4d91-4c4d-bad0-565e736ae256",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "麻豆漁電共生案顯示地方居民對光電選址、程序透明與生態影響高度不滿，並組成自救會抗爭。",
+      "confidence": "high",
+      "source_topic": "dfa226cc-4d91-4c4d-bad0-565e736ae256",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "2": [
+    {
+      "claim": "台灣農漁村綠能衝突的代表性案例包括台南沿海漁電共生案場與農電共生亂象。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣漁電共生在部分地區引發居民與養殖戶對土地使用與生計安全的強烈反彈。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前可用資料足以顯示台灣農漁村綠能衝突的存在，但不足以支撐完整的國內制度評估與國外比較借鏡分析。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "要完成能源轉型下農漁村綠能衝突的專題研究，必須補充台灣政策與國外 agrivoltaics 治理案例等關鍵文獻。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "deduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "在能源轉型壓力下，綠能進入農漁村時若缺乏嚴謹的土地與空間規劃，容易引發農漁民抗爭與土地正義爭議。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台南麻豆地區漁電共生案場引發居民組成自救會、擔憂被光電板包圍，反映選址與生活環境衝擊未被妥善溝通與規劃。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣農漁村地區在推動光電與漁電共生時已出現多起衝突與爭議，例如台南麻豆居民反對漁電共生案場與台鹽綠能契約爭議。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "這些衝突與爭議多與土地使用變更、租金與收益分配、養殖或農作實際經營狀況與查核標準、以及居民對景觀與生活品質的疑慮有關。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣農漁村綠能衝突的主要類型已可由現有資料與新聞初步盤點，例如農地光電爭地、漁電共生爭議及原住民族土地開發衝突。",
+      "confidence": "high",
+      "source_topic": "dfa226cc-4d91-4c4d-bad0-565e736ae256",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "麻豆漁電共生案顯示地方居民對光電選址、程序透明與生態影響高度不滿，並組成自救會抗爭。",
+      "confidence": "high",
+      "source_topic": "dfa226cc-4d91-4c4d-bad0-565e736ae256",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "3": [
+    {
+      "claim": "台灣農漁村綠能衝突的代表性案例包括台南沿海漁電共生案場與農電共生亂象。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "在能源轉型壓力下，綠能進入農漁村時若缺乏嚴謹的土地與空間規劃，容易引發農漁民抗爭與土地正義爭議。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要比較台灣與國外在農漁村綠能衝突治理的差異並提出具體借鏡，必須取得國外具體成功案例與台灣代表性個案的完整治理脈絡，否則推論將流於抽象與概念層次。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前資料對台南麻豆漁電案、日本社區型農電、智利光電與農業用地衝突等關鍵案例的資訊不足，將直接影響研究中『國外成功案例』與『對台借鏡』兩大部分的完整性，因此需要進一步搜尋補強。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "4": [
+    {
+      "claim": "台灣農漁村綠能衝突的代表性案例包括台南沿海漁電共生案場與農電共生亂象。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要為台灣提出具體借鏡建議，必須補充更多國內外從衝突走向共榮的具體案例與最新政策調整資訊。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "5": [
+    {
+      "claim": "日本等國在農業光電上透過嚴謹的農地法規範與社區型能源治理，兼顧農業生產與能源轉型，提供潛在借鏡。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要為台灣提出具體借鏡建議，必須補充更多國內外從衝突走向共榮的具體案例與最新政策調整資訊。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "農電共生規範在2017年後逐步收緊，如限制光電設置比例、要求維持一定農作產量，顯示政府試圖回應亂象並兼顧農業生產。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有資料對2017–2024年的完整修法與成效評估、日本與智利案例的具體制度與社區治理設計仍有重大缺口，無法支撐完整的國際比較與借鏡分析。",
+      "confidence": "medium",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "日本在農電共生方面建立了較為嚴謹的制度，包括暫時土地使用變更許可、農作物產量不得低於平均八成、定期查核與三年一審等機制，以避免假種田真種電。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要將綠能衝突轉化為農漁村地方振興契機，關鍵在於精細土地與空間規劃、兼顧農漁生產的技術與制度設計，以及社區共享利益與參與決策機制。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "日本營農型光電已有較完整的法規設計，例如暫時土地使用變更、遮蔽率規範與產量減少不得超過一定比例，顯示其試圖以農業發展為中心整合光電。",
+      "confidence": "high",
+      "source_topic": "dfa226cc-4d91-4c4d-bad0-565e736ae256",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "日本對營農型太陽能採取嚴格的農地保護與執法機制，包括產量維持要求與違規時廢止 FIT/FIP 補助並恢復農地原狀，已對數百件事業採取暫停補助措施。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要比較台灣與國外在農漁村綠能衝突治理的差異並提出具體借鏡，必須取得國外具體成功案例與台灣代表性個案的完整治理脈絡，否則推論將流於抽象與概念層次。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前資料對台南麻豆漁電案、日本社區型農電、智利光電與農業用地衝突等關鍵案例的資訊不足，將直接影響研究中『國外成功案例』與『對台借鏡』兩大部分的完整性，因此需要進一步搜尋補強。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "6": [
+    {
+      "claim": "台灣農漁村綠能衝突的代表性案例包括台南沿海漁電共生案場與農電共生亂象。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣現行農電共生與光電用地政策經歷多次放寬與加嚴，導致農漁村對綠能開發的不信任與衝突累積。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "在能源轉型壓力下，綠能進入農漁村時若缺乏嚴謹的土地與空間規劃，容易引發農漁民抗爭與土地正義爭議。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣早期農電共生因規範鬆散，曾出現『假種田真種電』與缺乏農業生產事實的違規光電棚，引發社會質疑與政策調整壓力。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "農電共生規範在2017年後逐步收緊，如限制光電設置比例、要求維持一定農作產量，顯示政府試圖回應亂象並兼顧農業生產。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有資料對2017–2024年的完整修法與成效評估、日本與智利案例的具體制度與社區治理設計仍有重大缺口，無法支撐完整的國際比較與借鏡分析。",
+      "confidence": "medium",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣目前僅部分允許屋頂型農電與少數地面型試驗場，且政策持續調整，反映過去假種田真種電爭議與管制搖擺，但缺乏像日本那樣穩定且可預期的長期制度設計。",
+      "confidence": "medium",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要將綠能衝突轉化為農漁村地方振興契機，關鍵在於精細土地與空間規劃、兼顧農漁生產的技術與制度設計，以及社區共享利益與參與決策機制。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣農電共生制度近年透過兩階段審查與退場機制試圖防堵假種田真種電，但實際成效仍需系統性資料檢驗。",
+      "confidence": "medium",
+      "source_topic": "dfa226cc-4d91-4c4d-bad0-565e736ae256",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣早期開放設施型農電共生時因規範鬆散，出現大量『假種田真種電』與無農業事實的違規光電棚，後續才在 2017 年起逐步加嚴規範與退場機制。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要比較台灣與國外在農漁村綠能衝突治理的差異並提出具體借鏡，必須取得國外具體成功案例與台灣代表性個案的完整治理脈絡，否則推論將流於抽象與概念層次。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前資料對台南麻豆漁電案、日本社區型農電、智利光電與農業用地衝突等關鍵案例的資訊不足，將直接影響研究中『國外成功案例』與『對台借鏡』兩大部分的完整性，因此需要進一步搜尋補強。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣農電共生曾出現假種田真種電亂象，政府自2017年起逐步強化設施限制與產量要求並建立退場機制，顯示農地與光電衝突與制度調整之間的互動。",
+      "confidence": "high",
+      "source_topic": "6093f2ca-682c-436d-b032-38f482a27001",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "7": [
+    {
+      "claim": "日本等國在農業光電上透過嚴謹的農地法規範與社區型能源治理，兼顧農業生產與能源轉型，提供潛在借鏡。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要為台灣提出具體借鏡建議，必須補充更多國內外從衝突走向共榮的具體案例與最新政策調整資訊。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "8": [
+    {
+      "claim": "日本等國在農業光電上透過嚴謹的農地法規範與社區型能源治理，兼顧農業生產與能源轉型，提供潛在借鏡。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要為台灣提出具體借鏡建議，必須補充更多國內外從衝突走向共榮的具體案例與最新政策調整資訊。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "9": [
+    {
+      "claim": "日本等國在農業光電上透過嚴謹的農地法規範與社區型能源治理，兼顧農業生產與能源轉型，提供潛在借鏡。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要為台灣提出具體借鏡建議，必須補充更多國內外從衝突走向共榮的具體案例與最新政策調整資訊。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "10": [
+    {
+      "claim": "智利在缺乏地域規劃下於農業用地大量設置光電，導致與糧食生產競爭並喪失社會正當性，顯示空間規劃對避免綠能衝突至關重要。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "11": [
+    {
+      "claim": "智利在缺乏地域規劃下於農業用地大量設置光電，導致與糧食生產競爭並喪失社會正當性，顯示空間規劃對避免綠能衝突至關重要。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "12": [
+    {
+      "claim": "智利在缺乏地域規劃下於農業用地大量設置光電，導致與糧食生產競爭並喪失社會正當性，顯示空間規劃對避免綠能衝突至關重要。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "13": [
+    {
+      "claim": "台灣農漁村綠能衝突的代表性案例包括台南沿海漁電共生案場與農電共生亂象。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "國發會區域治理沙盒嘗試透過在地參與與跨部會協作，為漁電共生等綠能衝突提供可制度化的治理指引。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要為台灣提出具體借鏡建議，必須補充更多國內外從衝突走向共榮的具體案例與最新政策調整資訊。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "14": [
+    {
+      "claim": "台灣農漁村綠能衝突的代表性案例包括台南沿海漁電共生案場與農電共生亂象。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "國發會區域治理沙盒嘗試透過在地參與與跨部會協作，為漁電共生等綠能衝突提供可制度化的治理指引。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要為台灣提出具體借鏡建議，必須補充更多國內外從衝突走向共榮的具體案例與最新政策調整資訊。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "15": [
+    {
+      "claim": "智利在缺乏地域規劃下於農業用地大量設置光電，導致與糧食生產競爭並喪失社會正當性，顯示空間規劃對避免綠能衝突至關重要。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要為台灣提出具體借鏡建議，必須補充更多國內外從衝突走向共榮的具體案例與最新政策調整資訊。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "17": [
+    {
+      "claim": "日本等國在農業光電上透過嚴謹的農地法規範與社區型能源治理，兼顧農業生產與能源轉型，提供潛在借鏡。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要為台灣提出具體借鏡建議，必須補充更多國內外從衝突走向共榮的具體案例與最新政策調整資訊。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "18": [
+    {
+      "claim": "台灣現行農電共生與光電用地政策經歷多次放寬與加嚴，導致農漁村對綠能開發的不信任與衝突累積。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "19": [
+    {
+      "claim": "台灣現行農電共生與光電用地政策經歷多次放寬與加嚴，導致農漁村對綠能開發的不信任與衝突累積。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "20": [
+    {
+      "claim": "台灣現行農電共生與光電用地政策經歷多次放寬與加嚴，導致農漁村對綠能開發的不信任與衝突累積。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "21": [
+    {
+      "claim": "台灣農漁村綠能衝突的代表性案例包括台南沿海漁電共生案場與農電共生亂象。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "現有向量庫資料雖可支撐理論框架與部分案例，但不足以構成完整、具代表性的專題研究，因此需要進一步搜尋補齊關鍵缺口。",
+      "confidence": "high",
+      "source_topic": "global",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "22": [
+    {
+      "claim": "漁電共生實務中存在假養殖真種電、契約權利義務不清與資本排擠傳統養殖等治理問題。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前可用資料足以顯示台灣農漁村綠能衝突的存在，但不足以支撐完整的國內制度評估與國外比較借鏡分析。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "要完成能源轉型下農漁村綠能衝突的專題研究，必須補充台灣政策與國外 agrivoltaics 治理案例等關鍵文獻。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "deduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "政府近年透過強化漁電共生查核、引入養殖協會與養殖團體參與規劃與輔導，試圖將政策導向『養殖為本、綠能加值』並修正前期失靈。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要比較台灣與國外在農漁村綠能衝突治理的差異並提出具體借鏡，必須取得國外具體成功案例與台灣代表性個案的完整治理脈絡，否則推論將流於抽象與概念層次。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前資料對台南麻豆漁電案、日本社區型農電、智利光電與農業用地衝突等關鍵案例的資訊不足，將直接影響研究中『國外成功案例』與『對台借鏡』兩大部分的完整性，因此需要進一步搜尋補強。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣農漁村綠能衝突的重要案例之一是嘉義台泥嘉謙與漁民合作的漁電共生案，涉及養殖權、契約糾紛與撤照爭議。",
+      "confidence": "high",
+      "source_topic": "6093f2ca-682c-436d-b032-38f482a27001",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "漁電共生政策目前正透過調整養殖事實查核指引與推動養殖協會參與規劃新制，以回應現場養殖實務與契約爭議。",
+      "confidence": "high",
+      "source_topic": "6093f2ca-682c-436d-b032-38f482a27001",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "23": [
+    {
+      "claim": "台灣漁電共生在部分地區引發居民與養殖戶對土地使用與生計安全的強烈反彈。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "漁電共生實務中存在假養殖真種電、契約權利義務不清與資本排擠傳統養殖等治理問題。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前可用資料足以顯示台灣農漁村綠能衝突的存在，但不足以支撐完整的國內制度評估與國外比較借鏡分析。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "要完成能源轉型下農漁村綠能衝突的專題研究，必須補充台灣政策與國外 agrivoltaics 治理案例等關鍵文獻。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "deduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "漁電共生在台灣沿海地區引發租金飆升與水資源調度不公等問題，導致傳統養殖業者被排擠與損失，顯示綠能開發與在地生計之間存在明顯衝突。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要比較台灣與國外在農漁村綠能衝突治理的差異並提出具體借鏡，必須取得國外具體成功案例與台灣代表性個案的完整治理脈絡，否則推論將流於抽象與概念層次。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前資料對台南麻豆漁電案、日本社區型農電、智利光電與農業用地衝突等關鍵案例的資訊不足，將直接影響研究中『國外成功案例』與『對台借鏡』兩大部分的完整性，因此需要進一步搜尋補強。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "24": [
+    {
+      "claim": "台灣漁電共生在部分地區引發居民與養殖戶對土地使用與生計安全的強烈反彈。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "漁電共生實務中存在假養殖真種電、契約權利義務不清與資本排擠傳統養殖等治理問題。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前可用資料足以顯示台灣農漁村綠能衝突的存在，但不足以支撐完整的國內制度評估與國外比較借鏡分析。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "要完成能源轉型下農漁村綠能衝突的專題研究，必須補充台灣政策與國外 agrivoltaics 治理案例等關鍵文獻。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "deduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "25": [
+    {
+      "claim": "農電共生若缺乏嚴謹的實驗基礎與退場機制，容易背離農業生產目標並被視為投機行為。",
+      "confidence": "medium",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前可用資料足以顯示台灣農漁村綠能衝突的存在，但不足以支撐完整的國內制度評估與國外比較借鏡分析。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "要完成能源轉型下農漁村綠能衝突的專題研究，必須補充台灣政策與國外 agrivoltaics 治理案例等關鍵文獻。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "deduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "26": [
+    {
+      "claim": "在能源轉型壓力下，綠能進入農漁村時若缺乏嚴謹的土地與空間規劃，容易引發農漁民抗爭與土地正義爭議。",
+      "confidence": "high",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "這些衝突與爭議多與土地使用變更、租金與收益分配、養殖或農作實際經營狀況與查核標準、以及居民對景觀與生活品質的疑慮有關。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要將綠能衝突轉化為農漁村地方振興契機，關鍵在於精細土地與空間規劃、兼顧農漁生產的技術與制度設計，以及社區共享利益與參與決策機制。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前台灣在漁電共生查核指引與農業容許審查上雖有調整與檢討，但是否足以支撐能源正義與土地正義、並降低衝突，仍需更多實證與制度性資料。",
+      "confidence": "medium",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "政府近年透過強化漁電共生查核、引入養殖協會與養殖團體參與規劃與輔導，試圖將政策導向『養殖為本、綠能加值』並修正前期失靈。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要比較台灣與國外在農漁村綠能衝突治理的差異並提出具體借鏡，必須取得國外具體成功案例與台灣代表性個案的完整治理脈絡，否則推論將流於抽象與概念層次。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前資料對台南麻豆漁電案、日本社區型農電、智利光電與農業用地衝突等關鍵案例的資訊不足，將直接影響研究中『國外成功案例』與『對台借鏡』兩大部分的完整性，因此需要進一步搜尋補強。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "漁電共生政策目前正透過調整養殖事實查核指引與推動養殖協會參與規劃新制，以回應現場養殖實務與契約爭議。",
+      "confidence": "high",
+      "source_topic": "6093f2ca-682c-436d-b032-38f482a27001",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "27": [
+    {
+      "claim": "現有資料對2017–2024年的完整修法與成效評估、日本與智利案例的具體制度與社區治理設計仍有重大缺口，無法支撐完整的國際比較與借鏡分析。",
+      "confidence": "medium",
+      "source_topic": "61fddee6-1d07-4e0a-a5ac-bd86a9446a41",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 2,
+      "from_warned_critic_review": false
+    }
+  ],
+  "28": [
+    {
+      "claim": "台灣農漁村地區在推動光電與漁電共生時已出現多起衝突與爭議，例如台南麻豆居民反對漁電共生案場與台鹽綠能契約爭議。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "這些衝突與爭議多與土地使用變更、租金與收益分配、養殖或農作實際經營狀況與查核標準、以及居民對景觀與生活品質的疑慮有關。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "29": [
+    {
+      "claim": "目前台灣在漁電共生查核指引與農業容許審查上雖有調整與檢討，但是否足以支撐能源正義與土地正義、並降低衝突，仍需更多實證與制度性資料。",
+      "confidence": "medium",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "30": [
+    {
+      "claim": "台灣農漁村地區在推動光電與漁電共生時已出現多起衝突與爭議，例如台南麻豆居民反對漁電共生案場與台鹽綠能契約爭議。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "這些衝突與爭議多與土地使用變更、租金與收益分配、養殖或農作實際經營狀況與查核標準、以及居民對景觀與生活品質的疑慮有關。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣目前僅部分允許屋頂型農電與少數地面型試驗場，且政策持續調整，反映過去假種田真種電爭議與管制搖擺，但缺乏像日本那樣穩定且可預期的長期制度設計。",
+      "confidence": "medium",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要將綠能衝突轉化為農漁村地方振興契機，關鍵在於精細土地與空間規劃、兼顧農漁生產的技術與制度設計，以及社區共享利益與參與決策機制。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "31": [
+    {
+      "claim": "日本在農電共生方面建立了較為嚴謹的制度，包括暫時土地使用變更許可、農作物產量不得低於平均八成、定期查核與三年一審等機制，以避免假種田真種電。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣目前僅部分允許屋頂型農電與少數地面型試驗場，且政策持續調整，反映過去假種田真種電爭議與管制搖擺，但缺乏像日本那樣穩定且可預期的長期制度設計。",
+      "confidence": "medium",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要將綠能衝突轉化為農漁村地方振興契機，關鍵在於精細土地與空間規劃、兼顧農漁生產的技術與制度設計，以及社區共享利益與參與決策機制。",
+      "confidence": "high",
+      "source_topic": "3507e777-d7ab-4e8d-a842-037e2a26a323",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "32": [
+    {
+      "claim": "台灣農漁村綠能衝突的主要類型已可由現有資料與新聞初步盤點，例如農地光電爭地、漁電共生爭議及原住民族土地開發衝突。",
+      "confidence": "high",
+      "source_topic": "dfa226cc-4d91-4c4d-bad0-565e736ae256",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "麻豆漁電共生案顯示地方居民對光電選址、程序透明與生態影響高度不滿，並組成自救會抗爭。",
+      "confidence": "high",
+      "source_topic": "dfa226cc-4d91-4c4d-bad0-565e736ae256",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "33": [
+    {
+      "claim": "政府近年透過強化漁電共生查核、引入養殖協會與養殖團體參與規劃與輔導，試圖將政策導向『養殖為本、綠能加值』並修正前期失靈。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "若要比較台灣與國外在農漁村綠能衝突治理的差異並提出具體借鏡，必須取得國外具體成功案例與台灣代表性個案的完整治理脈絡，否則推論將流於抽象與概念層次。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前資料對台南麻豆漁電案、日本社區型農電、智利光電與農業用地衝突等關鍵案例的資訊不足，將直接影響研究中『國外成功案例』與『對台借鏡』兩大部分的完整性，因此需要進一步搜尋補強。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "漁電共生政策目前正透過調整養殖事實查核指引與推動養殖協會參與規劃新制，以回應現場養殖實務與契約爭議。",
+      "confidence": "high",
+      "source_topic": "6093f2ca-682c-436d-b032-38f482a27001",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "34": [
+    {
+      "claim": "若要比較台灣與國外在農漁村綠能衝突治理的差異並提出具體借鏡，必須取得國外具體成功案例與台灣代表性個案的完整治理脈絡，否則推論將流於抽象與概念層次。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前資料對台南麻豆漁電案、日本社區型農電、智利光電與農業用地衝突等關鍵案例的資訊不足，將直接影響研究中『國外成功案例』與『對台借鏡』兩大部分的完整性，因此需要進一步搜尋補強。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "台灣農漁村綠能衝突的重要案例之一是嘉義台泥嘉謙與漁民合作的漁電共生案，涉及養殖權、契約糾紛與撤照爭議。",
+      "confidence": "high",
+      "source_topic": "6093f2ca-682c-436d-b032-38f482a27001",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "35": [
+    {
+      "claim": "若要比較台灣與國外在農漁村綠能衝突治理的差異並提出具體借鏡，必須取得國外具體成功案例與台灣代表性個案的完整治理脈絡，否則推論將流於抽象與概念層次。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "目前資料對台南麻豆漁電案、日本社區型農電、智利光電與農業用地衝突等關鍵案例的資訊不足，將直接影響研究中『國外成功案例』與『對台借鏡』兩大部分的完整性，因此需要進一步搜尋補強。",
+      "confidence": "high",
+      "source_topic": "3bbbdf5a-99d2-4162-9100-e935a27abaa7",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "農業光電（agrivoltaics）在國際上被視為農業與光電雙重使用的關鍵模式，但各國在名稱、定義與標準上尚未統一。",
+      "confidence": "high",
+      "source_topic": "6093f2ca-682c-436d-b032-38f482a27001",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    },
+    {
+      "claim": "要分析能源轉型下農漁村綠能衝突並提出可供台灣借鏡的建議，必須補充國外成功化解農漁／綠能衝突的實證案例與制度設計。",
+      "confidence": "medium",
+      "source_topic": "6093f2ca-682c-436d-b032-38f482a27001",
+      "critic_status": "PASS",
+      "reasoning_type": "abduction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ],
+  "36": [
+    {
+      "claim": "台灣農漁村綠能衝突的重要案例之一是嘉義台泥嘉謙與漁民合作的漁電共生案，涉及養殖權、契約糾紛與撤照爭議。",
+      "confidence": "high",
+      "source_topic": "6093f2ca-682c-436d-b032-38f482a27001",
+      "critic_status": "PASS",
+      "reasoning_type": "induction",
+      "source_iteration": 1,
+      "from_warned_critic_review": false
+    }
+  ]
+}

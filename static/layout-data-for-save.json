@@ -1,0 +1,1240 @@
+{
+  "nodes": [
+    {
+      "id": "mod-indexing",
+      "labelEn": "Indexing",
+      "labelZh": "索引與數據",
+      "moduleId": 0,
+      "status": "header",
+      "rationale": "Indexing 模組是支撐系統運作的「高可信資料工廠」。不同於一般資料庫只負責存儲，本模組涵蓋了從自動化擷取、清洗、權威性驗證到分級儲存的完整流程，確保「垃圾進，垃圾出」的情況不會發生，讓上層模組能專注於邏輯與推論。\n\n模組重點：\n• 資料來源可信：只收錄高可信度的網站與內容，並透過權威性評分進行治理。\n• 檢索效能穩定：整合結構化資料庫、向量搜尋與快取，快速取回與查詢意圖最接近的文件。\n• 自動化情報蒐集：全天候監控指定的高價值來源，確保資訊時效性與完整性。",
+      "script": "",
+      "isModuleHeader": true,
+      "x": 22,
+      "y": 232,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "sys-db",
+      "labelEn": "Postgres DB",
+      "labelZh": "資料庫",
+      "moduleId": 6,
+      "status": "done",
+      "rationale": "目的：儲存結構化 ML 用資料作為資料基底。\n技術/功能實現：使用線上 PostgreSQL，存放 document object、metadata，以及供模型訓練使用的欄位。",
+      "script": "retrieval_providers/postgres_client.py",
+      "x": 1193,
+      "y": 38,
+      "workflows": [
+        "workflow1",
+        "workflow2",
+        "workflow3",
+        "workflow5"
+      ],
+      "isModuleHeader": false
+    },
+    {
+      "id": "sys-cache",
+      "labelEn": "In-Memory Cache",
+      "labelZh": "記憶體快取",
+      "moduleId": 6,
+      "status": "done",
+      "rationale": "目的：加速重複查詢與檢索流程，供進一步分析與推論使用。\n技術/功能實現：快取 retrieval 結果，提供後續模組分析與推論。",
+      "script": "chat/cache.py",
+      "x": 2354,
+      "y": 88,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "sys-vec",
+      "labelEn": "Qdrant Vector DB",
+      "labelZh": "向量資料庫",
+      "moduleId": 0,
+      "status": "partial",
+      "rationale": "目的：提供語意檢索能力，支援混合檢索。\n技術/功能實現：存全文 + metadata + embedding，作為混合索引查詢基底。",
+      "script": "retrieval_providers/qdrant.py",
+      "x": 593,
+      "y": 884,
+      "workflows": [
+        "workflow1",
+        "workflow2",
+        "workflow3",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "sqlite-dev",
+      "labelEn": "SQLite DB",
+      "labelZh": "SQLite開發庫",
+      "moduleId": 6,
+      "status": "done",
+      "rationale": "目的：本地開發與 pipeline 模擬。\n技術/功能實現：使用 SQLite 儲存臨時 ML 訓練資料，模擬系統行為，不存使用者行為資料。",
+      "script": "storage/sqlite_dev.py",
+      "x": 1195,
+      "y": 137,
+      "workflows": [
+        "workflow5"
+      ]
+    },
+    {
+      "id": "data-chunking",
+      "labelEn": "Data Chunking",
+      "labelZh": "資料分級",
+      "moduleId": 0,
+      "status": "notdone",
+      "rationale": "目的：依資料重要性不同處理，優化儲存與檢索效率。\n技術/功能實現：對重要文件進行精細 chunking；對一般文件只存 metadata 或全文，不存 embedding；支援 minimal chunking 等不同顆粒度儲存策略。",
+      "script": "indexing/chunking.py",
+      "x": 312,
+      "y": 1058,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "auto-crawler",
+      "labelEn": "Auto Crawler",
+      "labelZh": "自動爬蟲",
+      "moduleId": 0,
+      "status": "notdone",
+      "rationale": "目的：自動抓取來源網站文件，確保儲存資料完整。\n技術/功能實現：規劃建立爬蟲 pipeline，自動抓取高可信度來源的文件；支援欄位抽取、metadata 標記、以及後續儲存到Qdrant。",
+      "script": "indexing/crawler.py",
+      "x": 302,
+      "y": 492,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "format-detect",
+      "labelEn": "Format Detector",
+      "labelZh": "格式偵測",
+      "moduleId": 0,
+      "status": "notdone",
+      "rationale": "目的：維持資料準確性與最新狀態。\n技術/功能實現：規劃自動偵測網站格式或文章版本變動，更新 Storage 中的文件，確保資料一致性。",
+      "script": "indexing/format_detector.py",
+      "x": 429,
+      "y": 629,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "user-data",
+      "labelEn": "User Data Storage",
+      "labelZh": "使用者資料",
+      "moduleId": 6,
+      "status": "notdone",
+      "rationale": "目的：記錄使用者相關資料，用於分析與個性化推論。\n技術/功能實現：儲存使用者登入資訊、過往對話歷史等，支援系統提供網站體驗。",
+      "script": "storage/user_data.py",
+      "x": 1623,
+      "y": 86,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "quality-gate",
+      "labelEn": "Quality Gate",
+      "labelZh": "品質閘門",
+      "moduleId": 0,
+      "status": "notdone",
+      "rationale": "目的：作為資料品質的守門員，防止「垃圾進、垃圾出」。\n技術/功能實現：依據內容長度、亂碼比例、語言機率等指標，自動剔除低品質或無效的網頁內容。",
+      "script": "indexing/quality_gate.py",
+      "x": 312,
+      "y": 767,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "light-ner",
+      "labelEn": "Light NER",
+      "labelZh": "輕量NER",
+      "moduleId": 0,
+      "status": "notdone",
+      "rationale": "目的：豐富資料的 Metadata，提升檢索過濾的精準度。\n技術/功能實現：使用輕量級模型快速識別文章中的人名、機構、地名，不需呼叫昂貴的LLM。",
+      "script": "indexing/light_ner.py",
+      "x": 310,
+      "y": 912,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "src-auth",
+      "labelEn": "Source Authority",
+      "labelZh": "來源權威",
+      "moduleId": 0,
+      "status": "notdone",
+      "rationale": "目的：建立資料來源的權威性評級，優先展示可信內容。\n技術/功能實現：依據域名歷史信譽、引用次數等計算權威分數，直接影響後續的排序權重。",
+      "script": "indexing/source_authority.py",
+      "x": 546,
+      "y": 360,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "domain-allowlist",
+      "labelEn": "Domain Allowlist",
+      "labelZh": "域名白名單",
+      "moduleId": 0,
+      "status": "notdone",
+      "rationale": "目的：確保系統僅收錄合規與高可信度的來源。\n技術/功能實現：維護動態的白名單機制，非清單內的來源將被標記或阻擋，支援企業自訂信任清單。",
+      "script": "indexing/domain_allowlist.py",
+      "x": 24,
+      "y": 359,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "regex-parser",
+      "labelEn": "Regex Parser",
+      "labelZh": "規則解析器",
+      "moduleId": 0,
+      "status": "notdone",
+      "rationale": "目的：針對高結構化資料（如財報、法規編號）進行精確提取。\n技術/功能實現：使用規則表達式引擎提取特定格式資訊，輔助 LLM 處理非自然語言的數據。",
+      "script": "indexing/regex_parser.py",
+      "x": 187,
+      "y": 629,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "anomaly-detector",
+      "labelEn": "Anomaly Detector",
+      "labelZh": "異常偵測",
+      "moduleId": 0,
+      "status": "notdone",
+      "rationale": "目的：監控資料流的健康狀況，即時發現爬蟲或來源異常。\n技術/功能實現：偵測來源網站是否出現大量 404、內容空白或資料分佈偏移，確保索引庫健康。",
+      "script": "indexing/anomaly_detector.py",
+      "x": 299,
+      "y": 365,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "mod-input",
+      "labelEn": "Input",
+      "labelZh": "入口與安全",
+      "moduleId": 1,
+      "status": "header",
+      "rationale": "Input 模組是企業與使用者接入系統的安全閘道。它不僅是接收指令的窗口，更是理解使用者意圖與防範惡意攻擊的第一道防線，確保後續的高算力模組僅處理安全、清晰且結構化的請求。\n\n模組重點：\n• 企業級安全性：在 LLM 接觸資料前即攔截惡意指令 (Prompt Injection)，保障系統合規與隱私。\n• 多模態資料整合：支援企業上傳私有文件（PDF/Word），實現「帶入自有資料 (BYOD)」的專屬分析能力。\n• 精準意圖識別：將複雜的商業問題拆解為可執行的檢索步驟，提升回答精準度。",
+      "script": "",
+      "isModuleHeader": true,
+      "x": 1100,
+      "y": 280,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "prompt-guardrails",
+      "labelEn": "Prompt Guardrails",
+      "labelZh": "提示防護",
+      "moduleId": 1,
+      "status": "notdone",
+      "rationale": "目的：保障企業資安，防止惡意使用者透過指令越獄或竊取系統機密。\n技術/功能實現：建立惡意特徵庫與對抗性檢測層，在查詢進入核心系統前即時攔截並過濾潛在攻擊。",
+      "script": "core/prompt_guardrails.py",
+      "x": 968,
+      "y": 388,
+      "workflows": [
+        "workflow2",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "upload-gateway",
+      "labelEn": "Upload Gateway",
+      "labelZh": "上傳閘道",
+      "moduleId": 1,
+      "status": "notdone",
+      "rationale": "目的：讓企業能將內部報告、財報或文獻導入系統，進行專屬知識庫的分析。\n技術/功能實現：整合 OCR 與 ETL 流程，支援 PDF/Word/URL 等格式，自動進行病毒掃描、清洗與文字提取。",
+      "script": "input/upload_gateway.py",
+      "x": 974,
+      "y": 524,
+      "workflows": [
+        "workflow5"
+      ]
+    },
+    {
+      "id": "query-decomp",
+      "labelEn": "Query Decomposition",
+      "labelZh": "查詢拆解",
+      "moduleId": 1,
+      "status": "done",
+      "rationale": "目的：解決「比較型」或「多層次」的複雜商業問題（如：比較 A 與 B 公司的 Q3 財報）。\n技術/功能實現：使用 LLM 將一個大問題拆解為多個獨立的子查詢意圖，確保檢索模組能精準調閱不同面向的資料。",
+      "script": "chat/chatbot_interface.py",
+      "x": 1190,
+      "y": 467,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "mod-retrieval",
+      "labelEn": "Retrieval",
+      "labelZh": "檢索",
+      "moduleId": 2,
+      "status": "header",
+      "rationale": "Retrieval 模組負責根據使用者查詢，從 Storage (Indexing) 或網路找到相關資料，提供給後續模組進行排序與推論。\n\n模組重點：\n• 已實作部分：Internal Index，負責將 Storage 裡的資料轉換為可查詢形式，供上層模組使用。\n• 規劃中：Web Search 功能尚未實作，未來將支援從外部網路抓取資料；支援多個資料來源，包含企業自訂資料與外部網路，作為混合檢索策略的一部分。\n• 模組價值：作為資料搜尋引擎，服務上層的 Ranking 與 Reasoning 模組，確保後續流程能取得相關資訊。\n• 核心特點：支援多來源搜尋，包括 Storage、外部 Web API 以及企業自訂資料；可結合不同索引策略（Internal Index / Qdrant / Web Search）提供彈性召回。",
+      "script": "",
+      "isModuleHeader": true,
+      "x": 997,
+      "y": 954,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "internal-index",
+      "labelEn": "Internal Search",
+      "labelZh": "內部索引",
+      "moduleId": 2,
+      "status": "partial",
+      "rationale": "目的：提供系統內部資料的檢索能力，支援後續排序與推論。\n技術/功能實現：利用BM25關鍵字搜尋演算法及LLM語意搜尋，實現混合式檢索。",
+      "script": "core/retriever.py",
+      "x": 946,
+      "y": 759,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "web-search",
+      "labelEn": "Web Search",
+      "labelZh": "網路搜尋",
+      "moduleId": 2,
+      "status": "notdone",
+      "rationale": "目的：補充即時資訊，支援系統獲取 Storage 外資料。\n技術/功能實現：抓取網路資料後存入 cache，供後續分析與推論使用。",
+      "script": "core/web_search.py",
+      "x": 1395,
+      "y": 769,
+      "workflows": [
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "multi-source",
+      "labelEn": "Custom Source Search",
+      "labelZh": "多源搜尋",
+      "moduleId": 2,
+      "status": "notdone",
+      "rationale": "目的：搜尋用戶自行上傳或連結的內容\n技術/功能實現：搜尋企業自訂資料，結合內部搜尋及網路搜尋，實現混合搜尋策略。",
+      "script": "retrieval/custom_source.py",
+      "x": 1169,
+      "y": 763,
+      "workflows": [
+        "workflow3",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "mod-ranking",
+      "labelEn": "Ranking",
+      "labelZh": "排序",
+      "moduleId": 3,
+      "status": "header",
+      "rationale": "Ranking 模組負責對 Retrieval 回傳的資料進行排序與特徵計算，選出適合 Reasoning 模組使用的 top results。\n\n模組重點：\n• 已實作部分：規則式依 query 類型調整權重，確保不同查詢類型得到適合的排序策略；XGBoost 演算法，用於結合多種排序特徵（如向量相似度、metadata、規則權重）做綜合評分，提升結果品質；MMR（Maximal Marginal Relevance），用來平衡多元性與相關性，確保排序結果多樣性。\n• 規劃中：利用 LLM 進行動態權重調整，未來可根據 query 類型彈性調整各排序特徵的影響力，提高對多樣化查詢的適應能力。\n• 模組價值/核心特點：Ranking 模組的存在是為了確保 Reasoning 模組接收到最適合的 top results，兼顧結果的多元性與精確性。透過多種演算法與特徵結合，Ranking 可根據查詢特性調整排序策略，支援系統對不同查詢的需求。",
+      "script": "",
+      "isModuleHeader": true,
+      "x": 1834,
+      "y": 353,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "mmr",
+      "labelEn": "MMR",
+      "labelZh": "MMR多樣性",
+      "moduleId": 3,
+      "status": "done",
+      "rationale": "目的：根據搜尋與推論性質決定排序，平衡多元觀點與精準資訊。\n技術/功能實現：使用 MMR 演算法在回傳結果中選擇 top results，兼顧多樣性與相關性。",
+      "script": "core/mmr.py",
+      "x": 1835,
+      "y": 985,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "xgboost",
+      "labelEn": "XGBoost Ranking",
+      "labelZh": "XGBoost排序",
+      "moduleId": 3,
+      "status": "done",
+      "rationale": "目的：將多種排序特徵綜合評分，提升排序精準度。\n技術/功能實現：使用 XGBoost 演算法結合數十種特徵（包括 embedding、metadata、規則權重等）計算每個結果的排序分數。",
+      "script": "core/xgboost_ranker.py",
+      "x": 1835,
+      "y": 827,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "rule-weight",
+      "labelEn": "Rule Weight",
+      "labelZh": "規則權重",
+      "moduleId": 3,
+      "status": "done",
+      "rationale": "目的：依 query 類型調整不同排序特徵的影響力。\n技術/功能實現：採規則式策略，根據查詢性質調整 XGBoost 等特徵的權重，保證排序結果符合查詢需求。",
+      "script": "ranking/rule_weight.py",
+      "x": 1835,
+      "y": 667,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "llm-weight",
+      "labelEn": "LLM Weight",
+      "labelZh": "LLM權重",
+      "moduleId": 3,
+      "status": "notdone",
+      "rationale": "目的：未來可利用語意分析自動調整排序權重，進一步符合使用者需求。\n技術/功能實現：計畫使用 LLM 分析 query 語意，調整各特徵權重；系統甚至可與使用者互動，討論並優化搜尋結果。",
+      "script": "ranking/llm_weight.py",
+      "x": 1835,
+      "y": 476,
+      "workflows": [
+        "workflow3",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "mod-reasoning",
+      "labelEn": "Reasoning",
+      "labelZh": "推論",
+      "moduleId": 4,
+      "status": "header",
+      "rationale": "Reasoning 模組負責對 Retrieval + Ranking 回傳的資料進行分析、整合與推論，生成可靠、可用的結論或洞察。這是本產品最關鍵的特色，也是負責指揮 retrieval 和 ranking 的大腦！\n\n模組重點：\n• 已實作部分：基本格式限定與 prompt 設計，推論事實以 cached documents 為依據。\n• 規劃中：Evidence chain 建構（追蹤推論來源與步驟）；Knowledge boundary 與 gap detection（檢測資料覆蓋範圍與缺口）；Iterative / recursive search（多次搜尋完善推論結果）；Domain classifier（依領域判斷資料與推論適用性）；Logic verification、logic/source transparency（檢查推論邏輯及資料引用透明度）；Knowledge graph generation（含編輯功能，輔助使用者探索與研究）。\n• 模組價值/核心特點：提升推論可靠性，確保資料來源可信、推論周全、邏輯與引用檢查完整；多次搜尋不受限於使用者初始 query，完善推論結果；提供 knowledge graph 等工具，協助使用者探索、研究與分析資料。",
+      "script": "",
+      "isModuleHeader": true,
+      "x": 2342,
+      "y": 360,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "orchestrator",
+      "labelEn": "Deep Research Orchestrator",
+      "labelZh": "總控與流程管理器",
+      "moduleId": 4,
+      "status": "notdone",
+      "rationale": "核心大腦 (State Machine)。\n1. 管理 Actor-Critic 循環。\n2. 捕捉 Analyst 的 'SEARCH_REQUIRED' 請求，執行補充搜尋。\n3. 動態注入新資料至 Context 並重啟分析流程 (Iterative Loop)。",
+      "script": "reasoning/orchestrator.py",
+      "x": 2199,
+      "y": 483,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ],
+      "isModuleHeader": false
+    },
+    {
+      "id": "clarification-agent",
+      "labelEn": "Clarification Agent",
+      "labelZh": "意圖澄清 Agent",
+      "moduleId": 4,
+      "status": "notdone",
+      "rationale": "前置處理層。\n功能：解析時間與實體歧義 (Level 3 Parsing)。\n整合點：當 Orchestrator 判斷意圖不清時優先調用，產出 JSON 選項供前端互動。",
+      "script": "reasoning/agents/clarification.py",
+      "x": 2494,
+      "y": 520,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ],
+      "isModuleHeader": false
+    },
+    {
+      "id": "analyst-agent",
+      "labelEn": "Analyst Agent",
+      "labelZh": "分析師 Agent",
+      "moduleId": 4,
+      "status": "notdone",
+      "rationale": "核心推論引擎。\n1. 建構心智知識圖譜以梳理實體關係。\n2. 執行缺口偵測 (Gap Detection)，確認目前搜到的資訊是否充分。\n3. 若證據鏈斷裂，輸出 'SEARCH_REQUIRED' JSON 發起新搜尋；若完整，才撰寫草稿。\n4. 負責推論與搜尋的周全度。",
+      "script": "reasoning/agents/analyst.py",
+      "x": 2199,
+      "y": 681,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ],
+      "isModuleHeader": false
+    },
+    {
+      "id": "kg-logic",
+      "labelEn": "KG & Gap Detection",
+      "labelZh": "圖譜與缺口偵測邏輯",
+      "moduleId": 4,
+      "status": "notdone",
+      "rationale": "Analyst 內部的關鍵思考步驟 (Thinking Process)。\n功能：\n1. 檢查每個推論節點是否有 Tier 1-2 證據支持。\n2. 識別「孤立節點」或「斷裂鏈條」。\n3. 將模糊問題轉化為具體的 Search Queries。",
+      "script": "reasoning/logic/kg_builder.py",
+      "x": 2486,
+      "y": 677,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow5"
+      ],
+      "isModuleHeader": false
+    },
+    {
+      "id": "critic-agent",
+      "labelEn": "Critic Agent",
+      "labelZh": "評論家 Agent",
+      "moduleId": 4,
+      "status": "notdone",
+      "rationale": "品質守門員。\n任務：\n1. 來源合規性檢查 (Strict/Discovery Mode)。\n2. 邏輯謬誤檢測 (歸納/演繹/溯因)。\n3. 檢查Monitor Mode 的輿情落差分析是否合理。\n4. 負責把關邏輯嚴謹性。",
+      "script": "reasoning/agents/critic.py",
+      "x": 2199,
+      "y": 848,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ],
+      "isModuleHeader": false
+    },
+    {
+      "id": "gap-analysis",
+      "labelEn": "Gap Analysis Logic",
+      "labelZh": "落差分析邏輯 (Monitor)",
+      "moduleId": 4,
+      "status": "notdone",
+      "rationale": "Monitor Mode 專用模組。\n功能：比對「官方數據」與「社群感知」在時間、態度、歸因上的落差，計算風險等級 (High/Medium/Low)。",
+      "script": "reasoning/logic/gap_analysis.py",
+      "x": 2493,
+      "y": 817,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow5"
+      ],
+      "isModuleHeader": false
+    },
+    {
+      "id": "writer-agent",
+      "labelEn": "Writer Agent",
+      "labelZh": "編輯 Agent",
+      "moduleId": 4,
+      "status": "notdone",
+      "rationale": "最終輸出層。\n功能：接收通過 Critic 審查的草稿，進行格式化輸出。\n會明確標示出推論過程，以集其中可能不嚴謹或證據不充分之處。",
+      "script": "reasoning/agents/writer.py",
+      "x": 2199,
+      "y": 1002,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ],
+      "isModuleHeader": false
+    },
+    {
+      "id": "mod-output",
+      "labelEn": "Output",
+      "labelZh": "輸出與介面",
+      "moduleId": 5,
+      "status": "header",
+      "rationale": "Output 模組是將複雜的推論結果轉化為商業價值的關鍵介面。它不僅提供視覺化的分析工具，更賦能媒體夥伴與企業客戶，透過數據儀表板與協作管理功能，將 AI 洞察落實到決策流程中。\n\n模組重點：\n• 推論可視化：將黑盒子的推論過程轉為可互動的知識圖譜與心智圖，輔助研究人員探索。\n• 媒體賦能：提供專屬儀表板，讓媒體夥伴掌握讀者關注的熱點議題與導流成效。\n• 協作與管理：支援團隊協作、資料來源管理與多格式匯出，無縫整合至工作流。",
+      "script": "",
+      "isModuleHeader": true,
+      "x": 2872,
+      "y": 353,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "sys-api",
+      "labelEn": "API Gateway",
+      "labelZh": "API閘道",
+      "moduleId": 5,
+      "status": "done",
+      "rationale": "目的：作為系統與第三方服務的標準化橋樑，支援彈性擴充。\n技術/功能實現：基於 FastAPI 的高效能路由核心，處理身分驗證、流量控制與 API 請求派發。",
+      "script": "webserver/main.py",
+      "x": 3118,
+      "y": 354,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "sys-fe",
+      "labelEn": "Frontend UI",
+      "labelZh": "前端介面",
+      "moduleId": 5,
+      "status": "partial",
+      "rationale": "目的：提供直覺的操作體驗，讓非技術人員也能輕鬆使用 AI 推論。\n技術/功能實現：整合對話、引用預覽與模式切換的綜合介面，支援響應式設計。",
+      "script": "static/news-search-prototype.html",
+      "x": 3369,
+      "y": 488,
+      "workflows": [
+        "workflow1",
+        "workflow3",
+        "workflow4",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "llm-safety-net",
+      "labelEn": "LLM Safety Net",
+      "labelZh": "LLM安全網",
+      "moduleId": 5,
+      "status": "notdone",
+      "rationale": "目的：確保輸出的合規性與安全性，保護品牌聲譽。\n技術/功能實現：作為輸出的最後一道閘門，自動檢測並過濾 PII (個資)、有害內容或不當建議。",
+      "script": "output/llm_safety_net.py",
+      "x": 3388,
+      "y": 356,
+      "workflows": [
+        "workflow5"
+      ]
+    },
+    {
+      "id": "visualizer-engine",
+      "labelEn": "Visualizer Engine",
+      "labelZh": "視覺化引擎",
+      "moduleId": 5,
+      "status": "notdone",
+      "rationale": "目的：將複雜的邏輯推演轉化為直觀的圖表，加速資訊吸收。\n技術/功能實現：前端渲染引擎，負責繪製動態的推論鏈 (Tree View) 與知識圖譜 (Knowledge Graph)，支援縮放與點擊互動。",
+      "script": "output/visualizer_engine.py",
+      "x": 3507,
+      "y": 762,
+      "workflows": [
+        "workflow5"
+      ]
+    },
+    {
+      "id": "graph-editor",
+      "labelEn": "Graph Editor",
+      "labelZh": "圖譜編輯器",
+      "moduleId": 5,
+      "status": "notdone",
+      "rationale": "目的：讓使用者能參與知識建構，將 AI 成果轉化為個人知識資產。\n技術/功能實現：提供互動式編輯工具，允許使用者對知識圖譜進行節點新增、註釋修改與關聯調整。",
+      "script": "output/graph_editor.py",
+      "x": 3328,
+      "y": 841,
+      "workflows": [
+        "workflow5"
+      ]
+    },
+    {
+      "id": "dashboard-ui",
+      "labelEn": "Dashboard UI",
+      "labelZh": "儀表板介面",
+      "moduleId": 5,
+      "status": "notdone",
+      "rationale": "目的：為媒體與企業提供決策輔助，掌握議題趨勢與成效。\n技術/功能實現：視覺化數據看板，展示熱門關鍵字、讀者分群、導流轉換率等關鍵指標。",
+      "script": "output/dashboard_ui.py",
+      "x": 3668,
+      "y": 591,
+      "workflows": [
+        "workflow5"
+      ]
+    },
+    {
+      "id": "source-collab-mgr",
+      "labelEn": "Source & Collab Mgr",
+      "labelZh": "來源協作管理",
+      "moduleId": 5,
+      "status": "notdone",
+      "rationale": "目的：提供靈活的資料治理與團隊協作環境。\n技術/功能實現：管理介面，支援資料來源開關 (Domain Allowlist)、團隊成員權限設定及協作版本控制。",
+      "script": "output/source_collab_manager.py",
+      "x": 3077,
+      "y": 752,
+      "workflows": [
+        "workflow5"
+      ]
+    },
+    {
+      "id": "export-service",
+      "labelEn": "Export Service",
+      "labelZh": "匯出服務",
+      "moduleId": 5,
+      "status": "partial",
+      "rationale": "目的：打破工具藩籬，讓 AI 產出能直接應用於報告與簡報。\n技術/功能實現：支援將對話與圖譜匯出為 Word、PPT、Excel 格式，或生成分享連結，讓使用者帶到自己習慣的筆記軟體或AI工具，繼續處理資料。",
+      "script": "",
+      "x": 2883,
+      "y": 649,
+      "workflows": [
+        "workflow5"
+      ],
+      "isModuleHeader": false
+    },
+    {
+      "id": "mod-infrastructure",
+      "labelEn": "Infrastructure",
+      "labelZh": "基礎設施",
+      "moduleId": 6,
+      "status": "header",
+      "rationale": "此區塊包含支撐全系統運作的底層核心服務，為所有模組提供算力與數據支持，確保系統的高可用性與可觀測性。",
+      "script": "",
+      "isModuleHeader": true,
+      "x": 957,
+      "y": 35,
+      "workflows": [
+        "workflow1",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "sys-llm",
+      "labelEn": "LLM Service",
+      "labelZh": "LLM服務",
+      "moduleId": 6,
+      "status": "done",
+      "rationale": "目的：提供全系統通用的高階認知與生成能力。\n技術/功能實現：封裝多種模型 (GPT-4/Claude) API，統一管理 Token 預算與 Context Window，服務全系統各模組。",
+      "script": "core/llm_client.py",
+      "x": 2078,
+      "y": 86,
+      "workflows": [
+        "workflow1",
+        "workflow4",
+        "workflow5"
+      ]
+    },
+    {
+      "id": "sys-ana",
+      "labelEn": "Analytics Engine",
+      "labelZh": "分析引擎",
+      "moduleId": 6,
+      "status": "done",
+      "rationale": "目的：驅動產品優化的數據大腦，實現數據驅動的決策。\n技術/功能實現：全域數據收集器，追蹤檢索品質、Ranking 權重分佈與使用者互動行為，為 Dashboard 提供運算基礎，並支援關鍵字追蹤通知。",
+      "script": "core/query_logger.py",
+      "x": 1409,
+      "y": 83,
+      "workflows": [
+        "workflow5"
+      ]
+    },
+    {
+      "id": "node-1765349715587",
+      "labelEn": "Multi-search Integrator",
+      "labelZh": "多來源搜尋整合",
+      "status": "notdone",
+      "script": "core/integrator.py",
+      "rationale": "",
+      "moduleId": 2,
+      "isModuleHeader": false,
+      "workflows": [
+        "workflow5"
+      ],
+      "x": 1367,
+      "y": 967
+    }
+  ],
+  "edges": [
+    {
+      "from": "sys-api",
+      "to": "knowledge-gap"
+    },
+    {
+      "from": "sys-vec",
+      "to": "internal-index"
+    },
+    {
+      "from": "xgboost",
+      "to": "mmr"
+    },
+    {
+      "from": "synthesis",
+      "to": "sys-api"
+    },
+    {
+      "from": "llm-weight",
+      "to": "rule-weight"
+    },
+    {
+      "from": "rule-weight",
+      "to": "xgboost"
+    },
+    {
+      "from": "domain-allowlist",
+      "to": "auto-crawler"
+    },
+    {
+      "from": "auto-crawler",
+      "to": "regex-parser"
+    },
+    {
+      "from": "regex-parser",
+      "to": "quality-gate"
+    },
+    {
+      "from": "quality-gate",
+      "to": "light-ner"
+    },
+    {
+      "from": "light-ner",
+      "to": "data-chunking"
+    },
+    {
+      "from": "anomaly-detector",
+      "to": "auto-crawler"
+    },
+    {
+      "from": "auto-crawler",
+      "to": "format-detect"
+    },
+    {
+      "from": "src-auth",
+      "to": "auto-crawler"
+    },
+    {
+      "from": "format-detect",
+      "to": "quality-gate"
+    },
+    {
+      "from": "data-chunking",
+      "to": "sys-vec"
+    },
+    {
+      "from": "prompt-guardrails",
+      "to": "query-decomp"
+    },
+    {
+      "from": "upload-gateway",
+      "to": "sys-vec"
+    },
+    {
+      "from": "query-decomp",
+      "to": "internal-index"
+    },
+    {
+      "from": "query-decomp",
+      "to": "web-search"
+    },
+    {
+      "from": "query-decomp",
+      "to": "multi-source"
+    },
+    {
+      "from": "internal-index",
+      "to": "node-1765349715587"
+    },
+    {
+      "from": "web-search",
+      "to": "node-1765349715587"
+    },
+    {
+      "from": "multi-source",
+      "to": "node-1765349715587"
+    },
+    {
+      "from": "sys-db",
+      "to": "sys-ana"
+    },
+    {
+      "from": "sqlite-dev",
+      "to": "sys-ana"
+    },
+    {
+      "from": "sys-ana",
+      "to": "user-data"
+    },
+    {
+      "from": "node-1765349715587",
+      "to": "llm-weight"
+    },
+    {
+      "from": "orchestrator",
+      "to": "clarification-agent"
+    },
+    {
+      "from": "orchestrator",
+      "to": "analyst-agent"
+    },
+    {
+      "from": "clarification-agent",
+      "to": "analyst-agent"
+    },
+    {
+      "from": "kg-logic",
+      "to": "analyst-agent"
+    },
+    {
+      "from": "analyst-agent",
+      "to": "kg-logic"
+    },
+    {
+      "from": "gap-analysis",
+      "to": "analyst-agent"
+    },
+    {
+      "from": "analyst-agent",
+      "to": "gap-analysis"
+    },
+    {
+      "from": "analyst-agent",
+      "to": "critic-agent"
+    },
+    {
+      "from": "critic-agent",
+      "to": "writer-agent"
+    },
+    {
+      "from": "sys-api",
+      "to": "llm-safety-net"
+    },
+    {
+      "from": "llm-safety-net",
+      "to": "sys-fe"
+    },
+    {
+      "from": "sys-fe",
+      "to": "export-service"
+    },
+    {
+      "from": "sys-fe",
+      "to": "source-collab-mgr"
+    },
+    {
+      "from": "sys-fe",
+      "to": "visualizer-engine"
+    },
+    {
+      "from": "sys-fe",
+      "to": "dashboard-ui"
+    },
+    {
+      "from": "sys-fe",
+      "to": "graph-editor"
+    }
+  ],
+  "moduleBoxes": [
+    {
+      "x": 12,
+      "y": 222,
+      "width": 849,
+      "height": 959,
+      "moduleId": 0,
+      "nodePositions": [
+        {
+          "id": "mod-indexing",
+          "offsetX": 10,
+          "offsetY": 10
+        },
+        {
+          "id": "sys-vec",
+          "offsetX": 581,
+          "offsetY": 662
+        },
+        {
+          "id": "data-chunking",
+          "offsetX": 300,
+          "offsetY": 836
+        },
+        {
+          "id": "auto-crawler",
+          "offsetX": 290,
+          "offsetY": 270
+        },
+        {
+          "id": "format-detect",
+          "offsetX": 417,
+          "offsetY": 407
+        },
+        {
+          "id": "quality-gate",
+          "offsetX": 300,
+          "offsetY": 545
+        },
+        {
+          "id": "light-ner",
+          "offsetX": 298,
+          "offsetY": 690
+        },
+        {
+          "id": "src-auth",
+          "offsetX": 534,
+          "offsetY": 138
+        },
+        {
+          "id": "domain-allowlist",
+          "offsetX": 20,
+          "offsetY": 137
+        },
+        {
+          "id": "regex-parser",
+          "offsetX": 175,
+          "offsetY": 407
+        },
+        {
+          "id": "anomaly-detector",
+          "offsetX": 287,
+          "offsetY": 143
+        }
+      ]
+    },
+    {
+      "x": 943,
+      "y": 272,
+      "width": 469,
+      "height": 371,
+      "moduleId": 1,
+      "nodePositions": [
+        {
+          "id": "mod-input",
+          "offsetX": 126,
+          "offsetY": 8
+        },
+        {
+          "id": "prompt-guardrails",
+          "offsetX": 21,
+          "offsetY": 109
+        },
+        {
+          "id": "upload-gateway",
+          "offsetX": 18,
+          "offsetY": 222
+        },
+        {
+          "id": "query-decomp",
+          "offsetX": 254,
+          "offsetY": 214
+        }
+      ]
+    },
+    {
+      "x": 925,
+      "y": 718,
+      "width": 680,
+      "height": 389,
+      "moduleId": 2,
+      "nodePositions": [
+        {
+          "id": "mod-retrieval",
+          "offsetX": 9,
+          "offsetY": 286
+        },
+        {
+          "id": "internal-index",
+          "offsetX": 21,
+          "offsetY": 41
+        },
+        {
+          "id": "web-search",
+          "offsetX": 433,
+          "offsetY": 42
+        },
+        {
+          "id": "multi-source",
+          "offsetX": 226,
+          "offsetY": 40
+        },
+        {
+          "id": "node-1765349715587",
+          "offsetX": 240,
+          "offsetY": 269
+        }
+      ]
+    },
+    {
+      "x": 1784,
+      "y": 344,
+      "width": 299,
+      "height": 773,
+      "moduleId": 3,
+      "nodePositions": [
+        {
+          "id": "mod-ranking",
+          "offsetX": 10,
+          "offsetY": 10
+        },
+        {
+          "id": "mmr",
+          "offsetX": 19,
+          "offsetY": 477
+        },
+        {
+          "id": "xgboost",
+          "offsetX": 22,
+          "offsetY": 354
+        },
+        {
+          "id": "rule-weight",
+          "offsetX": 22,
+          "offsetY": 231
+        },
+        {
+          "id": "llm-weight",
+          "offsetX": 20,
+          "offsetY": 110
+        }
+      ]
+    },
+    {
+      "x": 2165,
+      "y": 342,
+      "width": 551,
+      "height": 856,
+      "moduleId": 4,
+      "nodePositions": [
+        {
+          "id": "mod-reasoning",
+          "offsetX": 10,
+          "offsetY": 10
+        },
+        {
+          "id": "knowledge-boundary",
+          "offsetX": 220,
+          "offsetY": 120
+        },
+        {
+          "id": "knowledge-gap",
+          "offsetX": 455,
+          "offsetY": 507
+        },
+        {
+          "id": "iterative-search",
+          "offsetX": 430,
+          "offsetY": 648
+        },
+        {
+          "id": "domain-classifier",
+          "offsetX": 10,
+          "offsetY": 120
+        },
+        {
+          "id": "logic-verify",
+          "offsetX": 430,
+          "offsetY": 120
+        },
+        {
+          "id": "logic-transparency",
+          "offsetX": 118,
+          "offsetY": 608
+        },
+        {
+          "id": "knowledge-graph",
+          "offsetX": 220,
+          "offsetY": 450
+        },
+        {
+          "id": "synthesis",
+          "offsetX": 182,
+          "offsetY": 286
+        }
+      ]
+    },
+    {
+      "x": 2862,
+      "y": 339,
+      "width": 1034,
+      "height": 815,
+      "moduleId": 5,
+      "nodePositions": [
+        {
+          "id": "mod-output",
+          "offsetX": 10,
+          "offsetY": 10
+        },
+        {
+          "id": "sys-api",
+          "offsetX": 256,
+          "offsetY": 11
+        },
+        {
+          "id": "sys-fe",
+          "offsetX": 163,
+          "offsetY": 142
+        },
+        {
+          "id": "llm-safety-net",
+          "offsetX": 393,
+          "offsetY": 144
+        },
+        {
+          "id": "visualizer-engine",
+          "offsetX": 521,
+          "offsetY": 329
+        },
+        {
+          "id": "graph-editor",
+          "offsetX": 519,
+          "offsetY": 479
+        },
+        {
+          "id": "dashboard-ui",
+          "offsetX": 13,
+          "offsetY": 543
+        },
+        {
+          "id": "source-collab-mgr",
+          "offsetX": 294,
+          "offsetY": 307
+        },
+        {
+          "id": "export-service",
+          "offsetX": 40,
+          "offsetY": 300
+        }
+      ]
+    },
+    {
+      "x": 943,
+      "y": 20,
+      "width": 1705,
+      "height": 227,
+      "moduleId": 6
+    }
+  ]
+}

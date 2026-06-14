@@ -1,0 +1,63 @@
+services:
+  # Main web service
+  - type: web
+    name: nlweb-search
+    runtime: docker
+    region: singapore # 選擇離台灣最近的區域，可改為 oregon 或其他
+    plan: free # 使用免費方案
+
+    # Docker 配置
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    # 環境變數
+    envVars:
+      # 應用程式配置
+      - key: PORT
+        value: 8000
+      - key: PYTHONPATH
+        value: /app
+      - key: NLWEB_OUTPUT_DIR
+        value: /app
+      - key: NLWEB_CONFIG_DIR
+        value: /app/config
+      - key: NLWEB_STATIC_DIR
+        value: /app/static
+
+      # Analytics Database - 使用 Neon.tech PostgreSQL (請在 Render Dashboard 手動設定)
+      # 本地開發會自動使用 SQLite，生產環境使用 PostgreSQL
+      - key: ANALYTICS_DATABASE_URL
+        sync: false # 從 Render Dashboard 設定（Secret）
+
+      # API Keys (需要在 Render Dashboard 手動設定為 secret)
+      # 這些只是佔位符，實際值請在 Render Dashboard 設定
+      - key: OPENAI_API_KEY
+        sync: false # 從 Render Dashboard 同步
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+    # 健康檢查
+    healthCheckPath: /api/health
+
+    # 不需要 Persistent Disk - 使用 Neon.tech 免費 PostgreSQL
+    # disk:
+    #   name: analytics-data
+    #   mountPath: /data
+    #   sizeGB: 1
+
+    # 啟動命令（使用 Dockerfile 中定義的 CMD）
+    # 如果需要覆蓋，可以取消註解下面這行
+    # startCommand: python python/app-aiohttp.py
+
+# 備註：
+# 1. Analytics 資料儲存在 Neon.tech 免費 PostgreSQL（512MB，完全免費）
+# 2. Free plan 限制：750 小時/月（約 31 天）
+# 3. 自動休眠：15 分鐘無活動後休眠，下次請求時自動喚醒
+# 4. 總成本：$0/月（Render Free + Neon Free）
+# 5. 設置指南：請參考 NEON_SETUP_GUIDE.md

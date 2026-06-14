@@ -1,0 +1,358 @@
+/* ── Help Center Styles ───────────────────────────────────────── */
+
+:root {
+  --hc-primary: #b8960c;
+  --hc-bg: #f8f6f0;
+  --hc-surface: #ffffff;
+  --hc-border: #e5e0d5;
+  --hc-text: #2c2c2c;
+  --hc-text-secondary: #6b6b6b;
+  --hc-radius: 8px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--color-bg, var(--hc-bg));
+  color: var(--color-text, var(--hc-text));
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.hc-header {
+  background: var(--color-surface, var(--hc-surface));
+  border-bottom: 1px solid var(--color-border, var(--hc-border));
+  padding: 0 24px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.hc-back-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-secondary, var(--hc-text-secondary));
+  padding: 4px 8px;
+  border-radius: 4px;
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.hc-back-btn:hover { background: var(--color-bg-hover, #f0ece2); }
+
+.hc-header-title {
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.hc-container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+
+.hc-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 2px solid var(--color-border, var(--hc-border));
+  margin-bottom: 32px;
+}
+
+.hc-tab {
+  background: none;
+  border: none;
+  padding: 10px 20px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-secondary, var(--hc-text-secondary));
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  border-radius: 4px 4px 0 0;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.hc-tab:hover { color: var(--color-text, var(--hc-text)); }
+
+.hc-tab.active {
+  color: var(--color-primary, var(--hc-primary));
+  border-bottom-color: var(--color-primary, var(--hc-primary));
+}
+
+.hc-panel { display: none; }
+.hc-panel.active { display: block; }
+
+.hc-section { margin-bottom: 32px; }
+
+.hc-section h2 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border, var(--hc-border));
+}
+
+.hc-section p, .hc-section li {
+  color: var(--color-text-secondary, var(--hc-text-secondary));
+  margin: 6px 0;
+}
+
+.hc-section ul { padding-left: 20px; }
+
+.hc-kbd {
+  display: inline-block;
+  background: var(--color-bg, var(--hc-bg));
+  border: 1px solid var(--color-border, var(--hc-border));
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.shortcut-table { border-collapse: collapse; width: 100%; }
+.shortcut-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-border, var(--hc-border));
+  font-size: 14px;
+}
+.shortcut-table td:first-child { width: 160px; }
+
+.faq-filter-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.faq-filter-btn {
+  background: var(--color-bg, var(--hc-bg));
+  border: 1px solid var(--color-border, var(--hc-border));
+  border-radius: 16px;
+  padding: 4px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.faq-filter-btn.active,
+.faq-filter-btn:hover {
+  background: var(--color-primary, var(--hc-primary));
+  color: #fff;
+  border-color: var(--color-primary, var(--hc-primary));
+}
+
+.faq-item {
+  border: 1px solid var(--color-border, var(--hc-border));
+  border-radius: var(--hc-radius);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.faq-question {
+  width: 100%;
+  background: var(--color-surface, var(--hc-surface));
+  border: none;
+  text-align: left;
+  padding: 14px 16px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.faq-question:hover { background: var(--color-bg-hover, #f0ece2); }
+.faq-chevron { transition: transform 0.2s; font-size: 12px; flex-shrink: 0; }
+.faq-item.open .faq-chevron { transform: rotate(180deg); }
+
+.faq-answer {
+  display: none;
+  padding: 12px 16px;
+  font-size: 14px;
+  color: var(--color-text-secondary, var(--hc-text-secondary));
+  border-top: 1px solid var(--color-border, var(--hc-border));
+  background: var(--color-surface, var(--hc-surface));
+  white-space: pre-line;
+}
+
+.faq-item.open .faq-answer { display: block; }
+
+.btn-cancel {
+  background: none;
+  border: 1px solid var(--color-border, var(--hc-border));
+  border-radius: 6px;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn-save {
+  background: var(--color-primary, var(--hc-primary));
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.contact-card {
+  background: var(--color-surface, var(--hc-surface));
+  border: 1px solid var(--color-border, var(--hc-border));
+  border-radius: var(--hc-radius);
+  padding: 24px;
+  margin-bottom: 16px;
+}
+
+.contact-card h3 { margin: 0 0 8px; font-size: 16px; }
+.contact-card p { margin: 4px 0; color: var(--color-text-secondary, var(--hc-text-secondary)); font-size: 14px; }
+.contact-reply-note { margin-top: 12px; }
+
+.contact-email {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-primary, var(--hc-primary));
+  text-decoration: none;
+}
+
+.contact-email:hover { text-decoration: underline; }
+
+.btn-open-feedback {
+  margin-top: 16px;
+  background: var(--color-primary, var(--hc-primary));
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 20px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  width: 100%;
+}
+
+.btn-open-feedback:hover { opacity: 0.9; }
+
+.feedback-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+}
+
+.feedback-overlay.visible { display: flex; }
+
+.feedback-box {
+  background: #fff;
+  border-radius: 12px;
+  width: 440px;
+  max-width: 92vw;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  overflow: hidden;
+}
+
+.feedback-box-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--color-border, var(--hc-border));
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.feedback-box-close {
+  background: none;
+  border: none;
+  font-size: 22px;
+  cursor: pointer;
+  color: #999;
+  line-height: 1;
+}
+
+.feedback-box-body { padding: 16px 20px; }
+
+.fb-form-group { margin-bottom: 14px; }
+.fb-form-group label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
+
+.fb-radio-group { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.fb-radio-btn {
+  border: 1px solid var(--color-border, var(--hc-border));
+  border-radius: 16px;
+  padding: 4px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  background: var(--color-bg, var(--hc-bg));
+  transition: all 0.2s;
+}
+
+.fb-radio-btn.selected {
+  background: var(--color-primary, var(--hc-primary));
+  color: #fff;
+  border-color: var(--color-primary, var(--hc-primary));
+}
+
+.fb-stars { display: flex; gap: 4px; }
+
+.fb-star {
+  font-size: 24px;
+  cursor: pointer;
+  color: #ddd;
+  transition: color 0.15s;
+  line-height: 1;
+}
+
+.fb-star.lit { color: #f5c842; }
+
+.fb-textarea {
+  width: 100%;
+  border: 1px solid var(--color-border, var(--hc-border));
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 80px;
+  box-sizing: border-box;
+}
+
+.fb-textarea:focus { outline: none; border-color: var(--color-primary, var(--hc-primary)); }
+
+.feedback-box-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--color-border, var(--hc-border));
+}
+
+.fb-email-input {
+  width: 100%;
+  border: 1px solid var(--color-border, var(--hc-border));
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.fb-error { color: #dc3545; font-size: 13px; margin-top: 8px; display: none; }
+.fb-success { text-align: center; padding: 24px 20px; color: #28a745; font-size: 15px; }
+
+/* Main-page feedback modal styles are in css/feedback-modal.css */

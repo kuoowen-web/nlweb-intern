@@ -1,0 +1,124 @@
+/* static/css/components/popover.css
+ *
+ * Settings popover component styles.
+ *
+ * Phase 2 (2026-05-21):
+ *   Extracted from static/news-search.css legacy region (line range 4074-4180).
+ *   Loaded via @import in static/news-search.css barrel-plus-legacy header
+ *   (after tokens.css, base.css, sidebar.css).
+ *
+ * Scope:
+ *   - .settings-popover (root container with slide-up animation)
+ *   - @keyframes popoverSlideUp (animation definition)
+ *   - .popover-user-info / .popover-user-info .user-name (compound — popover-scoped override)
+ *   - .popover-divider
+ *   - .popover-menu-item / .popover-menu-item:hover / .active / -logout
+ *   - .popover-login-btn
+ *   - .popover-menu-icon
+ *
+ * Owner: ui/settings-popover.js (when JS Phase 2b lands).
+ *
+ * Dependencies:
+ *   Requires tokens.css for --z-dropdown.
+ *   Anchored to the parent .left-sidebar-footer (positioned absolute bottom-up).
+ *
+ * Anti-pattern (avoid):
+ *   - Do NOT move .settings-user-name / .btn-settings standalone selectors here — those are
+ *     the sidebar trigger button, not the popover itself.
+ */
+
+/* ===== Settings Popover ===== */
+.settings-popover {
+    position: absolute;
+    bottom: 100%;
+    left: 8px;
+    right: 8px;
+    margin-bottom: 8px;
+    background: #FFFFFF;
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    z-index: var(--z-dropdown);
+    overflow: hidden;
+    /* Animation: slide up from bottom */
+    animation: popoverSlideUp 0.2s ease-out;
+}
+@keyframes popoverSlideUp {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+.popover-user-info {
+    padding: 14px 16px;
+    background: #2D3436;
+    border-radius: 12px 12px 0 0;
+}
+.popover-user-info .user-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: #FFFFFF;
+    display: block;
+}
+.popover-divider {
+    height: 1px;
+    background: #B2BEC3;
+    margin: 16px 0;
+}
+.popover-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 16px;
+    margin-bottom: 10px;
+    background: transparent;
+    border: none;
+    font-size: 13px;
+    color: #2D3436;
+    cursor: pointer;
+    transition: background 0.15s;
+    text-align: left;
+}
+.popover-menu-item:last-child {
+    margin-bottom: 0;
+}
+.popover-menu-item:hover,
+.popover-menu-item.active {
+    background: #FFEAA7;
+}
+.popover-menu-item-logout {
+    color: #2D3436;
+    padding: 16px 16px;
+    margin-bottom: 0;
+}
+.popover-menu-item-logout:hover {
+    background: #FFEAA7;
+}
+.popover-login-btn {
+    display: block;
+    width: 100%;
+    padding: 12px 16px;
+    background: #2D3436;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 0;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+    text-align: center;
+}
+.popover-login-btn:hover {
+    background: #FDCB6E;
+    color: #2D3436;
+}
+.popover-menu-icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    margin-right: 0;
+}

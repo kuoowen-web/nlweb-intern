@@ -1,0 +1,52 @@
+#cloud-config
+# NLWeb VPS initialization — secure from first boot
+# Paste this into Hetzner "User Data" when creating the server
+
+# 1. Change SSH port + harden SSH
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-hardened.conf
+    content: |
+      Port 2222
+      PermitRootLogin prohibit-password
+      PasswordAuthentication no
+      PubkeyAuthentication yes
+      MaxAuthTries 3
+    permissions: '0644'
+
+# 2. Install packages + configure firewall + fail2ban
+runcmd:
+  # Update and install security tools
+  - apt-get update -q
+  - apt-get install -y -q ufw fail2ban
+
+  # Configure UFW firewall
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 2222/tcp comment 'SSH'
+  - ufw allow 80/tcp comment 'HTTP'
+  - ufw allow 443/tcp comment 'HTTPS'
+  - ufw --force enable
+
+  # Configure fail2ban for SSH
+  - |
+    cat > /etc/fail2ban/jail.local << 'EOF'
+    [sshd]
+    enabled = true
+    port = 2222
+    maxretry = 3
+    bantime = 3600
+    findtime = 600
+    EOF
+  - systemctl enable fail2ban
+  - systemctl restart fail2ban
+
+  # Restart SSH with new config
+  - systemctl restart ssh
+
+  # Verify clean system (log results)
+  - echo "=== SECURITY CHECK ===" >> /var/log/cloud-init-security.log
+  - date >> /var/log/cloud-init-security.log
+  - cat /etc/ld.so.preload >> /var/log/cloud-init-security.log 2>&1 || echo "ld.so.preload clean" >> /var/log/cloud-init-security.log
+  - crontab -l >> /var/log/cloud-init-security.log 2>&1 || echo "crontab clean" >> /var/log/cloud-init-security.log
+  - head -1 /root/.bashrc >> /var/log/cloud-init-security.log 2>&1
+  - echo "=== END CHECK ===" >> /var/log/cloud-init-security.log

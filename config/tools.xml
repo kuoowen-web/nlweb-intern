@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Tools>
+
+<!-- This file contains all the tools that can be used to process queries for news search. -->
+
+  <Site id="default">
+    <!-- NewsQuery replaces generic Item schema type for news-specific queries -->
+    <NewsQuery>
+      <!-- Basic news search tool -->
+      <Tool name="search" enabled="true">
+        <method>builtin</method>
+        <example>Find news about climate change</example>
+        <example>Show me latest updates on the election</example>
+        <example>What's happening with the economy?</example>
+        <example>Recent news about AI developments</example>
+        <prompt>
+          The user has the following query: {request.query}.
+
+          The search tool finds news articles that match specific search criteria. It's designed for:
+          - Finding news articles on a topic or event
+          - Getting latest updates on developing stories
+          - Discovering news coverage on a subject
+          - Broad exploration when users want to see what's being reported
+
+          The search tool is NOT the best choice if the user is asking for:
+          - Specific details about a particular news event or claim
+          - Comparison of how different sources report the same story
+          - Timeline reconstruction of events
+
+          Assign a score from 0 to 100 for whether the search tool is appropriate.
+          Also provide the search query that should be passed to the tool.
+        </prompt>
+        <returnStruc>
+          {
+            "score": "integer between 0 and 100",
+            "search_query": "the search query that should be passed to the tool"
+          }
+        </returnStruc>
+      </Tool>
+
+      <!-- Get details about a specific news event -->
+      <Tool name="details" enabled="true">
+        <method>extension</method>
+        <handler>methods.item_details.ItemDetailsHandler</handler>
+        <example>What are the details of the peace agreement signed yesterday?</example>
+        <example>Tell me more about the new policy announced by the government</example>
+        <prompt>
+          The user has the following query: {request.query}.
+
+          The details tool gets specific information about a PARTICULAR news event or story and is best for:
+          - Getting background details about a SPECIFIC named event
+          - Getting the who/what/where/when/why of a particular news story
+          - Queries that mention a specific event name and ask for details about it
+
+          The details tool should score HIGH (80-100) if the user names a specific event and wants details.
+          The details tool should score LOW (0-30) if the user wants to find/search for news articles.
+
+          If you are not sure whether the user is asking for details about a specific event,
+          or if they are asking for a general search, assume that they are doing a search
+          and score the tool as LOW.
+
+          Assign a score from 0 to 100 for whether the details tool is appropriate.
+          If the user is asking for details about a specific event, provide the event name and what details are being requested.
+        </prompt>
+        <returnStruc>
+          {
+            "score": "integer between 0 and 100",
+            "item_name": "the name or identifier of the specific event for which details are being sought",
+            "details_requested": "the details that the user is asking for"
+          }
+        </returnStruc>
+      </Tool>
+
+      <!-- Compare news coverage across different sources -->
+      <Tool name="compare" enabled="true">
+        <method>extension</method>
+        <handler>methods.compare_items.CompareItemsHandler</handler>
+        <example>How do different outlets report on this policy?</example>
+        <example>Compare BBC vs CNN coverage of the summit</example>
+        <example>What's the difference between left and right wing coverage of this event?</example>
+        <prompt>
+          The user has the following query: {request.query}.
+
+          The compare tool compares news coverage from different sources and is best for:
+          - Comparing how different outlets report the same story
+          - Questions asking about media bias or perspective differences
+          - Evaluating coverage across different political viewpoints
+          - Understanding how the same event is framed differently
+
+          Assign a score from 0 to 100 for whether the compare tool is appropriate.
+
+          If the score is above 74, provide the sources or viewpoints being compared.
+        </prompt>
+        <returnStruc>
+          {
+            "score": "integer between 0 and 100",
+            "item1_name": "the name of the first source or viewpoint to compare",
+            "item2_name": "the name of the second source or viewpoint to compare",
+            "details_requested": "what aspect of coverage to compare"
+          }
+        </returnStruc>
+      </Tool>
+    </NewsQuery>
+  </Site>
+
+  <!-- Special site for searching conversation history -->
+  <Site id="conv_history">
+    <NewsQuery>
+      <Tool name="conversation_search" enabled="true">
+        <method>extension</method>
+        <handler>methods.conversation_search.ConversationSearchHandler</handler>
+        <example>Find my previous conversations about climate change</example>
+        <example>What did I ask about the election last week?</example>
+        <example>Show me my conversations about economic policy</example>
+        <prompt>
+          The user has the following query: {request.query}.
+
+          This tool searches through the user's conversation history. Since the site is "conv_history",
+          ALL queries should use this tool to search the conversation history.
+
+          Always score 100 for this tool when site=conv_history.
+        </prompt>
+        <returnStruc>
+          {
+            "score": "100"
+          }
+        </returnStruc>
+      </Tool>
+    </NewsQuery>
+  </Site>
+
+</Tools>

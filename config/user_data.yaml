@@ -1,0 +1,74 @@
+# User Data Configuration
+# Configuration for user-uploaded files and private knowledge base
+
+storage:
+  # Storage backend: 'local' or 'cloud' (Azure Blob, S3, etc.)
+  backend: 'local'
+
+  # Local storage path (relative to project root)
+  local_path: 'data/user_uploads'
+
+  # Cloud storage configuration (for future use)
+  cloud:
+    provider: null  # 'azure', 's3', 'gcs'
+    container_name: null
+    connection_string_env: null
+
+file_limits:
+  # Maximum file size in bytes (20MB)
+  max_file_size_bytes: 20971520
+
+  # Maximum total storage per user in bytes (100MB)
+  max_total_size_per_user_bytes: 104857600
+
+  # Maximum number of files per user
+  max_files_per_user: 50
+
+  # Allowed file types (whitelist)
+  allowed_extensions:
+    - '.pdf'
+    - '.docx'
+    - '.txt'
+    - '.md'
+
+  # MIME type validation (additional security)
+  allowed_mime_types:
+    - 'application/pdf'
+    - 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    - 'text/plain'
+    - 'text/markdown'
+
+processing:
+  # Text chunking configuration
+  chunk_size: 500  # tokens per chunk
+  chunk_overlap: 50  # token overlap between chunks
+
+  # Maximum text length after parsing (to prevent abuse)
+  max_text_length: 1000000  # 1M characters
+
+  # Async processing timeout (seconds)
+  processing_timeout: 300  # 5 minutes
+
+# Vector storage: uses main PostgreSQL (POSTGRES_CONNECTION_STRING)
+# Table: user_document_chunks, dimension: 1024 (Qwen3-Embedding-4B)
+vector_storage:
+  backend: postgres
+  table: user_document_chunks
+  dimension: 1024
+
+retrieval:
+  # Default number of results to retrieve
+  default_top_k: 10
+
+  # Maximum number of results
+  max_top_k: 50
+
+security:
+  # Enable file type validation using python-magic
+  validate_file_type: true
+
+  # Enable content scanning for suspicious patterns
+  scan_content: false  # Disabled for MVP
+
+  # Rate limiting (per user per hour)
+  max_uploads_per_hour: 20

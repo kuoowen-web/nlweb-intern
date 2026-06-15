@@ -16,6 +16,7 @@
 - 任何真實使用資料（query log、真實新聞語料 TSV / JSON / embeddings、analytics DB）
 - 真實 prod 基礎設施座標（VPS IP、GCP service account、GCS bucket）—
   已 placeholder 化
+- 爬蟲（crawler）模組 — E2E 不需要，已整組移除
 
 > 程式碼**不依賴**任何被剝離的敏感文檔（已驗證無 import）。E2E 照跑。
 
@@ -34,56 +35,49 @@ bash scripts/setup.sh
 #   或手動：python3.11 -m venv myenv311 && 啟用 && pip install -r requirements.txt
 #   後端依賴另見 code/python/requirements.txt
 
-# 2. 設定環境變數 —— 填你自己的 dev key（不是公司的 prod key）
-cp .env.example .env
-#   編輯 .env，至少填：
-#     OPENAI_API_KEY        ← 你自己的 OpenAI dev key
-#     QDRANT_URL / QDRANT_API_KEY  ← 你自己的 Qdrant（或改用 postgres / SQLite）
-#   .env 永遠不要 commit（.gitignore 已排除）
+# 2. 設定環境變數
+#   .env 檔案不在 repo 內（不會 commit）。請向負責人私下索取一份 .env，
+#   放到 repo 根目錄。裡面已含可用的 dev 憑證（API key / DB / Qdrant）。
+#   .env 永遠不要 commit（.gitignore 已排除）。
 
 # 3. config 檢查
 #   config/ 下的 yaml 多數用「環境變數名稱」引用憑證（api_key_env: OPENAI_API_KEY），
-#   真實值都從 .env 讀。一般不需改 config，只要 .env 填對即可。
+#   真實值都從 .env 讀。一般不需改 config，只要 .env 到位即可。
 ```
 
-## 憑證 placeholder 說明
+## 憑證說明
 
-下列檔案的真實值已換成 placeholder，你要填自己的 dev 值：
-
-- `.env.example` → 複製成 `.env` 後填（API key、DB、Qdrant）
-- `config/*.yaml` → 用 `*_env` 引用 .env，通常不用動
-- `scripts/weekly_indexing.sh` → `YOUR_VPS_HOST` / `YOUR_GCS_BUCKET` /
-  `YOUR_PROJECT_NUMBER`（只有要跑 weekly indexing pipeline 才需要）
-- E2E / spec 文件中的 admin 帳密已換成 `admin@example.com` / `YOUR_ADMIN_PASSWORD`，
-  本地測試請用你自己建立的測試帳號
+- **`.env`** → 向負責人私下索取，放 repo 根目錄。**絕不 commit。**
+- `config/*.yaml` → 用 `*_env` 引用 .env，通常不用動。
+- `scripts/weekly_indexing.sh` → 內含 `YOUR_VPS_HOST` / `YOUR_GCS_BUCKET` /
+  `YOUR_PROJECT_NUMBER` placeholder（只有要跑 weekly indexing pipeline 才需要，E2E 用不到）。
+- E2E / spec 文件中的 admin 帳密為 `admin@example.com` / `YOUR_ADMIN_PASSWORD` placeholder，
+  本地測試請用你自己建立的測試帳號（或向負責人索取測試帳號）。
 
 ## 跑 E2E
 
-完整 E2E checklist 與測試題組見 **`docs/e2etest.md`**。pipeline 紀律：
+> 你負責 **E2E 測試**。完整 E2E checklist 與測試題組見 **`docs/e2etest.md`**。
 
-```
-Unit Test → Smoke Test → Agent E2E (DevTools) → 修 bug → CEO 人工 E2E → Pass
-```
-
-- **Smoke test**（改 Python 後必跑）：
-  `cd code/python && python tools/smoke_test.py`
 - **本地起 server**：見 `code/python/app-aiohttp.py`（預設 port 8000）/
   `docs/reference/api-endpoints.md`
 - **架構總覽**：`docs/reference/systemmap.md`
 - **演算法 spec**：`docs/specs/*-spec.md`（bm25 / xgboost / mmr / reasoning / indexing 等）
+- **LR（Live Research）E2E**：`docs/specs/mock-bab-playbook.md` 有「用現成 fixture 跑 LR
+  而不燒蒐集成本」的操作手冊 + 6 模塊驗收清單。fixture 已附在
+  `code/python/tests/fixtures/lr_mock_bab_real/`。
 
-E2E 要搜得到東西，需要少量種子資料 →
+E2E 要搜得到東西，需要少量種子資料 → 見下。
 
 ## 種子資料
 
-本 repo **不含**真實新聞語料。取得方式見 **`data/seed/README.md`**：
+本 repo **不含**真實新聞語料。E2E 要搜得到結果，需要少量種子資料：
 
-- **途徑 A**：自己跑 repo 內的 crawler 抓**少量公開新聞**（中央社 / 政府新聞稿等），
-  再經 indexing pipeline 寫入 DB
-- **途徑 B**：向 CEO / Zoe 索取去敏感化的小型種子資料
+- 向負責人索取一份**去敏感化的小型種子資料**（少量公開新聞），
+  再經 indexing pipeline 寫入本地 DB。
+- 取得與寫入方式見 `data/seed/README.md`。
 
-> 抓到的資料 / 任何真實語料**不要** commit 進 repo（`.gitignore` 已排除 `data/`、`*.tsv`）。
-> 版權 / 客戶歸屬有疑問 → 先問 CEO / Zoe。
+> 任何真實語料**不要** commit 進 repo（`.gitignore` 已排除 `data/`、`*.tsv`）。
+> 版權 / 來源有疑問 → 先問負責人。
 
 ## 程式碼搜尋（建議）
 
@@ -97,5 +91,5 @@ python tools/indexer.py --search "關鍵字"
 ## 注意事項
 
 - 不要把任何真實憑證 / 真實語料 commit 進這個 repo。
-- `CLAUDE.md` / `AGENTS.md` 內提到的 `memory/`、`docs/status.md` 等在本剝離版**不存在**，
-  那些是內部協作流程文件，與 E2E 開發無關，可忽略相關段落。
+- `CLAUDE.md` / `AGENTS.md` 內提到的 `memory/`、`docs/status.md` 等內部協作流程文件
+  在本剝離版**不存在**，與 E2E 開發無關，可忽略相關段落。

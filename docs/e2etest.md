@@ -602,7 +602,7 @@ ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
 
 ---
 
-### ??閫撖??蝯?Zoe嚗?
+### ??閫撖??蝯?負責人嚗?
 
 1. **Pre-existing infra bug**: `email_verification_expires` 甈??芸 alembic baseline migration 銝哨?DB ??? ALTER?遣霅啗???`9df501ad9a13_baseline_auth_tables.py` ?憓?migration??
 2. **Minor UX**: Org modal ?典遣蝡??∪?銝??芸???渡?憿舐內?唳??∴?????????堆?????綽???閮憿舐內雿?銵冽?單??湔??
@@ -673,7 +673,7 @@ ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
 
 **ALL PASS**嚗 schema ?孵?撽???嚗 user-visible regression嚗?
 
-**?桐?霅血?**嚗EO prompt 銝剜?靘? admin 撖Ⅳ?璈?PG hash 銝??撌脩 SQL UPDATE workaround ?身??`YOUR_ADMIN_PASSWORD`??*????migration bug**嚗??祆活 alembic ?孵??⊿?嚗??舀璈?PG state drift?遣霅?CEO 銋???zoe-traces ??docs/rented-computer-modifications.md 閮??嗅?撌脩 admin 撖Ⅳ??
+**?桐?霅血?**嚗EO prompt 銝剜?靘? admin 撖Ⅳ?璈?PG hash 銝??撌脩 SQL UPDATE workaround ?身??`YOUR_ADMIN_PASSWORD`??*????migration bug**嚗??祆活 alembic ?孵??⊿?嚗??舀璈?PG state drift?遣霅?CEO 銋???負責人-traces ??docs/rented-computer-modifications.md 閮??嗅?撌脩 admin 撖Ⅳ??
 
 ### 敺犖撌?E2E嚗EO嚗?
 
@@ -718,7 +718,7 @@ ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
 ### Cross-cutting Observations
 
 1. **All 9 scenarios PASS** for the user-identity invariant ??the architectural goal of Phase 1-4a is intact under adversarial probing.
-2. **`add_message_metadata` coverage gap** (Test F): server-side Task 2A's user_id injection only fires for envelopes routed through `MessageSender.add_message_metadata` (e.g., `asking_sites`, `articles`, `summary`). Envelopes built ad-hoc and pushed directly to the SSE writer (`begin-nlweb-response`, `progress`, `end-nlweb-response`, `complete`) bypass that hook and ship without `user_id`. Frontend Trigger G anticipates this and warns + passes through (fail-open) per commit `febe92c` ??so no false-positive aborts of legitimate streams. **Not a regression**, but if Zoe wants strict 100% coverage (defense-in-depth), the server-side fix is to either route those envelopes through `add_message_metadata` or stamp `user_id` at the SSE writer level.
+2. **`add_message_metadata` coverage gap** (Test F): server-side Task 2A's user_id injection only fires for envelopes routed through `MessageSender.add_message_metadata` (e.g., `asking_sites`, `articles`, `summary`). Envelopes built ad-hoc and pushed directly to the SSE writer (`begin-nlweb-response`, `progress`, `end-nlweb-response`, `complete`) bypass that hook and ship without `user_id`. Frontend Trigger G anticipates this and warns + passes through (fail-open) per commit `febe92c` ??so no false-positive aborts of legitimate streams. **Not a regression**, but if strict 100% coverage (defense-in-depth) is wanted, the server-side fix is to either route those envelopes through `add_message_metadata` or stamp `user_id` at the SSE writer level.
 3. **Org-shared sessions render race on re-login** (Test H): UserStateSync.runInitSync's response wires up `??撠店` (sessionsList) but the `蝯?蝛粹?` tab count badge doesn't refresh until the next manual `/api/sessions/shared` fetch (triggered by tab click or F5). Backend returned correct data within the stale window. UX nit, not a security/identity leak.
 4. **Server warning at startup**: `JWT_SECRET is shorter than 32 characters ??consider using a stronger secret` (root `.env` value is short; pre-existing config issue, unrelated to Phase 4b).
 5. **No `qdrant_client` errors observed** in startup log (E2E Gate precondition met).
@@ -729,9 +729,9 @@ ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;
 
 ### Verdict
 
-**9/9 PASS.** No FAIL signals. Phase 1-4a refactor verified against all historical patch failure modes. Two minor observations (Test F server-side metadata coverage; Test H org-shared render race) noted for Zoe consideration ??neither is a security regression.
+**9/9 PASS.** No FAIL signals. Phase 1-4a refactor verified against all historical patch failure modes. Two minor observations (Test F server-side metadata coverage; Test H org-shared render race) noted for team consideration ??neither is a security regression.
 
-Pending CEO 鈭箏極 E2E: ?荔?靘?Zoe ?斗嚗?
+Pending CEO 鈭箏極 E2E: ?荔?靘?負責人 ?斗嚗?
 
 ---
 

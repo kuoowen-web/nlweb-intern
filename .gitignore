@@ -488,6 +488,7 @@ test_*.py
 !code/python/tests/contract/test_*.py
 check_*.py
 analyze_*.py
+!code/python/core/query_analysis/analyze_query.py
 retry_*.py
 upload_*.py
 truncate_*.py

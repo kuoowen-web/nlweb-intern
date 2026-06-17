@@ -22,7 +22,7 @@
 ### 架構
 
 ```
-專案檔案 (.py, .yaml, .md)
+專案檔案 (.py, .yaml, .yml, .md, .js, .css, .html)
         │
         ▼
    indexer.py --index
@@ -191,11 +191,11 @@ WHERE files_fts MATCH 'process*'
 | 想加入新副檔名  | 編輯 `INCLUDE_EXTENSIONS` | 需手動編輯 |
 | 想排除新目錄   | 編輯 `EXCLUDE_DIRS`       | 需手動編輯 |
 
-### 可選的自動化設定
+### 可選的自動化設定（未實作，需手動設定）
 
-如果希望索引自動保持最新，可以設定：
+> 注意：以下自動化目前**沒有任何內建實作**（repo 內沒有對應的 hook / task / watcher）。若希望索引自動保持最新，需自行手動設定下列其中一種；否則就依賴 Agent 在需要時手動執行 `--index`。
 
-**方法 1：Git pre-commit hook**
+**方法 1：Git pre-commit hook（需手動建立）**
 
 ```bash
 # .git/hooks/pre-commit
@@ -203,7 +203,7 @@ WHERE files_fts MATCH 'process*'
 python tools/indexer.py --index
 ```
 
-**方法 2：VS Code Task**
+**方法 2：VS Code Task（需手動建立）**
 
 ```json
 // .vscode/tasks.json
@@ -220,14 +220,14 @@ python tools/indexer.py --index
 }
 ```
 
-**方法 3：檔案監控（watchdog）**
+**方法 3：檔案監控（watchdog，需手動撰寫）**
 
 ```python
 # 需安裝 watchdog: pip install watchdog
 # 監控檔案變動並自動更新索引
 ```
 
-> 注意：這些自動化都是可選的。正常使用時，讓 Agent 在需要時執行 `--index` 即可。
+> 注意：這些自動化目前都未實作，且皆為可選。正常使用時，讓 Agent 在需要時執行 `--index` 即可。
 
 ---
 
@@ -239,7 +239,7 @@ python tools/indexer.py --index
 
 ```python
 # 要索引的副檔名
-INCLUDE_EXTENSIONS = {".py", ".yaml", ".yml", ".md"}
+INCLUDE_EXTENSIONS = {".py", ".yaml", ".yml", ".md", ".js", ".css", ".html"}
 
 # 要排除的目錄
 EXCLUDE_DIRS = {

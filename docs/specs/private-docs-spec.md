@@ -49,7 +49,8 @@ _index_chunks()
 
 搜尋時：
   query → get_embedding() → pgvector cosine <=> → top-k 結果
-  └─ merge_public_and_private_results() → 回傳給 ranking pipeline
+  └─ baseHandler 手動串接（formatted_private + items）→ 回傳給 ranking pipeline
+     （註：merge_public_and_private_results() 已定義但未被呼叫，見「整合方式」段）
 ```
 
 ---
@@ -211,17 +212,31 @@ LIMIT %s
 
 ## 與主線搜尋的整合方式
 
-`core/user_data_retriever.merge_public_and_private_results()` 負責合併：
+> **⚠️ Spec drift 註記（2026-06-17）**：`merge_public_and_private_results()` 函式雖已定義於 `core/user_data_retriever.py`，但**目前未被任何呼叫端使用**（除本 spec 外無其他引用）。實際整合改由 `core/baseHandler.py` **手動串接**完成，下方函式描述為設計意圖，非執行路徑。實作細節見「實際整合路徑」一節。
+
+`core/user_data_retriever.merge_public_and_private_results()` 設計上負責合併：
 
 ```python
-def merge_public_and_private_results(
+async def merge_public_and_private_results(
     public_results, private_results, private_first=True
 )
 ```
 
 - `private_first=True`（預設）：私人文件結果排在公開新聞之前
 - 結果為純串接（concatenation），無分數重新正規化
-- 合併後的 list 進入主線 ranking pipeline（LLM → XGBoost → MMR）
+- 設計上合併後的 list 進入主線 ranking pipeline（LLM → XGBoost → MMR）
+
+### 實際整合路徑（baseHandler 手動串接）
+
+實際線上整合**不走 `merge_public_and_private_results()`**，而是在 `core/baseHandler.py` 內手動完成：
+
+- 直接 import `search_user_documents` 與 `format_private_result_for_display`（非 merge 函式）
+- 逐筆呼叫 `format_private_result_for_display()` 組出 `formatted_private` list
+- 兩條路徑分別串接：
+  - **Free conversation 路徑**：`self.final_retrieved_items = formatted_private`（僅私人文件）
+  - **一般搜尋路徑**：`items = formatted_private + items`（私人在前手動串接公開結果，等同 `private_first=True` 行為）
+
+亦即「private-first 純串接、無分數正規化」的行為由 baseHandler 手動 list 相加實現，`merge_public_and_private_results()` 為 dead code（保留設計參考）。`methods/generate_answer.py` 亦走相同的手動串接 pattern。
 
 顯示格式化輔助函式 `format_private_result_for_display()` 將 chunk 轉為展示格式（title 為「私人文件（片段 N/M）」），用於需要對外呈現的場景。
 

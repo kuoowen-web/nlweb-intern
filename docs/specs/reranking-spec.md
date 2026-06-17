@@ -1,3 +1,13 @@
+# Reranking Pipeline 規格
+
+> **⚠️ 部分已過時警示（2026-06-15）**：本文件的 **Stage 1（Qdrant Vector Retrieval）** 與 **Stage 2（Hybrid Scoring = Python BM25 + Intent Detection）** 描述的是 2026-02 遷移前的舊架構，**已不再是現行路徑**：
+>
+> - **Stage 1**：Qdrant 已退役，現行 retrieval 為 PostgreSQL（`retrieval_providers/postgres_client.py`，pgvector + pg_bigm）。
+> - **Stage 2**：`core/bm25.py` 的 Python BM25 re-ranking **已移除**；關鍵字匹配改由 **pg_bigm** 在 retrieval 層原生處理，且改為「pgvector / pg_bigm 雙路獨立 retrieval + 聯集去重」的真 hybrid，而非本文件描述的「vector top-N 後再 BM25 re-rank 同一批」。動態 α/β Intent Detection（`_detect_query_intent`）為舊 Qdrant 路徑邏輯，亦已不在現行路徑。詳見 `docs/specs/bm25-spec.md` 開頭過時警示。
+> - **Stage 3-5（LLM Ranking / XGBoost / MMR）仍有效**：這三階段在 retrieval 之後執行，架構未隨儲存層遷移而改變（檔案仍為 `core/ranking.py` / `core/xgboost_ranker.py` / `core/mmr.py`）。
+>
+> 現行檢索/排序的權威描述見 `docs/reference/systemmap.md`（M2 Retrieval / M3 Ranking 章節）。
+
 ## 一、現有 Reranking Pipeline 完整流程
 
 ### **完整的排序流程（5 個階段）**
@@ -120,7 +130,7 @@ if is_temporal_query(['最新', 'latest', 'recent']):
 
 ### **Stage 3: LLM Ranking**
 
-**檔案位置：** core/ranking.py:205-291 (rankItem method)
+**檔案位置：** `core/ranking.py`（`rankItem` method，grep `async def rankItem`；~L110-208，行號以 grep marker 為準）
 
 **功能：**
 
@@ -173,6 +183,7 @@ if is_temporal_query(['最新', 'latest', 'recent']):
 - 計算 XGBoost scores，但不改變排序
 - 記錄到 analytics database
 - 用於驗證模型效果
+- **狀態（截至 2026-06-17）：XGBoost 仍處於 Phase A shadow mode**，於 prod 線上收集預測資料中，尚未啟用 Phase C 生產重排（`core/xgboost_ranker.py` 的 `use_shadow_mode`）。
 
 **Phase C 生產模式：**
 

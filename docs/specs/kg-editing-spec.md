@@ -1,8 +1,21 @@
 # KG Edit Mode Implementation Plan
 
+> ## ⚠️ 退役 / 重定向 banner（2026-05-25 commit 21 已重構，2026-05-29 Track D 再改架構）
+>
+> **本文件原為「在 `static/news-search.js` 內就地實作 KG 編輯」的 task-by-task 實作計畫，現已落地並再重構。設計內容（JSON schema / 編輯行為規則 / popover UI / 序列化 / E2E checklist）仍有效，但「程式碼位置」「函式範圍」「confirm 後端整合」三項已過時，請以本 banner 為準：**
+>
+> 1. **位置已搬遷**：KG 編輯全部程式碼已從 `static/news-search.js` 搬到獨立模組 **`static/js/features/knowledge-graph.js`**（commit 21, 2026-05-25, Phase 8 part C）。下文所有 `static/news-search.js:行號` 一律失效，請用本文件 File Map 的「重構後位置」欄（grep marker / ~行號）。
+> 2. **架構改為 closure factory（非 module-global 單例）**：2026-05-29 Track D 修法把整批 state + 24 函式收進 `createKGInstance(prefix)` closure factory（`knowledge-graph.js:199`）。module load 時建立兩個 instance：`kgDR = createKGInstance('kg')` 與 `kgLR = createKGInstance('lrKG')`（`:1967-1968`），DR / LR 同頁各自獨立 state，互不污染。DOM id 一律經 `_kgId(suffix) => prefix+suffix`（`:212`）組成。詳見下方「Closure Factory 架構」章。
+> 3. **Confirm 不再走 `performFreeConversation`**：`confirmKGEdit`（`knowledge-graph.js:1690`）改打後端新端點 **`POST /api/research/rerun`**（`:1785`），帶 `query_id` + `kg_edits` + `query`，回 **SSE 串流**。下文 Task 7 的 free-conversation 注入流程已被取代，詳見下方「API Contract: `/api/research/rerun`」章。
+> 4. **新增複製功能**：`buildKGCopyText`（`knowledge-graph.js:143`，純函式可單測）+ instance 內 `setupKGCopy` / `copyKGAsText`（`:237` / `:224`）。詳見下方「複製按鈕功能」章。
+>
+> 下文 Day 1–4 task 步驟中的「就地改 `news-search.js`、module-global `let kgEditMode`、`performFreeConversation` 注入」段落均屬**舊架構**，已標「已重構（2026-05-25 commit 21 / 2026-05-29 Track D）」，保留作設計參考，不可照其位置/呼叫實作。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an interactive edit mode to the radial KG mind-map that lets users add/delete/rename nodes and edges, then serialize the edited graph into structured JSON and trigger a selective re-run of the composable research pipeline (phase 2+3 only, reusing existing search results) for AI re-analysis.
+
+> **架構現況（讀本段先看頂部 banner）**：核心設計（selective re-run phase 2+3、reuse 同批文章、Critic CoV 處理 discrepancy）仍正確且已落地為 `POST /api/research/rerun`（見「API Contract」章）。唯實作不在 `news-search.js`，而在 `static/js/features/knowledge-graph.js` 的 `createKGInstance(prefix)` closure factory；下文 `currentKGData` / module-global state 描述對應現行 instance-private `_currentKGData` 等（見「Closure Factory 架構」章）。
 
 **Architecture:** Front-end edit UI + composable pipeline selective re-run. Edit state is maintained in a cloned copy of `currentKGData`. On confirm, the edited graph is serialized to JSON, appended to the original query as structured instructions, and triggers a selective re-run of `_phase_actor_critic_loop` + `_phase_format_result` — reusing the previous search's `formatted_context` (same articles, different analysis framing). One new backend endpoint required: "re-run from phase 2 with modified query + previous context". Critic agent's CoV naturally handles discrepancy warnings when user's KG edits conflict with evidence.
 
@@ -101,25 +114,132 @@ KG editing 的修改資訊附加到原始 query 後面，作為 analyst 在 sele
 
 ## File Map
 
-| Action | File | Lines | Responsibility |
-|--------|------|-------|----------------|
-| Modify | `static/news-search-prototype.html` | 497-509 | Add Edit/Connect/Confirm/Cancel buttons to KG header |
-| Modify | `static/news-search-prototype.html` | ~490 | Add popover HTML containers (node popover + edge popover) |
-| Modify | `static/news-search.js` | 3828-3829 | Add `kgEditMode`, `kgEditData`, `kgConnectSourceId` state vars |
-| Modify | `static/news-search.js` | 3877 (after `displayKnowledgeGraph`) | Add `setupKGEditMode()` call |
-| Modify | `static/news-search.js` | after `setupKGViewToggle` (~line 4411) | Add all new KG edit functions (700-800 lines block) |
-| Modify | `static/news-search.js` | `renderKGGraphView` node click handler | Route clicks through edit mode dispatcher |
-| Modify | `static/news-search.css` | after line 2614 (KG CSS block) | Add edit mode styles, popover styles, connect-source highlight |
+> **已重構（2026-05-25 commit 21 + 2026-05-29 Track D）。** 下表「原計畫位置」欄是本文件最初寫的 `news-search.js` 就地實作位置，**已全部失效**；以「重構後位置」欄為準（grep marker / ~行號，2026-06-17 自驗於 `static/js/features/knowledge-graph.js`）。
 
-**Backend changes needed (2026-04-13 update):**
-- New API endpoint: selective re-run from phase 2 with modified query + cached ResearchState
-- ResearchState session-level cache: preserve `formatted_context` + `source_map` from previous DR run
-- No changes to: orchestrator phases, analyst prompts, critic agent
+| 對象 | 原計畫位置（失效） | 重構後位置（現況） | Responsibility |
+|------|------|------|----------------|
+| KG 編輯全部 JS | `static/news-search.js` 多段 | **`static/js/features/knowledge-graph.js`**（整檔，~1989 行） | commit 21 搬成獨立 module |
+| 5 個無 state const（colors/styles/labels） | module-global | `knowledge-graph.js:88-136`（module scope，跨 instance 共享） | entity/relation → color/shape/label |
+| `buildKGCopyText`（純函式） | （新增） | `knowledge-graph.js:143`（`export`，module scope） | KG → 結構化文字（複製功能） |
+| Closure factory | （新增） | `createKGInstance(prefix)` `knowledge-graph.js:199` | per-instance state + 24 函式 |
+| 7 個 edit-state lets（`kgEditMode` 等） | `news-search.js:3828-3829` module-global | factory 內 closure-scoped `_kgEditMode` 等 `knowledge-graph.js:201-207` | 不再 module-global，DR/LR 隔離 |
+| `_kgId(suffix)` DOM id helper | （新增；原 `_kgPrefix` 已刪） | `knowledge-graph.js:212` | `prefix+suffix` 組 DOM id |
+| `setupKGCopy` / `copyKGAsText` | （新增） | `knowledge-graph.js:237` / `:224`（factory 內） | 複製鈕 wiring + 行為 |
+| `resetKGState` | inline reset block（`news-search.js:2421-2440`） | factory `knowledge-graph.js:260`；module export wrapper `:1984` | app-shell reset |
+| `displayKnowledgeGraph` | `news-search.js` | factory `knowledge-graph.js:298`；module export `:1977` | 進入點（DR/LR 經 `options.containerPrefix` route） |
+| `setupKGEditMode` | after `setupKGViewToggle` (~4411) | `knowledge-graph.js:1034`（factory 內） | 綁定 edit/connect/confirm/cancel 鈕 |
+| `enterKGEditMode` / `cancelKGEdit` | （新增） | `knowledge-graph.js:1064` / `:1090` | 進/退編輯模式 |
+| `showAddNodePopover` | （新增） | `knowledge-graph.js:1306` | 新增節點 popover |
+| `toggleKGConnectMode` | （新增） | `knowledge-graph.js:1532` | 連線模式 state machine |
+| `serializeKGEdit` | （新增） | `knowledge-graph.js:1610` | 序列化 edit → JSON |
+| `confirmKGEdit` | `news-search.js`（注入 `performFreeConversation`） | `knowledge-graph.js:1690`；rerun POST 在 `:1785` | confirm → `/api/research/rerun` SSE |
+| 兩個 module-load instance | （新增） | `kgDR=createKGInstance('kg')` `:1967`、`kgLR=createKGInstance('lrKG')` `:1968` | DR / LR 各一 |
+| KG header 按鈕 / popover HTML | `static/news-search-prototype.html` 497-509 / ~490 | （HTML 容器位置仍在 prototype.html；DOM id 仍是 `kg*` / `lrKG*` 前綴） | Edit/Connect/Confirm/Cancel 鈕 + popover |
+| KG CSS | `static/news-search.css` after 2614 | （CSS 仍在 news-search.css；本次未驗，沿用） | edit mode / popover / connect highlight |
+
+> **行號漂移注意**：以上行號為 2026-06-17 快照；JS 持續演進，修改前請以 `grep -n "function <name>" static/js/features/knowledge-graph.js`（Bash，Grep 工具被 hook 擋）或 indexer 重新自驗。
+
+**Backend changes（已落地）:**
+- 新 API 端點 **`POST /api/research/rerun`**：selective re-run from phase 2 with modified query + cached ResearchState（前端契約見下方「API Contract」章；後端實作見 backend 路由與 `live-research-spec.md` / orchestrator phase 文件）。
+- ResearchState session-level cache：preserve `formatted_context` + `source_map` from previous DR run（rerun 400 = cache_miss → 前端提示「原始研究結果已過期，請重新搜尋」）。
+- No changes to: orchestrator phases, analyst prompts, critic agent。
 
 **Not modified:**
 - `renderKGListView` — list view unchanged
 - `renderKGLegend` — legend unchanged
 - Any non-KG JS/CSS
+
+---
+
+## Closure Factory 架構（2026-05-29 Track D 修法 — 取代 module-global 單例）
+
+> 本章為 **2026-05-29 新增**，描述現行架構。下文 Day 1–4 task 中「module-global `let kgEditMode`」的寫法已被此章取代（已標 stale）。
+
+**根因（被修掉的 bug）**：原本 8 個 module-level 單例（`_kgPrefix` + `_currentKGData` + 6 個 edit-state vars）跨 DR / LR **共享**。LR render 會把 `_kgPrefix` 留在 `'lrKG'`（stale），使後續 DR 的 KG edit handler 在 fire time 讀到錯 prefix → 操作錯 DOM + 送出跨污染的 `/api/research/rerun` POST（不可逆 server mutation）。
+
+**修法**：`createKGInstance(prefix)`（`knowledge-graph.js:199`）closure factory —
+
+```
+// module scope（無 state，跨 instance 共享安全）
+const KG_ENTITY_COLORS / KG_ENTITY_STYLES / KG_DEFAULT_STYLE / KG_TYPE_LABELS / KG_RELATION_LABELS
+export function buildKGCopyText(kg)   // 純函式
+
+function createKGInstance(prefix) {
+    // ---- instance-private state（原 module-global，現 closure-scoped）----
+    let _currentKGData, _kgSimulation, _kgEditMode, _kgEditData,
+        _kgConnectMode, _kgConnectSourceId, _kgEditStats;
+    const _kgId = (suffix) => `${prefix}${suffix}`;   // 固定 prefix，instance 生命週期不可變
+    // ... 24 函式（displayKnowledgeGraph … confirmKGEdit），全部用 _kgId() 組 DOM id ...
+    return { displayKnowledgeGraph, getCurrentKGData, getKGEditMode, resetKGState };
+}
+
+const kgDR = createKGInstance('kg');      // DR instance — DOM id 前綴 'kg'（kgGraphView / kgEditToggleBtn …）
+const kgLR = createKGInstance('lrKG');    // LR instance — DOM id 前綴 'lrKG'（lrKGGraphView / lrKGEditToggleBtn …）
+```
+
+**`_kgId` prefix 機制**：所有 DOM 取用一律 `document.getElementById(_kgId('GraphView'))` 等，`_kgId` 在 closure 捕捉建立時固定的 `prefix`。每個 callsite fire 時讀的都是「自己 instance 的 prefix」，**無 timing 依賴**，從架構上消除 stale-prefix 漂移。
+
+**DR / LR 隔離**：兩個 instance 在 module load 時各建一份，state 完全獨立。同頁 DR 與 LR 各自的 KG 編輯互不影響（render、edit、confirm rerun 都鎖在自己 instance）。
+
+**對外 thin-wrapper export（同名 API，DR 為預設）**（`knowledge-graph.js:1977-1988`）：
+- `displayKnowledgeGraph(kg, options = {})` — `options.containerPrefix === 'lrKG'` route 到 `kgLR`，否則 `kgDR`（zero regression：舊 DR caller 無 options 即走 DR）。
+- `getCurrentKGData()` / `getKGEditMode()` — 一律 DR instance（session save / restore / reset 等消費者皆 DR-specific，已驗）。
+- `resetKGState(prefix)` — `prefix === 'lrKG'` route LR，否則 DR（保留形參相容；DR no-arg caller = news-search.js `resetConversation`）。
+
+---
+
+## API Contract: `POST /api/research/rerun`（2026-04-13 改架構 + 落地）
+
+> 取代舊 `performFreeConversation` 注入。由 `confirmKGEdit`（`knowledge-graph.js:1690`，rerun POST 在 `:1785`）觸發。
+
+**Request**（經 `window.authManager.authenticatedFetch` 發送，401 會自動 refresh→retry）：
+
+```
+POST /api/research/rerun
+Headers:
+  Content-Type: application/json
+  Accept: text/event-stream
+Body (JSON):
+  {
+    "query_id":  "<原始 DR 的 query_id>",   // getCurrentResearchQueryId()；缺則前端 abort + alert
+    "kg_edits":  "<serializeKGEdit() 的 JSON 字串>",  // 即「JSON Schema for Serialized Edit」結構
+    "query":     "<原始查詢文字>"            // getResearchReport()?.query 或會話最後一句
+  }
+```
+
+語意：後端用 `query_id` 撈出該次 DR 快取的 `formatted_context` + `source_map`（同批文章），把 `kg_edits` 當前提附到 `query` 後 selective re-run phase 2（actor-critic）+ phase 3（format），**跳過 phase 1 search**。
+
+**Response — SSE 串流**（`text/event-stream`，每筆 `data: <json>\n\n`），前端依 `message_type` 處理：
+
+| `message_type` | 前端動作 |
+|----------------|----------|
+| `begin-nlweb-response` | 取 `conversation_id`（`setCurrentConversationId`），log `is_rerun` |
+| `intermediate_result` | 更新 loading 指示文字（`data.user_message` 或 `data.stage`） |
+| `research_phase` | log `phase` / `status`（進度） |
+| `final_result` | 取 `final_report` → `displayDeepResearchResults()`；加「重新生成版本」badge；push session history（`isRerun: true`）；觸發 `window.renderConversationHistory` + `window.saveCurrentSession` |
+| `complete` | 移除 loading 指示，結束 |
+| `error` | 移除 loading，`showDRError(data.error)` |
+
+**錯誤回應**（非 SSE，JSON body，前端對 status 分流）：
+
+| HTTP | 前端訊息 |
+|------|----------|
+| 401 | 登入已過期（refresh 仍失敗，登入 modal 已彈），「請重新登入後再試」 |
+| 400 | cache_miss / 驗證錯誤 →「原始研究結果已過期，請重新搜尋後再編輯知識圖譜」 |
+| 429 | 「系統忙碌中，請稍後再試」 |
+| 501 | 「此功能尚未啟用」 |
+| 503 | 「深度研究功能暫時關閉」 |
+| 其他 | `errorData.message` 或「重新分析失敗」 |
+
+---
+
+## 複製按鈕功能（2026 新增 — `buildKGCopyText` / `setupKGCopy`）
+
+KG 圖譜可一鍵複製為結構化純文字（沿用 `sharing.js#copyAndOpen` pattern）。三段：
+
+- **`buildKGCopyText(kg)`**（`knowledge-graph.js:143`，**`export` 純函式可單元測試**）：鏡像 `renderKGListView` 的欄位讀取與 fallback，輸出 plain text（非 HTML）。輸出格式：標題行「知識圖譜」+「N 個實體 • M 個關係」，接【實體】區（`序號. 名稱（類型）[confidence]` + 選填 description）與【關係】區（`序號. 來源 --[關係標籤]--> 目標 [confidence]`）。**無 DOM / 無 state；空圖回傳 `''`**（呼叫端據此略過複製）。
+- **`copyKGAsText(buttonEl)`**（factory 內 `:224`）：讀本 instance closure 的 `_currentKGData`（**隔離要求：禁止呼叫 exported `getCurrentKGData()`**），呼 `buildKGCopyText`；無資料時按鈕顯示「✗ 無資料」2 秒並 `console.warn`（不可 silent fail），有資料則 `copyAndOpen(text, null, buttonEl)`。
+- **`setupKGCopy()`**（factory 內 `:237`）：取 `_kgId('CopyBtn')`，沿用 `setupKGEditMode` 的 clone-to-strip-stale-listener pattern 重綁；空圖時 disable 複製鈕（鏡像 `displayKnowledgeGraph` 的 `editBtn.disabled = !hasEntities`），title 隨之切換。
 
 ---
 
@@ -189,6 +309,8 @@ After the edit controls, keep the existing view toggle and collapse/hide buttons
 ```
 
 - [ ] **Step 2: Add state variables in JS**
+
+> **⚠️ 已重構（2026-05-29 Track D）。** 這些 state 不再是 `news-search.js` 的 module-global `let`，已收進 `createKGInstance(prefix)` closure（`knowledge-graph.js:201-207`）成 instance-private `_kgEditMode` / `_kgEditData` / `_kgConnectMode` / `_kgConnectSourceId` / `_kgEditStats`，DR/LR 各一份。見上方「Closure Factory 架構」章。下方為舊設計參考。
 
 Open `static/news-search.js`, find lines 3828-3829:
 ```javascript
@@ -1334,10 +1456,12 @@ git commit -m "feat(kg-edit): serializeKGEdit + buildKGEditPrompt"
 
 ### Task 7: Confirm Flow — Inject into Free Conversation
 
-**Files:**
-- Modify: `static/news-search.js` — implement `confirmKGEdit` function
+> **⚠️ 已重構（2026-04-13 改架構 + 2026-05-25 commit 21 + 2026-05-26 P1 fix）。** 本 task 整段（`performFreeConversation(prompt)` 注入、切 chat 模式、移動 search input）**已被取代**。現行 `confirmKGEdit` 在 `knowledge-graph.js:1690`，改打 `POST /api/research/rerun`（`:1785`，經 `authenticatedFetch`）並消費 SSE 串流 — 不再注入聊天框。**現行契約見上方「API Contract: `/api/research/rerun`」章。** 下方程式碼僅保留作舊設計參考，不可照其實作。
 
-- [ ] **Step 1: Add `confirmKGEdit` function**
+**Files:**
+- ~~Modify: `static/news-search.js`~~ → 現行：`static/js/features/knowledge-graph.js`（`confirmKGEdit` `:1690`）
+
+- [ ] **Step 1: Add `confirmKGEdit` function**（舊架構，已被 `/api/research/rerun` 取代）
 
 In `static/news-search.js`, replace the empty `confirmKGEdit` stub (currently not defined — add it after `buildKGEditPrompt`):
 

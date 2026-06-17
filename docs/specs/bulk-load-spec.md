@@ -224,6 +224,8 @@ except json.JSONDecodeError:
     continue  # 跳過該行，繼續下一篇
 ```
 
+JSON 解碼錯誤與文章層級 rollback 共用同一個 `stats["errors"]` 計數器（見下方「部分成功計算」）。
+
 ---
 
 ## 監控與進度追蹤
@@ -299,7 +301,7 @@ if embeddings.shape[1] != 1024:
 
 ### 部分成功計算
 
-`stats["errors"]` 只計算文章層級的 rollback，不計算 JSON 解碼錯誤（另外計數）。`errors` 不為 0 但 `load_file_pair` 成功返回時，仍會寫入 `.bulk_load_done`。
+`stats["errors"]` 是單一計數器，同時涵蓋 JSON 解碼錯誤（`bulk_load.py:77`）與文章層級的 rollback（`bulk_load.py:116`、`bulk_load.py:160`）——兩者皆 `stats["errors"] += 1`，並無分開計數。`errors` 不為 0 但 `load_file_pair` 成功返回時，仍會寫入 `.bulk_load_done`。
 
 ### psycopg v3
 

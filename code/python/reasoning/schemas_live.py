@@ -1065,10 +1065,14 @@ class LiveWriterSectionOutput(BaseModel):
     )
 
     def validate_sources_against_plan(
-        self, planned_evidence_ids: List[int]
+        self, planned_evidence_ids: List[int],
+        allowed_evidence_ids: Optional[List[int]] = None,   # P2 W8：全 pool 容許集
     ) -> None:
-        """addendum C-4 invariant check：sources_used ⊆ planned_evidence_ids ∪ {0}
-        （0 = no-citation marker）。
+        """addendum C-4 invariant check：sources_used ⊆ allowed ∪ {0}（0 = no-citation marker）。
+
+        P2 W8（§0 #16）：全局 evidence 模型下合法引用集 = 全 evidence pool（非只該章
+        planned）。`allowed_evidence_ids` 提供時用全 pool；未提供 → 向後相容退回
+        planned ∪ {0}（避免未來把此 invariant wire 進 prod 時變成隱性白名單擋合法 citation）。
 
         codex Imp-1 雙模式紀律（CEO 2026-05-28 拍板）：
         - Runtime（prod / dev）：違反不 raise（避免阻塞 user pipeline），用
@@ -1077,7 +1081,8 @@ class LiveWriterSectionOutput(BaseModel):
         - Test / CI fixture：偵測 `LR_STRICT_INVARIANTS=1` env var → raise
           `InvariantViolation`（test 故意傳 invalid sources_used → 必須 fail-loud）
         """
-        allowed = set(planned_evidence_ids) | {0}
+        base = allowed_evidence_ids if allowed_evidence_ids is not None else planned_evidence_ids
+        allowed = set(base) | {0}
         violations = [s for s in self.sources_used if s not in allowed]
         if not violations:
             return
@@ -1320,12 +1325,43 @@ class EvidencePoolEntry(BaseModel):
             "'llm_knowledge' = Analyst gap_resolutions LLM_KNOWLEDGE virtual doc"
         ),
     )
+    # P2 全局 evidence 模型（W1，§0 #13）：evidence→建議章節正向 N:M 軟標註。
+    # 由 OutlinePlanner 反轉現有 per-chapter allocation 回填（orchestrator outline stage）。
+    # default_factory=list 保 backward-compat（舊 session evidence_pool_json 無此 key → 空 list）。
+    suggested_chapters: List[int] = Field(
+        default_factory=list,
+        description=(
+            "建議此 evidence 適用的章節 index（0-based，可多章 = N:M 正向標記）。"
+            "空 list = 無特定建議（全章皆可，當低優先 tier）。"
+            "**軟性提示**：writer 讀全 pool，此欄只影響排序優先序，不是白名單。"
+        ),
+    )
+
+
+class GeneratedTitle(BaseModel):
+    """外部來源（web/wiki）無標題時，low-tier LLM 從 snippet 生成的標題。
+
+    Google CSE API 無 title 時填字串 "No Title"；空標題 / "No Title" 進
+    evidence_pool 前用 low-tier LLM 從 snippet 生成簡潔中文標題（loop_engine
+    `_add_external_evidence`）。失敗 / 空回應由 caller 降級為 source_domain。
+    """
+
+    title: str = Field(
+        ...,
+        description="簡潔的繁體中文標題（≤30 字），概括 snippet 主題；禁用「相關報導」「新聞」等泛化詞。",
+    )
+
+
+GROUNDING_VIEW_CHAR_BUDGET = 12000   # R2：evidence view 字元硬上限（可調常數）
+GROUNDING_VIEW_MAX_PRIOR = 40        # R7：prior grounded entity 上限
 
 
 def render_grounded_narrative(
     chapter_eids: List[int],
     evidence_usage: Dict[int, List[Dict]],
     evidence_pool: Dict[int, "EvidencePoolEntry"],
+    priority_eids: Optional[List[int]] = None,           # P2 W4：優先渲染（本章 planned/suggested）
+    char_budget: int = GROUNDING_VIEW_CHAR_BUDGET,        # P2 W4：防全 pool 爆窗（對齊 12000）
 ) -> str:
     """把該章 evidence_ids 對應的 GroundedClaim 渲染為 writer 可讀的 markdown findings
     (Track A Task 3, sprint 2026-05-28)。
@@ -1353,8 +1389,20 @@ def render_grounded_narrative(
         ### [2] T2（snippet2）
         - [confidence: low | critic_status: WARN] 推論（deduction，low）：claim-B
     """
+    # P2 W4：排序 — priority_eids（依傳入序）優先 → 其餘 eid 升冪。
+    # priority_eids=None → 退回現況（純 chapter_eids 升冪，無 budget 截斷即傳大值）。
+    _unique = list(dict.fromkeys(chapter_eids))  # 去重保序（不直接 sort，先取 unique）
+    if priority_eids:
+        _prio = [e for e in priority_eids if e in _unique]
+        _rest = sorted(e for e in _unique if e not in set(_prio))
+        ordered_eids = _prio + _rest
+    else:
+        ordered_eids = sorted(set(_unique))
+
     parts: List[str] = []
-    for eid in sorted(set(chapter_eids)):
+    used_chars = 0
+    truncated = False
+    for eid in ordered_eids:
         entry = evidence_pool.get(eid)
         if entry is None:
             continue
@@ -1373,7 +1421,8 @@ def render_grounded_narrative(
         if not renderable:
             # 整批 claim 都是 REJECT → 該 eid block 跳過 (writer 看不到)
             continue
-        parts.append(f"### [{eid}] {title}（{snippet}）")
+        # P2 W4：組這一 eid 的 block，先量字數再決定是否超 budget（不 silent 截斷）。
+        block_lines = [f"### [{eid}] {title}（{snippet}）"]
         for gc in renderable:
             rtype = gc.get("reasoning_type", "")
             conf = gc.get("confidence", "")
@@ -1381,17 +1430,23 @@ def render_grounded_narrative(
             cstat = gc.get("critic_status", "PASS")
             # Gemini Imp-1: WARN 在 narrative 行首明標, 搭配 Task 4 writer prompt 紀律降語氣
             if cstat == "WARN":
-                parts.append(
+                block_lines.append(
                     f"- [confidence: low | critic_status: WARN] "
                     f"推論（{rtype}，{conf}）：{claim}"
                 )
             else:
-                parts.append(f"- 推論（{rtype}，{conf}）：{claim}")
+                block_lines.append(f"- 推論（{rtype}，{conf}）：{claim}")
+        block = "\n".join(block_lines)
+        # P2 W4：char_budget 防全 pool 爆窗。priority 已先進，被截的是相關度最低的。
+        if used_chars + len(block) > char_budget and parts:
+            truncated = True
+            break
+        parts.append(block)
+        used_chars += len(block) + 1  # +1 為 join 的換行
+    if truncated:
+        # 不可 silent fail：明示截斷（比照 render_grounding_evidence_view）。
+        parts.append(f"[narrative 已達 budget {char_budget} 字元上限，其餘 evidence 見 grounding 視圖]")
     return "\n".join(parts)
-
-
-GROUNDING_VIEW_CHAR_BUDGET = 12000   # R2：evidence view 字元硬上限（可調常數）
-GROUNDING_VIEW_MAX_PRIOR = 40        # R7：prior grounded entity 上限
 
 
 def render_grounding_evidence_view(
@@ -1401,6 +1456,7 @@ def render_grounding_evidence_view(
     prior_grounded_entities: List[str],
     analyst_citations: Optional[List[int]] = None,
     char_budget: int = GROUNDING_VIEW_CHAR_BUDGET,
+    current_chapter_index: Optional[int] = None,   # P2 W5：suggested_chapters 含本章 → 升 tier
 ) -> str:
     """grounding 判讀專用的「良好資料來源」視圖（CEO 方向：給 LLM 完整 context 判 grounding）。
 
@@ -1419,25 +1475,37 @@ def render_grounding_evidence_view(
     cited = set(analyst_citations or [])
     all_eids = set(chapter_eids) | set(evidence_pool.keys())
 
+    # P2 W5：suggested_chapters 含 current_chapter_index 的 eid 升 tier ①b（cited 之後、有 claim 之前）。
+    # current_chapter_index=None → suggested_here 空集 → 行為與現況完全一致（Critic 呼叫端不傳）。
+    suggested_here = set()
+    if current_chapter_index is not None:
+        suggested_here = {
+            eid for eid, e in evidence_pool.items()
+            if current_chapter_index in (getattr(e, "suggested_chapters", []) or [])
+        }
+
     def _renderable_claims(eid: int) -> List[Dict]:
         return [
             c for c in (evidence_usage.get(eid) or [])
             if c.get("critic_status", "PASS") != "REJECT"
         ]
 
-    # R2 優先序分桶（tier 1=最高）：①本章 citation → ②有 claim → ③prior-overlap → ④其餘
+    # R2 優先序分桶（tier 1=最高）：①本章 citation → ①b suggested_here → ②有 claim
+    # → ③prior-overlap → ④其餘
     prior_terms = [e for e in (prior_grounded_entities or []) if e]
 
     def _priority(eid: int) -> int:
         if eid in cited:
             return 1
-        if _renderable_claims(eid):
+        if eid in suggested_here:   # P2 W5：tier ①b（建議本章）
             return 2
+        if _renderable_claims(eid):
+            return 3
         entry = evidence_pool.get(eid)
         text = (getattr(entry, "title", "") or "") + (getattr(entry, "snippet", "") or "")
         if any(t and t in text for t in prior_terms):
-            return 3
-        return 4
+            return 4
+        return 5
 
     ordered = sorted(all_eids, key=lambda e: (_priority(e), e))
 

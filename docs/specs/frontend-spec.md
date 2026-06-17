@@ -25,7 +25,7 @@
 >
 > **D-2026-05-13 Frontend Init Sync**：所有 user-scoped 前端 state 寫入**只透過 `UserStateSync` module 7 個 sync trigger** 進行（Login/Onboarding、Identity change、Logout、401、Session click、Page reload、SSE envelope）。核心 invariant：`cache.user_id == JWT.user_id`，mismatch 由 `assertUserIdentity()` 拋 `UserStateSyncError` 觸發 fullReset。詳見 §10.3。
 >
-> **D-2026-05-25 Frontend Modular Refactor v4.0 Path A++**：21 ES module surfaces（5 core + 14 features + 2 utils）取代 11,697 LOC 單體 script。`UserStateSync` IIFE 搬至 `core/state-sync.js`（228 行，真實 owner）。24 user-scoped `let` 分散至 8 owner modules。news-search.js 精簡至 3,420 LOC stub（-71%）。詳見 §2。
+> **D-2026-05-25 Frontend Modular Refactor v4.0 Path A++**：23 ES module surfaces（5 core + 16 features + 2 utils）取代 11,697 LOC 單體 script。`UserStateSync` IIFE 搬至 `core/state-sync.js`（~335 行，真實 owner）。24 user-scoped `let` 分散至 8 owner modules。news-search.js 精簡至 ~3,517 行 stub（-70%）。詳見 §2。
 
 ### 1.1 技術棧
 
@@ -44,20 +44,21 @@
 - **響應式設計**：支援桌面與平板裝置
 - **無障礙支援**：大字體模式、語義化 HTML
 - **User State Sync**：cross-user / cross-tab 一致性透過 `UserStateSync` 七個 trigger 統一管理（§10.3），禁止繞過直接寫入 user-scoped state
-- **ES Module 架構**：`<script type="module">` + 21 module surfaces（v4.0）。State ownership 按 module 邊界明確分離，不集中在單一 script
+- **ES Module 架構**：`<script type="module">` + 23 module surfaces（v4.0）。State ownership 按 module 邊界明確分離，不集中在單一 script
 - **Import Direction 規則（D-V6）**：基本方向 `core/ → features/ → utils/`（不反向）。D-V6 放寬：cross-feature read-only 或 function-call import 允許（search↔chat / KG→search / deep-research↔search / folders→sessions-list）。禁止：features/ → core/auth-manager；circular imports
 
 ---
 
 ## 2. 檔案結構
 
-> **2026-05-25 — Frontend Modular Refactor v4.0 Path A++ 完成**（D-2026-05-25）：29 commits（0a–25）+ 6 post-E2E regression/UX patches = 35 total。`news-search.js` 從 11,697 LOC 精簡至 3,420 LOC（-71%）。21 module surfaces 建立（5 core + 14 features + 2 utils）。`UserStateSync` IIFE（228 行）從 news-search.js 搬至 `core/state-sync.js`，不再是 thin alias。24 user-scoped `let` declarations 分散至 8 owner modules。`<script type="module">` 載入方式啟用（commit 0c）。
-> **Line refs 說明**：v4.0 完成後 news-search.js 為 3,420 LOC stub。本 spec 內行號 refs 均為邏輯參考。需找實際位置時 grep 函數名或 D-1 module header 標記。
+> **2026-05-25 — Frontend Modular Refactor v4.0 Path A++ 完成**（D-2026-05-25）：29 commits（0a–25）+ 6 post-E2E regression/UX patches = 35 total。`news-search.js` 從 11,697 LOC 精簡至 ~3,517 行（-70%）。23 module surfaces 建立（5 core + 16 features + 2 utils）。`UserStateSync` IIFE（~335 行）從 news-search.js 搬至 `core/state-sync.js`，不再是 thin alias。24 user-scoped `let` declarations 分散至 8 owner modules。`<script type="module">` 載入方式啟用（commit 0c）。
+> **LOC 說明**：本 spec 的行數均標「~行」概數（避免隨提交漂移），實際數字以 `wc -l` 自驗為準。後續持續演進，數百行內的差異屬正常。
+> **Line refs 說明**：v4.0 完成後 news-search.js 為 ~3,517 行 stub。本 spec 內行號 refs 均為邏輯參考。需找實際位置時 grep 函數名或 D-1 module header 標記。
 
 ```
 static/
 ├── news-search-prototype.html   # 主頁面 HTML 結構（type="module" script 載入）
-├── news-search.js               # 3,420 LOC stub — 14 類 KEEP-in-place 函數 + 21 intentional window bridges（見 §2.3）
+├── news-search.js               # ~3,517 行 stub — 14 類 KEEP-in-place 函數 + 21 intentional window bridges（見 §2.3）
 ├── news-search.css              # 主樣式（barrel @import manifest + 縮減 legacy inline rules）
 ├── analytics-tracker-sse.js     # 分析追蹤器
 ├── analytics-dashboard.html     # 分析儀表板
@@ -73,7 +74,7 @@ static/
 │   │   ├── auth-manager.js      # AuthManager class + authManager singleton + injectStateSync
 │   │   ├── auth-ui.js           # showAuthModal, hideAuthModal, updateAuthUI（NEW v4.0）
 │   │   ├── session-coordinator.js  # initSessionCoordinator — 跨模組 session 協調（NEW v4.0）
-│   │   ├── state-sync.js        # UserStateSync IIFE（228 行，v4.0 commit 11 搬入）— 真實 owner，不再是 alias
+│   │   ├── state-sync.js        # UserStateSync IIFE（~335 行，v4.0 commit 11 搬入）— 真實 owner，不再是 alias
 │   │   └── page-bootstrap.js    # checkAuthOnLoad + visibilitychange listener + bootstrapPage()
 │   └── features/
 │       ├── mode.js              # getCurrentMode, setCurrentMode — search/chat/LR mode state
@@ -89,7 +90,9 @@ static/
 │       ├── knowledge-graph.js   # KG render + edit ops（NEW v4.0）
 │       ├── file-kb.js           # loadUserFiles — 私有知識庫檔案管理（NEW v4.0）
 │       ├── sessions-list.js     # renderLeftSidebarSessions, renderSharedSessions, hydrateFromSoftRefreshInit
-│       └── session-manager.js   # sessionManager singleton, markSessionDirty, clearSessionDirty, isSessionDirty（D-V14 _sessionDirty owner）
+│       ├── session-manager.js   # sessionManager singleton, markSessionDirty, clearSessionDirty, isSessionDirty（D-V14 _sessionDirty owner）
+│       ├── lr-resume-classify.js # LR resume 分類 — 中斷後續跑判定（LR-specific）
+│       └── text-fragment.js     # Text Fragment 深連結 — 引用片段定位/捲動高亮
 └── css/                         # CSS 模組（v3.3 Phase 1-2 建立）
     ├── tokens.css               # :root variables / @font-face
     ├── base.css                 # body reset / .container / .emoji-bw
@@ -105,7 +108,7 @@ static/
 HTML 載入：`<script type="module" src="static/js/main.js">` — defer semantics，取代 classic script。
 
 `main.js` 職責：
-1. Import 21 module surfaces
+1. Import 23 module surfaces（部分由其他 module 轉導入，非全部在 main.js 直接 import）
 2. 呼叫 `injectStateSync({ UserStateSync, UserStateSyncError, assertUserIdentity })` — wire auth-manager
 3. 呼叫 `injectStateSyncBackref({ isLRInProgress, getLRSessionId, clearLRSessionId })` — wire live-research D-V3 backref
 4. 設定 21 intentional `window.X = X` bridges（見 §2.3）
@@ -123,7 +126,7 @@ HTML 載入：`<script type="module" src="static/js/main.js">` — defer semanti
 | DOM-coupled residuals | setProcessingState, cancelAllActiveRequests | 操作複雜 DOM + 相依多個 outer state |
 | 21 window-attach bridges | window.openTab = openTab 等 | Sidebar inline-onclick callsite，無法移除 |
 
-**Root cause**：classic-script `let` binding 不能被 ES module reassign（D-V3 / lessons-frontend 2026-05-21）。真實搬出需一次性大改 declaration → getter/setter/event-based pattern。AC-V6（≤500 LOC）為 GOAL not hard target，CEO directive 1（2026-05-25）接受 3,420 LOC 現況。
+**Root cause**：classic-script `let` binding 不能被 ES module reassign（D-V3 / lessons-frontend 2026-05-21）。真實搬出需一次性大改 declaration → getter/setter/event-based pattern。AC-V6（≤500 LOC）為 GOAL not hard target，CEO directive 1（2026-05-25）接受 ~3,400 行 stub 現況（refactor 完成時；後續演進至 ~3,517 行）。
 
 ### 2.3 21 Intentional Window Bridges（Load-Bearing）
 
@@ -176,7 +179,7 @@ live-research.js 啟動時呼叫：
 | AC-V3 | UserStateSync IIFE in news-search.js === 0 | Pass（commit 11）|
 | AC-V4 | ~441 real ops migrated | Pass（cumulative）|
 | AC-V5 | hazard map H1-H6 + R0-R4 + R8.1-R8.3 resolved | Pass |
-| AC-V6 | ≤500 LOC OR delete | Stub path — 3,420 LOC（CEO directive 1 接受）|
+| AC-V6 | ≤500 LOC OR delete | Stub path — ~3,400 行 at refactor end（CEO directive 1 接受；現 ~3,517 行）|
 | AC-V7 | HTML type="module" + zero console error | Pass（commit 0c + final E2E）|
 
 **Phase 0 Source-of-Truth + β Inventory Path（v4.0 新標準）**
@@ -852,6 +855,8 @@ default:
 
 ## 8. 樣式系統
 
+> **2026-06-16 — Icon emoji→SVG（commit 173aad89）**：UI icon 已由 emoji 全面替換為 Rika 設計師 SVG icon，並新增聊天角色頭像。本節若有 emoji icon 相關描述均以 SVG 實作為準。
+
 ### 8.1 CSS 變數
 
 ```css
@@ -1074,7 +1079,7 @@ function initSidebarDragDelegation() {
 | **F. Page reload / tab visible** | `DOMContentLoaded` checkAuthOnLoad、`document.visibilitychange === 'visible'` | mismatch → 走 A；match → `fetchInit()` soft refresh sessions / shared |
 | **G. SSE envelope** | `handleStreamingRequest` / `handlePostStreamingRequest` 每個 onmessage | envelope `data.user_id` ≠ `authManager._user.id` → abort stream + trigger F |
 
-**`UserStateSync` module 三函式**（`static/js/core/state-sync.js`，v4.0 commit 11 搬入，228 行）：
+**`UserStateSync` module 三函式**（`static/js/core/state-sync.js`，v4.0 commit 11 搬入，~335 行）：
 - `clearUserScopedState({ keepInviteToken })` — 統一清光 A+B+C+D+E+F 範圍的 user-scoped state（device-scoped UI prefs 不動）
 - `fetchInit()` — 呼叫 `GET /api/user/init`，一次拿回 `{ user, org, role, sessions, shared_sessions, preferences }`
 - `applyInit(initPayload)` — 把 init payload hydrate 進 in-memory caches + render UI

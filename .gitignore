@@ -491,6 +491,7 @@ analyze_*.py
 !code/python/core/query_analysis/analyze_query.py
 retry_*.py
 upload_*.py
+!code/python/webserver/middleware/upload_rate_limit.py
 truncate_*.py
 
 # Algorithm metrics logs

@@ -78,7 +78,7 @@ async def post_feedback_handler(request: web.Request) -> web.Response:
         try:
             raw = base64.b64decode(screenshot_b64)
             if len(raw) > MAX_SCREENSHOT_BYTES:
-                return web.json_response({'error': 'Screenshot exceeds 1MB limit'}, status=400)
+                return web.json_response({'error': 'Screenshot exceeds 5MB limit'}, status=400)
             # Validate image magic bytes (must be JPEG or PNG)
             if not (raw.startswith(_JPEG_MAGIC) or raw.startswith(_PNG_MAGIC)):
                 return web.json_response({'error': 'Screenshot must be a JPEG or PNG image'}, status=400)

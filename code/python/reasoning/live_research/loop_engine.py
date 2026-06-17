@@ -41,6 +41,16 @@ def _extract_domain(url: str) -> str:
     except Exception:
         return ""
 
+
+# 外部來源（web/wiki）無標題補標題（low-tier LLM 從 snippet 生成）。
+# Google CSE API 無 title 時填字串 "No Title"；空標題 / 此 sentinel 觸發補標題。
+_NO_TITLE_SENTINEL = "No Title"
+# 每個 BAB run 最多用 LLM 補幾筆無標題 evidence（per-run 計數器，超過用 source_domain）。
+# module 常數方便調。
+TITLE_BACKFILL_CAP = 8
+# 補標題 LLM call timeout（秒）— low-tier 小工作，短 timeout。
+_TITLE_BACKFILL_TIMEOUT = 10
+
 logger = get_configured_logger("live_research.loop_engine")
 
 
@@ -142,6 +152,10 @@ class BABLoopEngine:
         self._gap_routing_cap_narrated = False            # C3: gap routing 外部呼叫 cap 旁白
         self._revise_degraded_narrated = False            # M-5: revise 降級旁白
         self._search_required_degraded_narrated = False   # M-5: SEARCH_REQUIRED 補搜降級旁白
+        self._kg_merge_degraded_narrated = False          # O5a-(2): KG merge 降級旁白
+        # 外部來源無標題補標題 per-run cap 計數器（每 run 最多 TITLE_BACKFILL_CAP 次 LLM
+        # call，超過用 source_domain）。per-run 重置 = engine 重用時下一輪重新配額。
+        self._title_backfill_count = 0
 
     def _setup_dry_run(self):
         """Override methods with fixtures for dry-run."""
@@ -154,6 +168,7 @@ class BABLoopEngine:
 
         async def mock_mini(cm, results):
             logger.info("[BAB LOOP] Dry-run: skipping mini-reasoning")
+            return True  # s5-4: dry_run 視為成功輪 → run_loop 照 emit bab_phase3 completed
 
         async def mock_consistency(current, initial):
             return ConsistencyReview(
@@ -238,7 +253,26 @@ class BABLoopEngine:
             await self._emit_phase("bab_phase2", "completed")
 
             # Phase 3: Mini-Reasoning (optional — Analyst + Critic on new evidence)
-            await self._run_mini_reasoning(context_map, formatted_results)
+            # bab_phase3 進度事件 + 預期管理 narration：mini-reasoning 是 BAB loop 最耗時的
+            # LLM 段（Analyst high model + Critic + 可能 gap routing）。沿 #8 長 LLM call 前
+            # 推進度 pattern（phase1/phase4 已有），補 phase3 進度，避免前端最長窗口零進度。
+            # emit 放 run_loop 包夾處而非 _run_mini_reasoning 內部：dry_run 會整個替換
+            # _run_mini_reasoning，放內部 dry_run emit 不到；放這裡 dry_run 也會 emit。
+            # s5-4 收斂（O5-B/O5-C 耦合判定，見 plan）：
+            # - early-skip 輪（gate False，檢索空手）完全不 emit phase3 事件 —
+            #   沒有資料可分析，不對 user 謊稱「正在深入分析這批資料」。
+            # - mini 失敗輪（O5-B 降級，回傳 False）不 emit completed —
+            #   降級旁白「已先略過⋯我會繼續往下進行」就是該輪收尾，緊接的
+            #   bab_phase4 started 標記邊界；「完成」與「已先略過」並列矛盾。
+            if self._has_mini_reasoning_input(formatted_results):
+                await self._emit_phase("bab_phase3", "started")
+                await self._emit_narration("正在深入分析這批資料、交叉檢驗論點...")
+                mini_ok = await self._run_mini_reasoning(context_map, formatted_results)
+                if mini_ok:
+                    await self._emit_phase("bab_phase3", "completed")
+            else:
+                # early-skip 輪：保留呼叫維持行為等價（內部 early return + 既有 log）
+                await self._run_mini_reasoning(context_map, formatted_results)
 
             # Phase 4: 更新 B -> B'
             await self._emit_phase("bab_phase4", "started")
@@ -753,7 +787,7 @@ class BABLoopEngine:
                 # GoogleSearchClient.search_all_sites)，必須先過 _normalize_item
                 # 轉成 dict 才能 .get() 取 url/title/snippet。
                 for item in web_items:
-                    self._add_external_evidence(self._normalize_item(item), source="web")
+                    await self._add_external_evidence(self._normalize_item(item), source="web")
 
             elif res == GapResolutionType.INTERNAL_SEARCH:
                 # internal search 已由 BAB main loop _execute_search 處理 — gap routing no-op
@@ -852,17 +886,23 @@ class BABLoopEngine:
                 url = result.get("link", "")
                 if not url:
                     continue
-                self._add_external_evidence({
+                await self._add_external_evidence({
                     "url": url,
                     "title": result.get("title", "Wikipedia"),
                     "snippet": f"[Tier 6 | encyclopedia] {result.get('snippet', '')}",
                 }, source="wiki")
 
-    def _add_external_evidence(self, item: dict, source: str) -> None:
+    async def _add_external_evidence(self, item: dict, source: str) -> None:
         """共用 helper：把外部來源 item (web / wiki) 寫進 evidence_pool (Track C C4).
 
         item 預期 keys: url, title, snippet (已 normalized)。
         URL 去重沿用既有 self._url_to_id 機制。
+
+        無標題補標題 (2026-06-17): Google CSE 無 title 時填 "No Title"，空標題 /
+        sentinel 進池前用 low-tier LLM 從 snippet 生成簡潔中文標題（見
+        _resolve_external_title）。async 化以 await LLM call；兩 caller
+        (_process_gap_resolutions_lr web 路徑 / _execute_wikipedia_searches_lr)
+        皆為 async，已加 await。
 
         F-6 紀律: 只寫 self.evidence_pool (engine dict)。
         F-12 紀律 (Track C × Track E orthogonal): wiki/web 不填 publish date
@@ -876,21 +916,89 @@ class BABLoopEngine:
             return
         if url in self._url_to_id:
             return  # 已存在 → 不重複建（沿既有 eid）
+
+        snippet = (item.get("snippet", "") or "")[:300]
+        source_domain = _extract_domain(url)
+        title = await self._resolve_external_title(
+            raw_title=item.get("title", "") or "",
+            snippet=snippet,
+            source_domain=source_domain,
+        )
+
         self._evidence_counter += 1
         eid = self._evidence_counter
         self._url_to_id[url] = eid
         entry = EvidencePoolEntry(
             evidence_id=eid,
-            title=item.get("title", "") or "",
+            title=title,
             url=url,
-            source_domain=_extract_domain(url),
-            snippet=(item.get("snippet", "") or "")[:300],
+            source_domain=source_domain,
+            snippet=snippet,
             iteration_origin=self._current_iteration,
             source=source,
             published_at=None,  # F-12: wiki/web 不填 publish date
         )
         self.evidence_pool[eid] = entry
         logger.info(f"[LR gap routing] Added {source} evidence eid={eid} url={url[:60]}")
+
+    async def _resolve_external_title(
+        self, raw_title: str, snippet: str, source_domain: str
+    ) -> str:
+        """外部來源 entry title 決議：有正常標題用原值，無標題補標題 (2026-06-17)。
+
+        觸發補標題：raw_title 為空字串 OR 等於 "No Title"（Google CSE fallback）。
+        補標題策略（CEO 拍板，順序）：
+          1. snippet 也空 → 直接用 source_domain（沒內文餵 LLM 沒意義，不呼叫 LLM）。
+          2. 本 run 已達 TITLE_BACKFILL_CAP → 直接用 source_domain（不呼叫 LLM，省錢）。
+          3. 否則 low-tier LLM 從 snippet 生成簡潔中文標題；計數器 +1。
+             LLM 失敗 / timeout / 空回應 → 降級 source_domain + log（不可 silent fail）。
+        """
+        if raw_title and raw_title != _NO_TITLE_SENTINEL:
+            return raw_title  # 有正常標題 → 不動（省錢）
+
+        # 無內文 → LLM 無從生成，直接 domain（不燒錢）
+        if not snippet:
+            return source_domain
+
+        # per-run cap：超過上限不再呼叫 LLM
+        if self._title_backfill_count >= TITLE_BACKFILL_CAP:
+            return source_domain
+
+        self._title_backfill_count += 1
+        from core.llm import ask_llm
+        from reasoning.schemas_live import GeneratedTitle
+
+        prompt = (
+            "以下是一篇外部來源（網路 / 維基百科）的內文摘要，但這篇來源沒有標題。\n"
+            "請根據摘要內容，生成一個簡潔的繁體中文標題（不超過 30 字），"
+            "概括這篇來源的主題。\n"
+            "禁止使用「相關報導」「新聞」「文章」等泛化詞，標題要具體點出主題。\n\n"
+            f"內文摘要：\n{snippet}"
+        )
+        try:
+            response = await ask_llm(
+                prompt,
+                GeneratedTitle.model_json_schema(),
+                level="low",
+                query_params=getattr(self.handler, "query_params", {}),
+                timeout=_TITLE_BACKFILL_TIMEOUT,
+            )
+            generated = (GeneratedTitle.model_validate(response).title or "").strip()
+            if generated:
+                return generated
+            # 空回應 → 降級（fail-loud-with-info，不留空標題）
+            logger.warning(
+                f"[LR title backfill] LLM returned empty title, "
+                f"degrading to source_domain='{source_domain}'"
+            )
+            return source_domain
+        except Exception as e:
+            # 失敗 / timeout → 降級 source_domain（不可 silent fail）
+            logger.warning(
+                f"[LR title backfill] LLM title generation failed "
+                f"({type(e).__name__}: {e}), degrading to source_domain='{source_domain}'"
+            )
+            return source_domain
 
     @staticmethod
     def _merge_knowledge_graph(state_kg, new_kg):
@@ -995,6 +1103,17 @@ class BABLoopEngine:
             relationships=merged_relationships,
         )
 
+    @staticmethod
+    def _has_mini_reasoning_input(formatted_results) -> bool:
+        """Phase 3 是否有可分析輸入。
+
+        s5-4 收斂：run_loop 的 phase3 emit gate 與 _run_mini_reasoning 開頭
+        early-skip 用同一判準、單一定義 — sentinel 字串不得各寫一份（drift
+        即 gate 失效）。sentinel 來源：_execute_search 空手時回傳
+        「（未找到相關結果）」。
+        """
+        return bool(formatted_results) and formatted_results != "（未找到相關結果）"
+
     async def _run_mini_reasoning(self, context_map, formatted_results):
         """
         Mini-Reasoning：對新 evidence 跑 Analyst + Critic。
@@ -1011,16 +1130,31 @@ class BABLoopEngine:
         - status="WARN" → 入庫，confidence 降為 "low" + critic_status="WARN"
           + entry 帶 from_warned_critic_review=True tag
         - status="PASS"（或 default）→ 正常索引 + critic_status="PASS"
+
+        Returns:
+            bool — 本體成功 True / early-skip 或整段失敗 False（s5-4：run_loop
+            據此條件 emit bab_phase3 completed）。
         """
-        if not formatted_results or formatted_results == "（未找到相關結果）":
+        if not self._has_mini_reasoning_input(formatted_results):
             logger.info("[BAB LOOP] No results for mini-reasoning, skipping")
-            return
+            return False
 
         from reasoning.agents.analyst import AnalystAgent
         from reasoning.agents.critic import CriticAgent
+        # 函式內 import（對齊本檔既有 function-local CONFIG pattern :578/620/697，
+        # 並支援 unit test monkeypatch CONFIG）。LR 沿用 DR config key
+        # (analyst_timeout=300 / critic_timeout=120)；config key 已存在，
+        # fallback 120 僅在「忘了帶 config」時兜底（對齊 base.py:168 / analyst.py / critic.py）。
+        from core.config import CONFIG
 
-        analyst = AnalystAgent(self.handler)
-        critic = CriticAgent(self.handler)
+        analyst = AnalystAgent(
+            self.handler,
+            timeout=CONFIG.reasoning_params.get("analyst_timeout", 120),
+        )
+        critic = CriticAgent(
+            self.handler,
+            timeout=CONFIG.reasoning_params.get("critic_timeout", 120),
+        )
 
         # Inject ContextMap summary into analyst context (prepended)
         cm_summary = context_map_to_summary(context_map)
@@ -1029,6 +1163,10 @@ class BABLoopEngine:
         # Track C C4 (F-4 紀律 2026-05-28): analyst_output 必須在 try 外初始化，
         # 否則 try 內 raise 時後續 gap routing block (try 外) 會 NameError。
         analyst_output = None
+
+        # s5-4: mini-reasoning 本體成敗狀態（outer try 成功 True / 整段失敗 False）。
+        # gap routing 失敗（O5-C）不翻轉它（耦合判定 2 — 分析本體已成功）。
+        mini_ok = True
 
         try:
             # Analyst pass — use actual parameter name: formatted_context
@@ -1349,6 +1487,15 @@ class BABLoopEngine:
                     logger.warning(
                         f"[BAB LOOP][Track D] KG merge failed (non-fatal): {e}"
                     )
+                    # O5a-(2): 降級必有 user-facing 訊息（CLAUDE.md 不可 silent fail）。
+                    # _run_mini_reasoning 每輪由 run_loop 呼叫；KG merge 持續性失敗
+                    #（如 429 貫穿 run）會每輪觸發 → per-run 只提示一次防轟炸
+                    #（照同檔 _mini_reasoning_degraded_narrated / _gap_routing_degraded_narrated
+                    # 先例）。log 每輪照記，只有 user-facing 旁白 dedup。
+                    if not self._kg_merge_degraded_narrated:
+                        from reasoning.live_research import lr_copy
+                        await self._emit_narration(lr_copy.KG_MERGE_DEGRADED_NARRATION)
+                        self._kg_merge_degraded_narrated = True
         except Exception as e:
             # s3-3 review（in-house N2 + Gemini）：對齊 Track C except，補 stack trace
             #（非 LLM 類程式錯誤如 GroundedClaim 建構失敗，無 trace 極難 debug）。
@@ -1368,6 +1515,8 @@ class BABLoopEngine:
                     "稍後若有章節顯示資料不足，可能與此有關。我會繼續往下進行。"
                 )
                 self._mini_reasoning_degraded_narrated = True
+            # s5-4: 本體失敗 → run_loop 不 emit bab_phase3 completed（耦合判定 1）。
+            mini_ok = False
 
         # Track C C4 (F-4 紀律 2026-05-28): post-mini-reasoning gap routing.
         # 必須在 outer try/except 之外獨立執行 — 若放 outer try 內，gap routing 內任何
@@ -1382,6 +1531,11 @@ class BABLoopEngine:
             and analyst_output.gap_resolutions
         ):
             await self._run_gap_routing_phase(analyst_output)
+
+        # s5-4: 回傳值只反映 mini-reasoning 本體成敗（outer try）。gap routing 失敗
+        # （O5-C，_run_gap_routing_phase 自帶降級旁白）不翻轉 mini_ok（耦合判定 2 —
+        # 分析本體已成功，completed 語意保真）。
+        return mini_ok
 
     async def _run_gap_routing_phase(self, analyst_output) -> None:
         """Track C C4：post-mini-reasoning gap routing，獨立 except + 降級 narration。

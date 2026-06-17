@@ -4,11 +4,11 @@
 
 **Purpose**: Replace LLM-based ranking with XGBoost machine learning model to reduce cost by 80%+ and latency by 60%+ while maintaining or improving accuracy through learned user behavior patterns.
 
-**Status**: 🔄 Phase B - Data Collection (waiting for 500+ clicks)
+**Status**: Phase A 完成（shadow mode 在 prod 收集中）/ Phase B 資料收集中 / Phase C 未啟動
 
 **Timeline**: 9 weeks total
 - Phase A: Infrastructure (Week 1-2) - ✅ COMPLETED (shadow mode running in production)
-- Phase B: Data Collection (Week 3-6) - IN PROGRESS (waiting for 500+ clicks)
+- Phase B: Data Collection (Week 3-6) - IN PROGRESS (shadow mode 在 prod 收集中)
 - Phase C: Training & Deployment (Week 7-9) - Three progressive models
 
 ---
@@ -20,9 +20,9 @@
 ```
 User Query
     ↓
-[1] Retrieval (Qdrant Hybrid Search) ✅ COMPLETED
-    - Vector similarity (embeddings)
-    - BM25 keyword matching
+[1] Retrieval (pg_bigm 全文 + pgvector 語意) ✅ COMPLETED
+    - Vector similarity (pgvector embeddings)
+    - pg_bigm N-gram 全文匹配
     - Keyword boosting
     - Temporal boosting
     ↓

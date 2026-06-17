@@ -1,6 +1,8 @@
 # M0 Indexing Module 規格文件
 
-> **⚠️ 注意**：此 spec 部分章節仍使用 Qdrant 術語（The Map、Qdrant payload 等），但系統已於 2026-02 遷移至 PostgreSQL（pgvector + pg_bigm）。Crawler 章節和演算法設計仍有效；儲存層相關章節（Qdrant Collection、qdrant_uploader.py 等）已過時。
+> **⚠️ 注意**：此 spec 部分章節仍使用 Qdrant 術語（The Map、Qdrant payload 等），但系統已於 2026-02 遷移至 PostgreSQL（pgvector + pg_bigm）。Crawler 章節和演算法設計仍有效；儲存層相關章節（Qdrant Collection、qdrant_uploader.py 等）為 Qdrant optional 路徑。
+>
+> **儲存 / Embedding 權威說明**：見下方「**儲存與 Embedding：雙路徑（PostgreSQL 主 / Qdrant optional）**」章節 — 主路徑用 **Qwen3-Embedding-4B INT8（1024d）+ PostgreSQL**，Qdrant 路徑（bge-m3 / OpenAI）為 optional / 歷史。
 
 ## 概述
 
@@ -1012,12 +1014,16 @@ code/python/indexing/
 ├── ingestion_engine.py   # TSV 解析
 ├── quality_gate.py       # 品質驗證
 ├── chunking_engine.py    # 分塊引擎
-├── dual_storage.py       # 雙層儲存（MapPayload + VaultStorage）
-├── embedding.py          # 本地 Embedding（bge-small-zh-v1.5, 512d）
-├── qdrant_uploader.py    # Qdrant 向量上傳 + reconciliation
+├── postgresql_uploader.py # 【主路徑】PG 上傳 + Qwen3-4B INT8 embedding + GPU thermal
+├── pg_batch.py           # 【主路徑】PG 批次 indexer（PGCheckpoint 續傳）
+├── cloud_embed.py        # 【主路徑】GCP L4 VM：chunking + Qwen3-4B → .jsonl/.npy
+├── bulk_load.py          # 【主路徑】.jsonl+.npy bulk insert 到 VPS PG（見 bulk-load-spec.md）
+├── dual_storage.py       # 【Qdrant 路徑】雙層儲存（MapPayload + VaultStorage）
+├── embedding.py          # 【Qdrant 路徑】本地 Embedding（bge-m3 / OpenAI）
+├── qdrant_uploader.py    # 【Qdrant 路徑】Qdrant 向量上傳 + reconciliation
 ├── rollback_manager.py   # 回滾管理
-├── pipeline.py           # 主流程 + CLI + reconcile
-├── vault_helpers.py      # Async helpers
+├── pipeline.py           # 【Qdrant 路徑】主流程 + CLI + reconcile
+├── vault_helpers.py      # 【Qdrant 路徑】Async helpers
 └── poc_*.py              # POC 驗證腳本（保留）
 
 config/
@@ -1478,33 +1484,131 @@ TestChunkingOverlap::test_overlap_size PASSED
 
 ---
 
-### 9. 本地 Embedding + Qdrant 上傳實作（2026-02-03）
+## 儲存與 Embedding：雙路徑（PostgreSQL 主 / Qdrant optional）
+
+> **⚠️ 重要（2026-06 補正）**：系統現有**兩條並存的儲存 + embedding 路徑**，spec 早期章節描述的是 Qdrant 路徑。本章節為權威說明，下方「§9 本地 Embedding + Qdrant 上傳實作」保留為 Qdrant 路徑的歷史細節。
+>
+> 本 spec 只描述兩路現況，**不評斷是否應收斂為單一路徑**（架構收斂屬另案，由 CEO 決定）。
+
+| 維度 | **PostgreSQL 路徑（主）** | Qdrant 路徑（optional / 歷史） |
+|------|--------------------------|-------------------------------|
+| 狀態 | 現行 production 路徑（2026-02 遷移完成） | 早期實作，現作可選 / 開發參考 |
+| Embedding 模型 | **`Qwen/Qwen3-Embedding-4B`（INT8 量化，本機 GPU）** | `text-embedding-3-small`（OpenAI 1536d）/ `BAAI/bge-m3`（本機 1024d） |
+| 向量維度 | **1024**（`truncate_dim=1024`） | 1536（OpenAI）/ 1024（bge-m3）|
+| 向量儲存 | PostgreSQL `chunks.embedding`（pgvector） | Qdrant collection `nlweb` |
+| 原文儲存 | PostgreSQL `articles.content` | The Vault（SQLite + Zstd 壓縮）|
+| BM25 / 全文 | `chunks.tsv` + pg_bigm（`idx_chunks_tsv_bigm`） | 無 |
+| 上傳模組 | `postgresql_uploader.py`（即時）、`cloud_embed.py` + `bulk_load.py`（全量）| `qdrant_uploader.py` + `embedding.py` |
+| 批次驅動 | `pg_batch.py`（PGCheckpoint 續傳） | `pipeline.py --upload` |
+
+> **同一 chunk 在兩路嵌入的模型不同**（Qwen3-4B vs OpenAI/bge-m3），向量空間不可互通。這是已知狀態，是否收斂為另案。
+
+### PostgreSQL Schema（主路徑）
+
+實作於 `postgresql_uploader.py`（取代 `qdrant_uploader.py` + `VaultStorage`）。兩張表：
+
+```sql
+-- 文章級 metadata + 原文
+articles (
+    id            SERIAL PRIMARY KEY,
+    url           TEXT UNIQUE,        -- ON CONFLICT (url) DO UPDATE 冪等
+    title         TEXT,
+    author        TEXT,
+    source        TEXT,
+    date_published TIMESTAMPTZ,
+    content       TEXT,               -- 完整原文（取代 Vault）
+    metadata      JSONB               -- keywords / publisher / raw_schema_json[:500]
+)
+
+-- chunk 級 embedding + 全文索引
+chunks (
+    id          SERIAL PRIMARY KEY,
+    article_id  INT REFERENCES articles(id),
+    chunk_index INT,
+    chunk_text  TEXT,
+    embedding   vector(1024),         -- pgvector，Qwen3-4B INT8
+    tsv         TEXT                  -- = chunk_text，供 pg_bigm BM25 檢索
+    -- UNIQUE (article_id, chunk_index)：ON CONFLICT DO UPDATE 冪等
+)
+```
+
+- **去重兩層**：URL 層 `ON CONFLICT (url)`；同篇不同 URL 由 `(title, source)` title dedup（`postgresql_uploader.py` `_insert_article`）。
+- **向量索引**：pgvector IVFFlat（`idx_chunks_embedding_ivf`）。
+- **BM25 / 中文全文**：pg_bigm（bigram）建在 `tsv` 上（`idx_chunks_tsv_bigm`）；`tsv` 內容直接等於 `chunk_text`（不含 overlap）。
+
+### Embedding 模型（主路徑）
+
+| 項目 | 值 |
+|------|-----|
+| 模型 | `Qwen/Qwen3-Embedding-4B` |
+| 量化 | INT8（`BitsAndBytesConfig(load_in_8bit=True)`） |
+| 維度 | 1024（`truncate_dim=1024`） |
+| 載入 | lazy singleton，首次載入約 35 秒 |
+| 執行 | 本機 / GCP L4 VM GPU（sentence-transformers） |
+
+- 即時 indexing：`postgresql_uploader.py` 的 `_get_embedding_model()` / `_embed_texts()`。
+- 全量 indexing：`cloud_embed.py` 在 GCP L4 VM 上跑同一模型，輸出 `.jsonl` + `.npy`，由 `bulk_load.py` 灌入 VPS PG（詳見 `bulk-load-spec.md`）。
+
+### PGCheckpoint（斷點續傳格式）
+
+PG indexing 由 `pg_batch.py` 驅動，checkpoint 檔為 `<tsv>.pg_checkpoint.json`，由 `PGCheckpoint` dataclass 序列化（JSON）：
+
+```python
+@dataclass
+class PGCheckpoint:
+    tsv_path: str                       # 來源 TSV 路徑
+    processed_urls: set[str]            # 已處理 URL（序列化為 list）
+    failed_urls: dict[str, str]         # URL → 失敗原因
+    started_at: str                     # ISO timestamp
+    updated_at: str                     # ISO timestamp
+```
+
+- **原子寫入**：先寫 `.tmp` 再 `replace()`，避免中斷時 checkpoint 損毀。
+- **儲存頻率**：每 `CHECKPOINT_INTERVAL = 10` 篇存一次，KeyboardInterrupt / 例外時也會強制存。
+- **載入容錯**：JSON 損毀或缺 key 時 `load()` 回 None（log warning），視為重新開始。
+- 全量 batch 另用 `.pg_indexing_done`（每行一個完成的 TSV basename）追蹤檔案級進度；`cloud_embed.py` 用 `.done` 同義機制。
+
+### GPU 溫度保護（Thermal Protection）
+
+embedding 為本機 GPU 推論，`postgresql_uploader.py` 內建溫度保護避免長跑過熱降頻：
+
+- 透過 `nvidia-smi --query-gpu=temperature.gpu` 讀 GPU 溫度（`_get_gpu_temp()`）。
+- 每 `EMBED_BLOCK_SIZE = 50` 筆文字檢查一次溫度（`_wait_for_gpu_cooldown()`）。
+- 超過 `GPU_TEMP_LIMIT = 78°C` 暫停，每 15 秒輪詢，降到 `GPU_TEMP_RESUME = 70°C` 才恢復。
+- 讀不到溫度（如無 nvidia-smi）時不阻擋、log warning 後繼續（優雅降級，不 silent）。
+- 其他批次常數：`EMBED_BATCH_SIZE = 8`（每次 `encode()` 文字數）、`DB_INSERT_BATCH_SIZE = 500`（每筆 DB transaction 的 chunk 數）。
+
+---
+
+### 9. 本地 Embedding + Qdrant 上傳實作（2026-02-03，Qdrant 路徑 — optional / 歷史）
+
+> **路徑歸屬**：本節描述 **Qdrant optional 路徑**。主路徑（PostgreSQL + Qwen3-4B）見上方「儲存與 Embedding：雙路徑」章節。
 
 #### 架構
 
 ```
 TSV → Ingestion → QualityGate → Chunking → Vault (SQLite)
                                     ↓
-                          Embedding (bge-small-zh-v1.5)
+                          Embedding (bge-m3 / OpenAI)
                                     ↓
                               Qdrant (Docker)
 ```
 
-#### 新增模組
+#### 模組（Qdrant 路徑）
 
 | 檔案 | 說明 |
 |------|------|
 | `indexing/embedding.py` | 本地 Embedding 封裝（sentence-transformers） |
 | `indexing/qdrant_uploader.py` | Qdrant 向量上傳邏輯（UUID5 Point ID） |
 
-#### Embedding 模型
+#### Embedding 模型（Qdrant 路徑）
 
 | 環境 | 模型 | 維度 | 說明 |
 |------|------|------|------|
 | Production | `text-embedding-3-small`（OpenAI） | 1536 | 透過 Azure OpenAI 或 OpenAI API |
 | Local Dev | `BAAI/bge-m3` | 1024 | 多語言、零 API 成本、本地推論 |
 
-> **注意**：Production 和 Local Dev 使用不同維度，Qdrant Collection 需對應設定。
+> **注意**：此表僅適用 Qdrant 路徑。主路徑（PostgreSQL）用 Qwen3-Embedding-4B INT8（1024d）— 見上方雙路徑章節。Qdrant 路徑 Production 與 Local Dev 維度不同，Qdrant Collection 需對應設定。
 
 #### 使用方式
 
@@ -1536,7 +1640,7 @@ def _generate_point_id(self, chunk_id: str) -> str:
 
 ```python
 VectorParams(
-    size=get_embedding_dimension(),  # 依環境自動取得（1536 或 512）
+    size=get_embedding_dimension(),  # 依環境自動取得（OpenAI 1536 或 bge-m3 1024）
     distance=Distance.COSINE,
 )
 ```
@@ -1564,7 +1668,7 @@ $ curl http://localhost:6333/collections/nlweb
     "status": "green",
     "points_count": 8,
     "config": {
-        "vectors": {"size": 512, "distance": "Cosine"}
+        "vectors": {"size": 1024, "distance": "Cosine"}
     }
 }
 ```

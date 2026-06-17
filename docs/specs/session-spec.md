@@ -380,59 +380,92 @@ PostgreSQL 回傳 `created_at` / `updated_at` / `deleted_at` 是 Python `datetim
 
 ## 4. 前端 SessionManager
 
-實作位置：`static/news-search.js:249-554`。class instance：`const sessionManager = new SessionManager(authManager);`（line 556）。
+實作位置：`static/js/features/session-manager.js`（ES module；v4.0 Commit 10/30, 2026-05-24/25 從 `news-search.js` 遷出）。
+
+- class 宣告：`export class SessionManager`（grep `export class SessionManager`）。
+- 模組對 import **inert**（D-13 compliance）：top-level 只有 `let _sessionManager = null` 純宣告，**不**在 import time `new SessionManager(...)`。
+- singleton 建構延遲到 `initSessionManager()`（grep `export function initSessionManager`），由 `main.js` bootstrap 呼叫，並把 instance bridge 到 `window.sessionManager` 供 `news-search.js` 尚未遷出的 callsite（如 `saveCurrentSession` 呼 `window.sessionManager.scheduleSave`）runtime lookup。
+- `getSessionManager()`（grep `export function getSessionManager`）回傳已建構的 singleton（未建構回 `null`）。
+
+> **Path B 邊界**（仍留在 `news-search.js`，因需重新賦值 outer-scope `let currentLoadedSessionId` / `savedSessions`，ES module 不能跨檔做）：
+> - module-level `saveCurrentSession`（呼叫 `sessionManager.scheduleSave`）
+> - `loadSavedSession`
+> - D-7 layer #4：`saveCurrentSession` 內 `_isShared` 早退（§11.5 Guard 2）
+>
+> 這些是 SessionManager 的 **caller**，不是 class method 本身。`_serverId` 三層 hydration（§6）與 dirty flag（§7）的 caller 邏輯也在 `news-search.js`。
 
 ### 4.1 Constructor State
+
+`constructor(authMgr)`（`session-manager.js`，grep `constructor(authMgr)`）：
 
 ```js
 class SessionManager {
     constructor(authMgr) {
         this._auth = authMgr;
-        this._saveTimer = null;       // setTimeout handle
-        this._savePending = false;    // 是否有 pending debounced save
+        // v4.0 Commit 30 (2026-05-25)：per-session pending-save Map，
+        // 取代舊的全局 _saveTimer / _savePending 單對（見 §4.3）。
+        // Shape: sid → { session, timer, scheduledAt }
+        this._pendingSaves = new Map();
         this._postedRecently = new Map();  // session.id → lastPostTime（5s 重複 POST 偵測）
     }
 }
 ```
 
+> ⚠️ **遷移注意**：舊 spec（及 v4.0 Commit 30 前的 code）constructor 持有單一全局 `this._saveTimer` / `this._savePending`。已被 `this._pendingSaves` Map 取代，下游 method（§4.3）全部改成 per-session 操作。
+
 ### 4.2 Public Methods
 
-| Method | 行號 | 用途 |
-|--------|-----|------|
-| `_isOnline()` | 260 | `authManager.isLoggedIn() && currentUser.org_id` 雙重判斷（B2B 必有 org_id） |
-| `loadSessions()` | 266 | logged-in → API；匿名 → localStorage（**logged-in 失敗不 fallback**） |
-| `loadSharedSessions()` | 294 | `GET /api/sessions/shared`，僅 logged-in，失敗回 `[]` |
-| `setSessionVisibility(serverId, visibility)` | 308 | `PATCH /api/sessions/{id}/visibility`，需 serverId（非匿名） |
-| `saveSession(session)` | 321 | 有 `_serverId` → PUT；無 → POST（含 5s 重複 POST detector） |
-| `deleteSession(sessionId, serverId)` | 391 | `DELETE /api/sessions/{serverId}`（API），fallback localStorage |
-| `renameSession(sessionId, serverId, newTitle)` | 405 | PUT only `title`（不動其他欄位） |
-| `loadFolders()` / `saveFoldersSync()` | 423 / 433 | 純 localStorage（folders 仍未走 server） |
-| `migrateFromLocal()` | 439 | 首次登入時把 localStorage 批次 POST 到 `/api/sessions/migrate`，成功後設 `taiwanNewsSessionsMigrated` flag |
-| `scheduleSave(session)` | 481 | 2s debounce timer，設 `_savePending = true` |
-| `flushPendingSave(session)` | 493 | `beforeunload` 時立即 flush（不等 2s） |
-| `_cancelPendingSave()` | 507 | **Cancel timer 不 fire**（用於 logout / auth failure，避免 401 二次 wipe） |
-| `loadPreferences()` / `setPreference()` | 517 / 530 | 偏好 KV，logged-in 走 API |
+行號為 `static/js/features/session-manager.js` 的大致位置（refactor 後可能微調，**以 grep marker 為準**）。
 
-### 4.3 Debounce Timer 紀律（D-2026-05-01）
+| Method | grep marker（~行號） | 用途 |
+|--------|---------------------|------|
+| `_isOnline()` | `_isOnline()`（~69） | `authManager.isLoggedIn() && currentUser.org_id` 雙重判斷（B2B 必有 org_id） |
+| `loadSessions()` | `async loadSessions()`（~75） | logged-in → API；匿名 → localStorage（**logged-in 失敗不 fallback**） |
+| `loadSharedSessions()` | `async loadSharedSessions()`（~103） | `GET /api/sessions/shared`，僅 logged-in，失敗回 `[]` |
+| `setSessionVisibility(serverId, visibility)` | `async setSessionVisibility`（~117） | `PATCH /api/sessions/{id}/visibility`，需 serverId（非匿名） |
+| `saveSession(session)` | `async saveSession(session)`（~130） | 有 `_serverId` → PUT；無 → POST（含 5s 重複 POST detector） |
+| `deleteSession(sessionId, serverId)` | `async deleteSession`（~202） | `DELETE /api/sessions/{serverId}`（API），fallback localStorage |
+| `renameSession(sessionId, serverId, newTitle)` | `async renameSession`（~216） | PUT `title`；non-OK（含 401）throw（P1 E2E fix 2026-05-26，不 silent swallow） |
+| `loadFolders()` / `saveFoldersSync()` | `async loadFolders()` / `saveFoldersSync`（~244 / ~254） | 純 localStorage（folders 仍未走 server） |
+| `migrateFromLocal()` | `async migrateFromLocal()`（~260） | 首次登入時把 localStorage 批次 POST 到 `/api/sessions/migrate`，成功後設 `taiwanNewsSessionsMigrated` flag |
+| `scheduleSave(session, options)` | `scheduleSave(session, options`（~309） | per-session debounce（2s）寫進 `_pendingSaves` Map（§4.3）；`options.immediate` 同步 flush 不等 2s（DR final_result 用） |
+| `flushPendingSave(session)` | `flushPendingSave(session)`（~346） | 有 arg flush 該 session、無 arg flush 全部（`beforeunload`）；回傳 Promise 供 critical path await |
+| `_cancelPendingSave(session)` | `_cancelPendingSave(session)`（~378） | **Cancel 不 fire**：有 arg 取消單 session、無 arg 取消全部（logout / auth failure，避免 401 二次 wipe） |
+| `loadPreferences()` / `setPreference()` | `async loadPreferences()` / `async setPreference`（~393 / ~406） | 偏好 KV，logged-in 走 API |
+| `_saveToLocalStorage()` | `_saveToLocalStorage()`（~422） | 透過 `getSavedSessions()`（owner module `sessions-list.js` getter）寫 localStorage；取代舊 `window.savedSessions` bridge（v4.0 Commit 10） |
+
+### 4.3 Per-Session Debounce 紀律（D-2026-05-01；v4.0 Commit 30 重設計）
+
+**v4.0 Commit 30（2026-05-25, regression fix — clean redesign）**：debounce 從**單一全局** `_saveTimer` / `_savePending` 改為 **per-session pending Map** `_pendingSaves`（`sid → { session, timer, scheduledAt }`，grep `this._pendingSaves`，constructor ~62）。每個 entry 的 `setTimeout` callback 在 fire 時自行 `delete` 自己。`scheduleSave` / `flushPendingSave` / `_cancelPendingSave` 全部支援 single-arg（單 session）或 no-arg（全部）。
+
+**為何改（root cause）**：舊的單一全局 timer 設計下，rapid session switch 會用「新 session 的 scheduleSave」**誤 cancel 上一個 session 還沒 fire 的 pending PUT**。實測 race：CEO 在 DR `final_result` 後 2s 內切走 → 上一 session 的 debounced save 被取消 → **DR 資料從未持久化到 PG**。per-session Map 後，切 session 只動到該 session 自己的 timer，互不干擾。
 
 ```js
-scheduleSave(session) {
-    if (this._saveTimer) clearTimeout(this._saveTimer);
-    this._savePending = true;
-    this._saveTimer = setTimeout(() => {
-        this._savePending = false;
-        this.saveSession(session).catch(e =>
-            console.error('[SessionManager] Debounced save failed:', e)
-        );
+scheduleSave(session, options = {}) {
+    if (!session || session.id == null) { /* warn + return */ }
+    const sid = session.id;
+    // 只 cancel「同一 session」的 pending（不再跨 session 誤殺）
+    const existing = this._pendingSaves.get(sid);
+    if (existing) clearTimeout(existing.timer);
+    if (options.immediate) {            // DR final_result / 顯式 save：不等 2s
+        this._pendingSaves.delete(sid);
+        return this.saveSession(session).catch(/* log */);
+    }
+    const timer = setTimeout(() => {     // debounced 2s
+        this._pendingSaves.delete(sid);
+        this.saveSession(session).catch(/* log */);
     }, 2000);
+    this._pendingSaves.set(sid, { session, timer, scheduledAt: Date.now() });
 }
 
-_cancelPendingSave() {  // RCA Fix 2: hidden-path
-    if (this._saveTimer) {
-        clearTimeout(this._saveTimer);
-        this._saveTimer = null;
+_cancelPendingSave(session) {  // RCA Fix 2: hidden-path
+    if (session && session.id != null) {            // 單 session
+        const p = this._pendingSaves.get(session.id);
+        if (p) { clearTimeout(p.timer); this._pendingSaves.delete(session.id); }
+        return;
     }
-    this._savePending = false;
+    for (const [, p] of this._pendingSaves) clearTimeout(p.timer);  // 全部
+    this._pendingSaves.clear();
 }
 ```
 
@@ -442,18 +475,26 @@ _cancelPendingSave() {  // RCA Fix 2: hidden-path
 - 2s 後 timer fire → `saveSession(staleSession)` → `_isOnline()` 因 `_user = null` 為 false → 走 localStorage fallback（其實 OK）
 - 但若 `_user` 已切到下一 user / token expired，會 fetch with 401 → `authenticatedFetch` retry refresh → refresh 也 fail → recursive 進入 `_handleAuthFailure` → **二次 wipe**（console.error + show login modal 兩次）
 
-**修法**：`_handleAuthFailure` 入口（`news-search.js:206-208`）第一行呼叫 `sessionManager._cancelPendingSave()`（typeof guard 防 module init order）：
+**修法**：`_handleAuthFailure` 入口（`news-search.js`）第一行呼叫 `sessionManager._cancelPendingSave()`（no-arg = 取消全部；typeof guard 防 module init order）：
 
 ```js
 _handleAuthFailure() {
     if (typeof sessionManager !== 'undefined' && sessionManager) {
-        sessionManager._cancelPendingSave();  // RCA Fix 2 hidden-path
+        sessionManager._cancelPendingSave();  // RCA Fix 2 hidden-path（無 arg 取消全部 pending）
     }
     // ... rest of cleanup
 }
 ```
 
 **通則**：**任何 user-scoped state 清理 = 先 cancel 所有 pending timer/promise**。同類陷阱：debounced fetch、queued LLM call、AbortController without abort()、setInterval without clearInterval。
+
+### 4.3a Session-Switch Token Race — Stale Restore 作廢（commit `0218fbda`, 2026-06-17）
+
+per-session debounce 解決「pending **save**」的 cross-session 干擾；另一條獨立 race 在「pending **restore**」：切走的舊 session 可能排了 `setTimeout` 要 restore 自己的畫面狀態，切到新 session 後若那個 stale restore 才 fire，會用舊 session 的狀態覆蓋當前畫面。
+
+**通則修法（session 層）**：`loadSavedSession`（caller，在 `news-search.js`）進入後、**第一個 `await`（hydrate fetch）之前的同步區**就無條件 bump 一個 switch-generation token，作廢「上一個」session 排的 stale `setTimeout` restore。語意對齊既有的 `bumpSearchGenerationId`（同為切換時作廢上一 session 的 pending callback），差別在**必須更前置**——原本的 bump 在 await 之後，對 server-backed session 而言 hydrate await 期間 stale restore 仍會搶先觸發。
+
+> **scope 註記**：本次 commit 的 token 是 LR-專屬的 `bumpLRSwitchToken`，其 restore 排程 / guard 放行語意屬 **LR spec**（live-research）。本 spec 只記通用 session 層原則：**session switch 必須在進入後的 pre-await 同步區作廢上一 session 的 pending restore callback**。任何未來新增的「per-session 排程 restore」都應遵此守則。
 
 ### 4.4 `beforeunload` Flush
 
@@ -466,7 +507,7 @@ window.addEventListener('beforeunload', () => {
 });
 ```
 
-`flushPendingSave` 在 `_savePending = true` 時立刻 fire（不 cancel timer 的差異是 cancel 不執行、flush 立即執行）。
+`flushPendingSave(currentSession)`（single-arg）對該 session 的 pending entry 立刻 fire（`clearTimeout` + `saveSession`）。差異：`_cancelPendingSave` 取消不執行、`flushPendingSave` 立即執行。no-arg 版（`flushPendingSave()`）flush `_pendingSaves` 內**全部** pending，並回傳 `Promise.all` 供 critical path await。
 
 ---
 
@@ -1244,25 +1285,26 @@ if (session.interruptedSearch) {
 
 ### 14.2 前端 JavaScript
 
-`static/news-search.js` 關鍵區段（行號為大致位置，refactor 後可能微調，以實際 grep 為準）：
+關鍵檔案與區段（行號為大致位置，refactor 後可能微調，以實際 grep 為準）：
 
-| 區段 | 說明 |
+| 檔案 / 區段 | 說明 |
 |------|------|
-| `class AuthManager` | 含 `_clearUserScopedStorageIfUserChanged`（D-2026-05-13 後由 UserStateSync 取代主要呼叫路徑）、`_handleAuthFailure`（由 trigger C/D 驅動） |
-| `class SessionManager` | scheduleSave / saveSession / loadSessions / `_postedRecently` detector / `_cancelPendingSave` |
-| `sessionManager` instance + `beforeunload` flush | `flushPendingSave` 立即 fire |
+| **`static/js/features/session-manager.js`** | **ES module（v4.0 Commit 10/30 從 `news-search.js` 遷出）。`export class SessionManager`：scheduleSave / flushPendingSave / `_cancelPendingSave`（皆 per-session `_pendingSaves` Map，§4.3）/ saveSession / loadSessions / `_postedRecently` detector / `_saveToLocalStorage`。module-level：`isSessionDirty/markSessionDirty/clearSessionDirty`（§7）、`initSessionManager` / `getSessionManager` singleton（inert on import，D-13）** |
+| `static/js/features/sessions-list.js` | 擁有 `savedSessions` array（v4.0 Commit 10）；`getSavedSessions()` getter 供 session-manager.js `_saveToLocalStorage` 讀取（單向 import，§4 D-V6） |
+| `static/news-search.js` › `class AuthManager` | 含 `_clearUserScopedStorageIfUserChanged`（D-2026-05-13 後由 UserStateSync 取代主要呼叫路徑）、`_handleAuthFailure`（由 trigger C/D 驅動；入口呼 `sessionManager._cancelPendingSave()`） |
+| `static/news-search.js` › `loadSavedSession` | Trigger E session click 入口（own session）；**pre-await 同步區 bump switch token 作廢 stale restore**（§4.3a, commit `0218fbda`）+ hydrate path + interrupt mark |
+| `static/news-search.js` › `saveCurrentSession` | SessionManager 的 caller（Path B 仍留 news-search.js）：dirty flag 早退、shared guard（Y-1）、`_serverId` 保留；呼 `window.sessionManager.scheduleSave` |
+| `beforeunload` flush | `flushPendingSave(currentSession)` 立即 fire |
 | `checkAuthOnLoad` | trigger B / F 入口；401 path 走 `_handleAuthFailure`（trigger D） |
 | `DOMContentLoaded` handler | trigger F cold-start 入口；呼叫 `UserStateSync.runInitSync` |
 | **`UserStateSync` module** | **D-2026-05-13 新增。`clearUserScopedState` / `fetchInit` / `applyInit` / `fullReset` / `runInitSync`；`assertUserIdentity` helper + `UserStateSyncError` class。所有 session-related user-scoped 寫入唯一入口** |
-| `_sessionDirty` 宣告 | Module-level `let`（§7 dirty flag 紀律） |
-| `saveCurrentSession` | 含 dirty flag 早退、shared guard（Y-1）、`_serverId` 保留 |
+| `_sessionDirty` 宣告 | **已遷 `session-manager.js`** module-level `let`（v4.0 Commit 10, D-V14；§7 dirty flag 紀律），caller helper 在 news-search.js |
 | `resetConversation` | 10 個 globals（btnNewConversation 用）— D-2026-05-13 後由 `UserStateSync.resetMainUI` safely wrap |
 | ~~Legacy main-UI globals sweep helper~~ | **已移除**（Task 13 cleanup，superseded by `UserStateSync.clearUserScopedState` + `resetMainUI`，見 §8.5） |
 | GET SSE switch | 含 black-list cases（§9） |
 | POST SSE switch | 含 black-list cases（§9） |
 | `cancelActiveSearch` / `cancelAllActiveRequests` | 切 session 時 abort 所有 stream（§12） |
 | `showInterruptedSearchNotice` | Retry UI（§12） |
-| `loadSavedSession` | Trigger E session click 入口（own session）；含 hydrate path + interrupt mark |
 | `renderLeftSidebarSessions` | 顯式 sort by `updated_at DESC`（§7 / §1.5 defense-in-depth） |
 | Shared session click handler | Trigger E session click 入口（shared session）；`_isShared` + `_ownerUserId` tag（§11.4） |
 
@@ -1300,6 +1342,9 @@ if (session.interruptedSearch) {
 | `e0b5a41` | RCA 三 Fix：dirty flag + cancelPendingSave + main-UI globals sweep helper（後者於 D-2026-05-13 被 `UserStateSync` 取代並從 codebase 移除）+ favicon 404 |
 | `2ee5508` | **D-2026-05-13**：`register_user()` / `activate_user()` auto-issue refresh cookie — 讓 onboarding 完成跳 `/` 後 `checkAuthOnLoad` 拿到 JWT 走 trigger A |
 | `228a93a` | **D-2026-05-13**：`/api/user/init` user payload 加 `org_id` + `role` shape contract（mirror `/api/auth/login` + `/api/auth/me`） |
+| v4.0 Commit 10 | **2026-05-24**：SessionManager 遷出至 `static/js/features/session-manager.js`（ES module）；`savedSessions` 改由 `sessions-list.js` 擁有、`_sessionDirty` ownership 落 session-manager.js（D-V14） |
+| v4.0 Commit 30 | **2026-05-25**：per-session debounce `_pendingSaves` Map 取代全局 `_saveTimer` / `_savePending`（regression fix；rapid switch 不再誤 cancel 上一 session 的 pending PUT；§4.3）|
+| `0218fbda` | **2026-06-17**：session-switch token race fix — `loadSavedSession` 進入後 pre-await 同步區無條件 bump switch token，作廢上一 session 的 stale `setTimeout` restore（§4.3a；LR-專屬 token 機制細節在 LR spec）|
 
 ---
 
@@ -1339,4 +1384,4 @@ if (session.interruptedSearch) {
 
 ---
 
-*最後更新：2026-05-15（D-2026-05-13 Frontend Init Sync Refactor 同步 — `UserStateSync` 7 trigger 架構納入主流；§8.5 legacy helper 標為 superseded；補 §1.4 Trigger E + F session-specific behavior、§1.5 defense-in-depth 保留清單、§2.1 5 個 history-related JSONB 欄位對齊。spec 整合自 frontend-spec / login-spec / 多個 plan 檔；以本檔為 single source of truth）*
+*最後更新：2026-06-17（spec drift audit A3 — §4 SessionManager 重定向至 `static/js/features/session-manager.js`（ES module，v4.0 Commit 10/30 遷出）；§4.2 method 行號改 grep marker + ~行號；§4.3 改寫為 per-session debounce `_pendingSaves` Map（取代全局 timer，v4.0 Commit 30 regression fix）；新增 §4.3a session-switch token race 通用守則（commit `0218fbda`，LR-專屬 token 細節歸 LR spec）；§14.2/§14.4 同步檔案位置與 commits。先前更新 2026-05-15：D-2026-05-13 Frontend Init Sync Refactor — `UserStateSync` 7 trigger 架構納入主流。spec 整合自 frontend-spec / login-spec / 多個 plan 檔；以本檔為 single source of truth）*

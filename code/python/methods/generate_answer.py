@@ -377,8 +377,13 @@ class GenerateAnswer(NLWebHandler):
 
                 filtered_embeddings = []
                 for item in top_embeddings:
-                    # Handle both 4-tuple and 5-tuple (with vector) formats
-                    if len(item) == 5:
+                    # Handle 4-tuple, 5-tuple (with vector), and 6-tuple
+                    # (with retrieval_scores) formats. Only url/json_str are
+                    # needed here; the full item is preserved below so a
+                    # 6-tuple's retrieval_scores (index 5) is NOT dropped.
+                    if len(item) >= 6:
+                        url, json_str = item[0], item[1]
+                    elif len(item) == 5:
                         url, json_str, name, site, vector = item
                     else:
                         url, json_str, name, site = item
@@ -389,11 +394,10 @@ class GenerateAnswer(NLWebHandler):
 
                         if date_published != 'Unknown':
                             pub_date = datetime.fromisoformat(date_published.replace('Z', '+00:00'))
+                            # Append the ORIGINAL item (do not rebuild) so a
+                            # 6-tuple's retrieval_scores survive the temporal filter.
                             if pub_date >= cutoff_date:
-                                if vector is not None:
-                                    filtered_embeddings.append([url, json_str, name, site, vector])
-                                else:
-                                    filtered_embeddings.append([url, json_str, name, site])
+                                filtered_embeddings.append(item)
                         # If no date, skip it for temporal queries
                     except Exception as e:
                         logger.warning(f"Failed to parse date for article {url}: {e}")
@@ -414,9 +418,11 @@ class GenerateAnswer(NLWebHandler):
             # Rank each item
             tasks = []
             for item in top_embeddings:
-                # Handle both 4-tuple and 5-tuple (with vector) formats
-                if len(item) == 5:
-                    url, json_str, name, site, vector = item
+                # Handle 4-tuple, 5-tuple (with vector), and 6-tuple
+                # (with retrieval_scores). rankItem here only needs the first
+                # four fields; index 4/5 are ignored on this code path.
+                if len(item) >= 5:
+                    url, json_str, name, site = item[0], item[1], item[2], item[3]
                 else:
                     url, json_str, name, site = item
                 tasks.append(asyncio.create_task(self.rankItem(url, json_str, name, site)))
@@ -876,7 +882,9 @@ class GenerateAnswer(NLWebHandler):
                         continue
                         
                     item = matching_items[0]
-                    (url, json_str, name, site) = item
+                    # item[:4] so a 5-/6-tuple (vector / retrieval_scores at
+                    # index 4-5) does not raise "too many values to unpack".
+                    (url, json_str, name, site) = item[:4]
                     logger.debug(f"Creating description task for item: {name}")
                     t = asyncio.create_task(self.getDescription(url, json_str, self.decontextualized_query, answer, name, site))
                     description_tasks.append(t)

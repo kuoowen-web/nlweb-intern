@@ -57,7 +57,9 @@ class OpenAIProvider(LLMProvider):
         with cls._client_lock:
             if cls._client is None:
                 api_key = cls.get_api_key()
-                cls._client = AsyncOpenAI(api_key=api_key)
+                # max_retries: SDK auto-retries transient faults (429/5xx/connection)
+                # with exponential backoff. Explicit (SDK default is 2) for resilience.
+                cls._client = AsyncOpenAI(api_key=api_key, max_retries=3)
         return cls._client
 
     @classmethod

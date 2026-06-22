@@ -56,7 +56,9 @@ class AnthropicProvider(LLMProvider):
         with cls._client_lock:  # Thread-safe client initialization
             if cls._client is None:
                 api_key = cls.get_api_key()
-                cls._client = AsyncAnthropic(api_key=api_key)
+                # max_retries: SDK auto-retries transient faults (429/5xx/overloaded)
+                # with exponential backoff. Explicit (SDK default is 2) for resilience.
+                cls._client = AsyncAnthropic(api_key=api_key, max_retries=3)
         return cls._client
 
     @classmethod

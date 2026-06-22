@@ -486,7 +486,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
                             original_draft=draft,
                             review=review,
                             formatted_context=state.formatted_context,
-                            query=query
+                            query=query,
+                            enable_kg=enable_kg,  # B9: match research() schema selection
                         )
                         span.set_result(response)
                 else:
@@ -494,7 +495,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
                         original_draft=draft,
                         review=review,
                         formatted_context=state.formatted_context,
-                        query=query
+                        query=query,
+                        enable_kg=enable_kg,  # B9: match research() schema selection
                     )
 
                 iteration_logger.log_agent_output(
@@ -1161,7 +1163,6 @@ class DeepResearchOrchestrator(OrchestratorBase):
         # Phase 3.5: Analyze reasoning chain if argument_graph exists
         if hasattr(state.response, 'argument_graph') and state.response.argument_graph:
             from reasoning.utils.chain_analyzer import ReasoningChainAnalyzer
-            from reasoning.schemas_enhanced import AnalystResearchOutputEnhanced, AnalystResearchOutputEnhancedKG
 
             self.logger.info("Analyzing reasoning chain for impact and critical nodes")
 
@@ -1173,15 +1174,13 @@ class DeepResearchOrchestrator(OrchestratorBase):
                 analyzer = ReasoningChainAnalyzer(state.response.argument_graph, weaknesses)
                 chain_analysis = analyzer.analyze()
 
-                # Attach to analyst output (preserve KG if present)
-                response_data = state.response.model_dump()
-                response_data['reasoning_chain_analysis'] = chain_analysis
-
-                # Use the correct schema based on whether KG exists
-                if hasattr(state.response, 'knowledge_graph') and state.response.knowledge_graph:
-                    state.response = AnalystResearchOutputEnhancedKG(**response_data)
-                else:
-                    state.response = AnalystResearchOutputEnhanced(**response_data)
+                # B9/C3: preserve runtime type (incl. a future Live response)
+                # instead of narrowing to a fixed Enhanced/KG type. model_copy
+                # keeps the subclass + all fields; only reasoning_chain_analysis
+                # is updated. (Does NOT re-run validation — value is deterministic.)
+                state.response = state.response.model_copy(
+                    update={"reasoning_chain_analysis": chain_analysis}
+                )
 
                 state.chain_analysis = chain_analysis
 
@@ -1348,40 +1347,23 @@ class DeepResearchOrchestrator(OrchestratorBase):
         Returns:
             List of NLWeb Item dicts compatible with create_assistant_result().
         """
-        use_composable = CONFIG.reasoning_params.get("features", {}).get("composable_pipeline", False)
-        logger.info(f"run_research: composable_pipeline={use_composable}")
-
-        if use_composable:
-            return await self._run_research_composable(
-                query, mode, items, temporal_context, enable_kg, enable_web_search
+        # composable_pipeline flag 曾用於 gate Tasks 0-4 refactor；legacy 與 composable
+        # 已 zero-behavior-change 收斂為同一實作（見原 _run_research_legacy docstring）。
+        # config 顯式設 composable_pipeline: true → legacy 在 prod 不會被走到（dead-in-prod）。
+        # 直呼 composable，flag 異常時發 warning 觀測 log（不再分支）。
+        # I-1：下面 default 從現行 .get(..., False) 翻成 True 是 intentional 且等價 ——
+        # config 已有此 key 並設 true，default 翻 True 只是「config 萬一遺失時也走 composable」，
+        # 不改變現行（config=true）行為。
+        # F1（不可 silent fail）：log 條件必須涵蓋「key 完全缺失」與「明確 false」兩種異常。
+        # 若只寫 `if not ...get(..., True)`，key 缺失時 get 回 True → not True → False → 靜默，
+        # 反而比舊 code（default=False、缺 key 走 legacy 發 warning）更安靜 → 違反不可 silent fail。
+        # 故顯式檢查 key 是否在 features 中，缺失或 false 都發 warning。
+        features = CONFIG.reasoning_params.get("features", {})
+        if "composable_pipeline" not in features or not features.get("composable_pipeline", True):
+            logger.warning(
+                "run_research: composable_pipeline 未明確啟用（key 缺失或 false）— "
+                "legacy 與 composable 已合一，直呼 composable"
             )
-        else:
-            return await self._run_research_legacy(
-                query, mode, items, temporal_context, enable_kg, enable_web_search
-            )
-
-    async def _run_research_legacy(
-        self,
-        query: str,
-        mode: str,
-        items: List[Dict[str, Any]],
-        temporal_context: Optional[Dict[str, Any]] = None,
-        enable_kg: bool = False,
-        enable_web_search: bool = False
-    ) -> List[Dict[str, Any]]:
-        """
-        Legacy path: delegates to composable pipeline.
-
-        Note: Tasks 0-4 refactored run_research() into composable phases with zero behavior
-        change. The 'legacy' and 'composable' paths are functionally identical — the flag
-        exists to gate future Task 6 (non-blocking asyncio.create_task) and other pipeline
-        enhancements behind composable_pipeline=true.
-        """
-        logger.warning(
-            "run_research: legacy flag is set but composable pipeline is the only "
-            "implementation (Tasks 0-4 refactor was zero behavior change). "
-            "Routing to _run_research_composable()."
-        )
         return await self._run_research_composable(
             query, mode, items, temporal_context, enable_kg, enable_web_search
         )
@@ -2459,39 +2441,23 @@ class DeepResearchOrchestrator(OrchestratorBase):
     ) -> None:
         """Execute global company/entity API calls via Wikidata for gap resolutions."""
 
+        # entity_type varies per gap (gap.api_params.get("type", "company")), so we
+        # carry it alongside the name inside the extracted param tuple. _execute_api_searches
+        # calls extract_param then search_fn once per gap in order, so each gap's entity_type
+        # travels with its own name — no cross-gap state, no name-keyed collision. Returns
+        # None when there is no name so the executor's `if param` skip is preserved.
         def extract_param(gap):
             name = gap.api_params.get("name") if gap.api_params else None
             if not name and gap.search_query:
                 name = gap.search_query
-            return name
-
-        async def search_fn(client, param, qid):
-            entity_type = "company"
-            # Re-extract entity_type from the gap that produced this param.
-            # Since _execute_api_searches calls search_fn per-gap, param is
-            # always from a single gap, but we need the gap's api_params here.
-            # We use a closure trick: search_fn is re-created per wrapper call,
-            # but _execute_api_searches calls it once per gap with the extracted param.
-            # To pass entity_type properly, we override search_fn per-gap below.
-            return await client.search(param, entity_type=entity_type, query_id=qid)
-
-        # For Wikidata, entity_type varies per gap, so we use a custom approach:
-        # Override _execute_api_searches by providing a search_fn that captures
-        # entity_type via a mutable container.
-        _current_entity_type = ["company"]
-
-        def extract_param_with_entity(gap):
-            name = gap.api_params.get("name") if gap.api_params else None
-            if gap.api_params:
-                _current_entity_type[0] = gap.api_params.get("type", "company")
-            else:
-                _current_entity_type[0] = "company"
-            if not name and gap.search_query:
-                name = gap.search_query
-            return name
+            if not name:
+                return None
+            entity_type = gap.api_params.get("type", "company") if gap.api_params else "company"
+            return (name, entity_type)
 
         async def search_with_entity_type(client, param, qid):
-            return await client.search(param, entity_type=_current_entity_type[0], query_id=qid)
+            name, entity_type = param
+            return await client.search(name, entity_type=entity_type, query_id=qid)
 
         await self._execute_api_searches(
             gaps=gaps,
@@ -2500,7 +2466,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
             client_class="WikidataClient",
             tracer_label="COMPANY_GLOBAL",
             log_name="Wikidata",
-            extract_param=extract_param_with_entity,
+            extract_param=extract_param,
             search_fn=search_with_entity_type,
             tracer_detail_fn=lambda gs: {"queries_executed": [g.api_params.get("name") if g.api_params else g.search_query for g in gs]},
             tracer=tracer,

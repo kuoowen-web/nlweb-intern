@@ -152,3 +152,69 @@ def test_render_grounded_narrative_dedupes_chapter_eids():
     }
     text = render_grounded_narrative([1, 1, 1], usage, pool)
     assert text.count("c1") == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# P2 W4：render_grounded_narrative 改全 pool + priority 排序 + char budget
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_render_grounded_narrative_full_pool_with_priority_and_budget():
+    from reasoning.schemas_live import render_grounded_narrative, EvidencePoolEntry
+    from reasoning.schemas_live import GroundedClaim
+    pool = {
+        i: EvidencePoolEntry(evidence_id=i, title=f"T{i}", snippet="s" * 50)
+        for i in (1, 2, 3)
+    }
+    usage = {
+        i: [GroundedClaim(claim=f"c{i}", reasoning_type="deduction",
+                          confidence="high", source_topic="t",
+                          source_iteration=1, critic_status="PASS").model_dump()]
+        for i in (1, 2, 3)
+    }
+    out = render_grounded_narrative(
+        chapter_eids=[1, 2, 3], evidence_usage=usage, evidence_pool=pool,
+        priority_eids=[3], char_budget=10000,
+    )
+    assert "T1" in out and "T2" in out and "T3" in out      # 全 pool 都渲
+    assert out.index("T3") < out.index("T1")                # priority eid 3 先渲
+
+
+def test_render_grounded_narrative_budget_truncates():
+    """char_budget 緊 → 截斷並附明示標記（不 silent）。"""
+    from reasoning.schemas_live import render_grounded_narrative, EvidencePoolEntry
+    from reasoning.schemas_live import GroundedClaim
+    pool = {
+        i: EvidencePoolEntry(evidence_id=i, title=f"T{i}", snippet="s" * 100)
+        for i in range(1, 21)
+    }
+    usage = {
+        i: [GroundedClaim(claim=f"c{i}" * 20, reasoning_type="deduction",
+                          confidence="high", source_topic="t",
+                          source_iteration=1, critic_status="PASS").model_dump()]
+        for i in range(1, 21)
+    }
+    out = render_grounded_narrative(
+        chapter_eids=list(range(1, 21)), evidence_usage=usage,
+        evidence_pool=pool, priority_eids=[1], char_budget=500,
+    )
+    assert "budget" in out                                  # 明示截斷標記
+    assert len(out) < 5000                                  # 確實被 cap
+
+
+def test_render_grounded_narrative_priority_none_backward_compat():
+    """priority_eids=None → 行為退回現況（升冪、無 budget 截斷）。"""
+    from reasoning.schemas_live import render_grounded_narrative, EvidencePoolEntry
+    from reasoning.schemas_live import GroundedClaim
+    pool = {
+        1: EvidencePoolEntry(evidence_id=1, title="T1", snippet="s"),
+        2: EvidencePoolEntry(evidence_id=2, title="T2", snippet="s"),
+    }
+    usage = {
+        i: [GroundedClaim(claim=f"c{i}", reasoning_type="deduction",
+                          confidence="high", source_topic="t",
+                          source_iteration=1, critic_status="PASS").model_dump()]
+        for i in (1, 2)
+    }
+    out = render_grounded_narrative([1, 2], usage, pool)   # 不傳 priority/budget
+    assert out.index("T1") < out.index("T2")               # 升冪
+    assert "budget" not in out

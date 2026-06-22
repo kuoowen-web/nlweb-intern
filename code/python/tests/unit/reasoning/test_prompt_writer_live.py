@@ -4,6 +4,16 @@ import os
 
 import pytest
 from reasoning.prompts.writer import WriterPromptBuilder
+from reasoning.schemas_live import EvidencePoolEntry as _EPE
+
+
+def _lk(*eids):
+    """P2 W6：建一個與 analyst_citations 一致的 evidence_lookup（全局模型下
+    presence 由 evidence_lookup 判，非 analyst_citations）。grounded 分支需非空 pool。"""
+    return {
+        e: _EPE(evidence_id=e, title=f"T{e}", url="u", snippet="s")
+        for e in eids
+    }
 
 
 class TestWriterLiveResearch:
@@ -263,6 +273,39 @@ class TestWriterLiveResearch:
         assert "table" in prompt
         assert "list" in prompt
 
+    def test_main_loop_word_target_tone_strengthened_but_stays_soft(self):
+        """c 降級（2026-06-19）：main-loop 字數語氣加強，但保留軟分層
+        （本章目標字數 / ±15% / 容許 / 明顯過短 全留），不引入硬上限。
+        硬上限只在 revise-path（見 TestRevisePriorityOverOutline）。"""
+        from reasoning.schemas_live import BookOutline, ChapterPlan
+        outline = BookOutline(
+            chapters=[
+                ChapterPlan(chapter_index=0, title="國內案例", brief="文獻回顧",
+                            target_word_count=2500, role="intro"),
+            ],
+            overall_arc="台灣綠能衝突借鏡國外",
+        )
+        prompt = self.builder.build_section_compose_prompt(
+            section_title="國內案例",
+            section_outline="台灣綠能衝突文獻",
+            relevant_findings="[1] ...",
+            analyst_citations=[1],
+            book_outline=outline,
+            current_chapter_index=0,
+            # no revise_instruction → main-loop path
+        )
+        assert "2500" in prompt
+        # (c) 語氣加強：把「請貼近此字數」講得更明確（新措辭命中）
+        assert "務必盡量貼近" in prompt
+        # 軟分層保留（不破壞 2026-06-01 設計 / :447 契約）：
+        assert "本章目標字數" in prompt
+        assert "±15%" in prompt
+        assert "容許" in prompt
+        assert "明顯過短" in prompt
+        # main-loop（非 revise path）不得引入硬上限措辭：
+        assert "絕對不可超過" not in prompt
+        assert "硬性上限" not in prompt
+
 
 # =====================================================================
 # Plan: lr-user-voice-container-and-4-fixes (Phase 4, Fix I-1)
@@ -461,7 +504,7 @@ class TestTrackAWriterGroundingDiscipline:
         prompt = self.builder.build_section_compose_prompt(
             section_title="國外案例", section_outline="x",
             relevant_findings="### [1] T1\n- 推論：c",
-            analyst_citations=[1],
+            analyst_citations=[1], evidence_lookup=_lk(1),
         )
         assert "Grounding 紀律" in prompt or "grounding 紀律" in prompt.lower()
         assert "嚴格禁止編造" in prompt or "禁止虛構" in prompt
@@ -499,7 +542,7 @@ class TestTrackAWriterGroundingDiscipline:
         prompt = self.builder.build_section_compose_prompt(
             section_title="x", section_outline="y",
             relevant_findings="### [1] T1\n- [confidence: low | critic_status: WARN] 推論：c",
-            analyst_citations=[1],
+            analyst_citations=[1], evidence_lookup=_lk(1),
         )
         # 紀律條文出現
         assert "low confidence" in prompt or "保留" in prompt or "推測" in prompt
@@ -708,7 +751,7 @@ def test_writer_prompt_grounding_block_contains_tier6_source_discipline():
         section_title="x",
         section_outline="x",
         relevant_findings="[1] 一般站內 evidence",
-        analyst_citations=[1],
+        analyst_citations=[1], evidence_lookup=_lk(1),
     )
     # Track C C5: 紀律段必須提及 Tier 6 source-type 區分紀律
     assert "Tier 6" in prompt, (
@@ -732,7 +775,7 @@ def test_grounding_block_has_positive_specificity_imperative():
         section_title="國外案例文獻",
         section_outline="分析國際案例的衝突起因與化解機制",
         relevant_findings="### [1] 德國某風場（snippet）\n- 論點：回饋金為每年 2 萬歐元",
-        analyst_citations=[1],
+        analyst_citations=[1], evidence_lookup=_lk(1),
         citation_format="author_year",
     )
     # 正向強制具體化（A 的核心修法）
@@ -800,7 +843,8 @@ def test_ungrounded_revision_block_guides_removal_not_vagueness():
     b = WriterPromptBuilder()
     prompt = b.build_section_compose_prompt(
         section_title="t", section_outline="o", relevant_findings="f",
-        analyst_citations=[1], ungrounded_entities_revision=["台泥"],
+        analyst_citations=[1], evidence_lookup=_lk(1),
+        ungrounded_entities_revision=["台泥"],
     )
     assert "移除" in prompt and "整個" in prompt        # 引導移除整句
     assert "模糊" in prompt or "代稱" in prompt          # 禁模糊化
@@ -837,7 +881,7 @@ def test_sufficient_chapter_prompt_no_conservative_calibration():
     prompt = builder.build_section_compose_prompt(
         section_title="某子議題", section_outline="o",
         relevant_findings="[1] a [2] b [3] c [4] d",
-        analyst_citations=[1, 2, 3, 4],
+        analyst_citations=[1, 2, 3, 4], evidence_lookup=_lk(1, 2, 3, 4),
         citation_format="numeric",
         evidence_sufficiency="ok",
     )

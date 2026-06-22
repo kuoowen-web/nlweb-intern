@@ -24,6 +24,7 @@ def _make_handler():
     h.message_sender = None
     h.connection_alive_event = None
     h.request_handler = None
+    h._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     return h
 
 

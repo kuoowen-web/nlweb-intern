@@ -1,4 +1,4 @@
-﻿"""Authentication middleware for aiohttp server"""
+"""Authentication middleware for aiohttp server"""
 
 from aiohttp import web
 import logging
@@ -20,7 +20,7 @@ PUBLIC_ENDPOINTS: Set[str] = {
     # Static files
     '/static',
     '/html',
-    # Bootstrap setup page (public ??token validated inside handler)
+    # Bootstrap setup page (public — token validated inside handler)
     '/setup',
     # Auth endpoints (must be public for login/register flow)
     '/api/auth/register',
@@ -31,10 +31,10 @@ PUBLIC_ENDPOINTS: Set[str] = {
     '/api/auth/refresh',
     '/api/auth/logout',
     '/api/auth/activate',
-    # Analytics events ??sent by frontend tracker (may be unauthenticated users)
+    # Analytics events — sent by frontend tracker (may be unauthenticated users)
     '/api/analytics/event',
     '/api/analytics/event/batch',
-    # Help Center ??feedback is public
+    # Help Center — feedback is public
     '/api/help/feedback',
 }
 
@@ -72,7 +72,7 @@ def _try_soft_auth(request: web.Request) -> None:
                 'token': token,
             }
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
-        pass  # Soft auth ??silently ignore invalid tokens on public endpoints
+        pass  # Soft auth — silently ignore invalid tokens on public endpoints
 
 
 @web.middleware
@@ -92,7 +92,7 @@ async def auth_middleware(request: web.Request, handler):
     )
 
     if is_public:
-        # Public endpoint ??still try to extract user info if token present (soft auth)
+        # Public endpoint — still try to extract user info if token present (soft auth)
         _try_soft_auth(request)
         return await handler(request)
 
@@ -114,10 +114,10 @@ async def auth_middleware(request: web.Request, handler):
     if not auth_token and request.method == 'GET':
         auth_token = request.query.get('auth_token')
 
-    # Dev auth bypass DELETED (2026-05-19 spec v0.憭?禮5.4).
+    # Dev auth bypass DELETED (2026-05-19 spec v0.大 §5.4).
     # Reason: bypass was a hack that broke production-path fidelity in v9-v15 E2E.
     # 'dev_user' string id clashed with PG users.id UUID type (v15 P0-1 Server 500).
-    # Replacement: E2E uses real admin login (admin@example.com / YOUR_ADMIN_PASSWORD, see spec 禮5.5).
+    # Replacement: E2E uses real admin login (admin@twdubao.com / test1234!, see spec §5.5).
     # If you find yourself wanting to re-add bypass, fix the real login flow instead.
 
     if not auth_token:
@@ -165,7 +165,7 @@ async def auth_middleware(request: web.Request, handler):
                 status=401
             )
     else:
-        # No JWT_SECRET configured ??cannot validate tokens
+        # No JWT_SECRET configured — cannot validate tokens
         logger.warning("JWT_SECRET not configured, cannot validate auth tokens")
         return web.json_response(
             {'error': 'Authentication not configured', 'type': 'auth_not_configured'},

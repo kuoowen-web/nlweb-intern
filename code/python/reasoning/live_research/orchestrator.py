@@ -41,6 +41,9 @@ from reasoning.schemas_live import (
     EvidencePoolEntry,
     StyleAnalysisOutput,
     StyleInputNotASampleError,
+    Stage4Response,
+    Stage4StructuralPayload,
+    Stage4FormatPayload,
     LiveWriterSectionOutput,
     context_map_to_summary,
     deserialize_evidence_pool,
@@ -199,6 +202,107 @@ def _looks_like_export_shortcut(msg: str) -> bool:
     return _normalize_shortcut_msg(msg) in _EXPORT_SHORTCUT_KEYWORDS
 
 
+# === Stage 5 recollect confirm parsers（plan: lr-stage5-backward-recollect, A/B/K）===
+# B（confirm 詞收斂，3方共識）：**不收單字「要/是/好」**（過寬 → 誤觸不可逆刪章，B 原罪）。
+# K（Codex+in-house）：但純 exact-match 又太窄 —— 「OK。」「好，開始吧」「確認，請重新蒐集」
+# 等自然短肯定句不在白名單 → 落 substantive → 可能被下游 _parse_revision_intent 重 parse
+# 成 recollect → 二次 consent loop（user 已確認卻被再問一次）。平衡點：**多字明確肯定詞
+# 命中，單字「要/是/好」不命中（避免 B 原罪復發），含實質修改名詞的長句走 substantive**。
+# 注意：刻意只放**多字**確認詞 + 「好的」（非裸「好」）。「好，開始吧」靠「開始」/「吧」命中，
+# 不靠裸「好」；裸「好」「要」「是」單獨出現 → 不命中 → 交 _classify_meta_intent / fall through。
+_RECOLLECT_CONFIRM_TOKENS = frozenset({
+    "確認", "確定", "好的", "開始", "沒問題", "ok", "yes", "可以", "沒錯", "對的",
+})
+# 出現以下任一「實質修改名詞」即視為含修改訴求 → 不當純確認（走 substantive fall through）。
+# 涵蓋 user 在 consent round 順帶提修改的常見詞（改章節 / 加內容 / 換方向 / 補面向）。
+_RECOLLECT_REVISE_MARKERS = (
+    "段", "章", "節", "改", "加", "增", "刪", "換", "調整", "修改", "重寫",
+    "方向", "面向", "經濟", "政治", "標題", "字數", "風格",
+)
+# 短肯定句長度上限（中文）：超過此長度即使含確認詞也視為「夾帶實質訴求」走 substantive，
+# 避免長句被誤判純確認（K 平衡點，刻意保守偏短）。
+_RECOLLECT_CONFIRM_MAX_LEN = 12
+
+
+def _strip_affirmative_punct(msg: str) -> str:
+    """strip 前後標點 / 空白（含全形標點），保留中間字判長度。"""
+    import re
+    return re.sub(r"^[\s，。！、,.!？?~～]+|[\s，。！、,.!？?~～]+$", "", msg.strip())
+
+
+def _looks_like_recollect_confirm(msg: str) -> bool:
+    """含確認 token 的 bounded affirmative parser（四段式 recollect confirm 段1 用，K）。
+
+    True 條件（全部成立）：strip 標點/空白後 (1) 不含任何實質修改名詞（_RECOLLECT_REVISE_MARKERS）
+    且 (2) 長度 ≤ _RECOLLECT_CONFIRM_MAX_LEN 且 (3) 至少含一個確認 token。
+    → 「確認」「OK。」「好，開始吧」「可以，請重新蒐集」命中；
+       「改第3段」「資料還是不夠，連經濟面也查」不命中（含修改名詞 / 過長）→ fall through。
+
+    刻意保守：含確認 token 才命中，無 token 的自然肯定句（「好，那就重新蒐集吧」「是的」）
+    在此**不命中** —— 交段3 `_looks_like_bounded_affirmative_shape`（先過 abort 分類器後）兜底。
+    """
+    stripped = _strip_affirmative_punct(msg)
+    low = stripped.lower()
+    if not low:
+        return False
+    # (1) 含實質修改名詞 → 不是純確認，走 substantive（避免吞掉 user 順帶提的修改訴求）
+    if any(marker in stripped for marker in _RECOLLECT_REVISE_MARKERS):
+        return False
+    # (2) 過長 → 視為夾帶實質內容，保守走 substantive
+    if len(stripped) > _RECOLLECT_CONFIRM_MAX_LEN:
+        return False
+    # (3) 至少含一個確認 token（去掉標點後逐 token 比對 + 子字串命中短肯定詞）
+    if low in _RECOLLECT_CONFIRM_TOKENS:
+        return True
+    return any(tok in low for tok in _RECOLLECT_CONFIRM_TOKENS)
+
+
+def _looks_like_bounded_affirmative_shape(msg: str) -> bool:
+    """無 token 的 bounded affirmative「形狀」parser（K Round 4，四段式 recollect confirm
+    段3 用，in-house R3 終驗修）。
+
+    **必須在 abort 分類器（_classify_meta_intent==ABORT）判定為非 abort 後才呼叫** ——
+    本函式刻意**不依賴確認 token 白名單**（解決「好，那就重新蒐集吧」「是的」「行」「成」
+    「麻煩了」這類無 token 自然肯定句漏接），因此單靠它無法區分「算了」（同為無 marker 短句）
+    與「好」；abort 區分交給先行的 _classify_meta_intent，本函式只負責「非 abort 的短肯定形狀」。
+
+    True 條件（全部成立）：strip 標點/空白後 (1) 非空 且 (2) 不含任何實質修改名詞
+    （_RECOLLECT_REVISE_MARKERS）且 (3) 長度 ≤ _RECOLLECT_CONFIRM_MAX_LEN。
+    → 「好，那就重新蒐集吧」「是的」「行」「成」「麻煩了」「嗯」命中（在 consent gate 內 = 確認）；
+       「改第3段」「資料還是不夠，連經濟面也查」不命中（含修改 marker / 過長）→ 段4 fall through。
+
+    為何安全（不復發 B 過寬）：B 原罪是「裸『要/好』被 confirm 白名單收進**一般** Stage 5
+    路徑」。本兜底**只在 pending_recollect_confirmation==True 的 consent gate 內**被呼叫
+    （user 剛被問「確認要重新蒐集嗎？」），且 abort 已先攔（「算了」走不到這），含修改 marker
+    的句子被 (2) 排除（「改第3段」絕不誤觸刪章）。consent gate 內非 abort 的短肯定句語意明確
+    = 確認，非泛用放行。
+    """
+    stripped = _strip_affirmative_punct(msg)
+    if not stripped:
+        return False
+    # (1) 含實質修改名詞 → 不是純確認，留給段4 substantive fall through（B 原罪防護）
+    if any(marker in stripped for marker in _RECOLLECT_REVISE_MARKERS):
+        return False
+    # (2) 過長 → 視為夾帶實質內容，保守走段4 substantive
+    if len(stripped) > _RECOLLECT_CONFIRM_MAX_LEN:
+        return False
+    # 非空 + 無 marker + 短 → 在 consent gate 內（且已排除 abort）視為確認形狀
+    return True
+
+
+def _count_chapter_words(content: str) -> int:
+    """章節字數 = 剝除 {cite:N} 引用 placeholder 後的字元數。
+
+    設計（lr-chapter-word-budget plan 設計細節 1）：
+    - 中文無空白分詞，字元數即近似字數（學術慣例）。
+    - 在 citation render 之前計算，content 仍是統一的 {cite:N}，剝一個 regex 即可，
+      不必處理 render 後 4 種變體（[N] / 上標 / (作者, 年) / 空）長度不一。
+    - 標點不剝除（過度工程；target_word_count 本就含標點的粗估目標）。
+    """
+    import re
+    return len(re.sub(r"\{cite:\d+\}", "", content or ""))
+
+
 def _is_intro_or_conclusion(book_outline, idx: int) -> bool:
     """Track A Task 3 (sprint 2026-05-28) — Gemini Critical 紅隊 #2 runtime
     double-check (defense in depth)。
@@ -312,6 +416,12 @@ async def _extract_entities_from_section(
 META_INTENT_SKIP = "skip_use_default"     # 「用預設/跳過/不提供/不用了」= 不想給內容、用預設
 META_INTENT_ABORT = "abort_cancel"        # 「算了/取消/不要了/放棄/先停」= 想中止當前流程
 META_INTENT_SUBSTANTIVE = "substantive"   # 實質內容（範本/修改訴求/混合句）→ 交既有路徑處理
+
+# Stage 3「重新提供範本」按鈕的 sentinel user_message。
+# 前端按鈕點擊時送此確切字串（非 LLM 可生成的自然語句），後端在 round-2 入口
+# 比對到它即識別為「使用者明確要求重新提供範本」的手勢，清空既有分析、重問新範本。
+# 不靠 LLM intent 判斷（明確手勢 → 明確訊號）。
+STAGE3_NEW_SAMPLE_SENTINEL = "__LR_STAGE3_NEW_SAMPLE__"
 
 
 async def _classify_meta_intent(user_message: str, handler: Any) -> Optional[str]:
@@ -492,6 +602,24 @@ MAX_EVIDENCE_ITEMS = 80        # 次要 backstop：絕對不超過幾筆。放�
 _EVIDENCE_OVERHEAD_PER_ITEM = 100   # 每筆 marker + title + url + 換行估算
 _EVIDENCE_SNIPPET_CHARS = 200       # 與下游 writer prompts/writer.py:808 的 (snippet)[:200] 對齊
 
+# P2 W9（SF1 / §3.1）：per-chapter evidence 充分度門檻（抽 module 常數，不留 inline 魔術數字）。
+EVIDENCE_THIN_CHAPTER_CITATIONS = 2  # 全 pool 量 <= 此值 → thin；可調
+
+
+def _compute_chapter_sufficiency(analyst_citations, evidence_pool):
+    """P2 W9（SF1）：用「全 pool 有料量」判 critical / thin / ok（非 analyst_citations 量）。
+
+    全局 evidence 模型下 writer 讀全 pool，analyst_citations 空不代表沒 evidence。
+    pool 完全空 → critical；pool 量 <= EVIDENCE_THIN_CHAPTER_CITATIONS → thin；否則 ok。
+    （intro/conclusion 章的 'ok' 覆寫由 caller 在 _is_intro_or_conclusion 處理，保留既有。）
+    """
+    _pool_count = len(evidence_pool or {})
+    if _pool_count == 0:
+        return "critical"
+    if _pool_count <= EVIDENCE_THIN_CHAPTER_CITATIONS:
+        return "thin"
+    return "ok"
+
 
 def _stratified_sample(items, needed):
     """從 items（已排序）均勻抽 needed 筆，橫跨頭中尾（不頭部截斷）。
@@ -533,6 +661,10 @@ def _item_chars(entry):
 
 def _cap_evidence_citations(citations, evidence_pool, planned_evidence_ids=None):
     """選 evidence：planned 優先（受 budget，保底 ≥1）+ remaining stratified 補位 + char budget 主 cap。
+
+    P2 全局 evidence 模型（W2）：cap 後的 list 是「優先 tier 名單」（analyst_citations）——
+    決定 W5 writer 視圖排序與 budget 內誰先進，**不再等於 writer 唯一可見集**（後者 =
+    全 evidence_pool，見 W3）。本函式演算法不變，只是消費語意從「切割可用集」改「決定優先序」。
 
     一處 cap，writer 的 evidence_lookup（從 analyst_citations 建）受 char budget 限。
     注意（模塊1 A.2 / 43bd5c61, 2026-06-09 起）：critic 的 chapter_evidence_text 已改
@@ -676,6 +808,12 @@ class LiveResearchOrchestrator(OrchestratorBase):
         self._grounding_extraction_failed_narrated = False
         self._grounding_extraction_failed_pending = False
 
+        # 離線防呆燒錢上限（plan: lr-sse-reconnect-resume, 2026-06-15）：per-call guard。
+        # orchestrator instance 每個 user request（continue/start）重建 → 此 flag 即
+        # per-continue-call。確保「離線跨 checkpoint 計數」一次 continue 只 +1，即使同一
+        # call 內穿越多個 durable boundary（如 _handle_stage_5_response → _run_stage_5）。
+        self._offline_advance_counted_this_call = False
+
     @property
     def critic_agent(self) -> "Any":
         """Track F (sprint 2026-05-28) S-1: CriticAgent 單例（N 章共用）。
@@ -686,7 +824,12 @@ class LiveResearchOrchestrator(OrchestratorBase):
         """
         if self._critic_agent is None:
             from reasoning.agents.critic import CriticAgent
-            self._critic_agent = CriticAgent(self.handler)
+            # LR 沿用 DR config key (critic_timeout=120)；fallback 120
+            # 對齊 base.py:168 / critic.py，僅 config key 缺失時兜底。
+            self._critic_agent = CriticAgent(
+                self.handler,
+                timeout=CONFIG.reasoning_params.get("critic_timeout", 120),
+            )
         return self._critic_agent
 
     def _setup_dry_run_agents(self):
@@ -781,6 +924,9 @@ class LiveResearchOrchestrator(OrchestratorBase):
         """
         logger.info(f"[LIVE RESEARCH] Starting: {query[:80]}...")
 
+        # 離線跨 checkpoint 計數 per-call guard reset（plan: lr-sse-reconnect-resume）。
+        self._offline_advance_counted_this_call = False
+
         state = LiveResearchStageState()
         state.advance_to_stage(1)
 
@@ -792,6 +938,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         state: LiveResearchStageState,
         user_message: str = "",
         auto_continue: bool = False,
+        nav_action: str = "",   # ""=正常前進；"back_one"=退一階；"restart"=回 Stage 1
     ) -> LiveResearchStageState:
         """
         從 checkpoint 繼續研究。
@@ -800,6 +947,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             state: 當前 LiveResearchStageState（從 session 讀取）
             user_message: 使用者的回覆訊息
             auto_continue: True = 使用者選了「你決定就好」
+            nav_action: backward navigation 動作（"" / "back_one" / "restart"）
 
         Returns:
             更新後的 LiveResearchStageState（可能是下一個 checkpoint 或完成）
@@ -812,8 +960,28 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
         logger.info(
             f"[LIVE RESEARCH] Continue from Stage {current_stage} "
-            f"(auto={auto_continue}, msg='{user_message[:50]}')"
+            f"(auto={auto_continue}, nav='{nav_action}', msg='{user_message[:50]}')"
         )
+
+        # ── Backward navigation: restart 確認 consume（plan: lr-backward-nav）──
+        # 上一輪 restart 已 emit confirm prompt（set pending_restart_confirmation=True）。
+        # 這輪 user 回覆（無 nav_action，但 pending flag 在）→ 在 nav 路由 + forward 路由
+        # 之前消費。B1 紅線：含 meta is None fail-loud 分支（抄 export gate :5713-5723），
+        # 置於 _looks_like_bounded_affirmative_shape 兜底之前。
+        # 回傳 None = 段4 substantive，未消費 → fall through 到下方 forward 正常處理
+        # 使用者實質訴求（不漏使用者任何一句話）。
+        if getattr(state, "pending_restart_confirmation", False) and user_message.strip():
+            consumed = await self._consume_restart_confirmation(state, user_message)
+            if consumed is not None:
+                return consumed
+
+        # ── Backward navigation: nav_action 路由（plan: lr-backward-nav）──
+        # nav_action 在 forward 路由前攔截。back_one/restart 走 reset_to_stage 後
+        # emit 通用通知 checkpoint（不打 LLM），return；不走下方 forward +1 路徑。
+        if nav_action == "back_one":
+            return await self._navigate_back_one(state)
+        if nav_action == "restart":
+            return await self._navigate_restart(state, user_message, auto_continue)
 
         # Stage 3 特殊處理：dialogue loop 可能多輪（style analysis 確認）
         if current_stage == 3:
@@ -857,14 +1025,132 @@ class LiveResearchOrchestrator(OrchestratorBase):
         else:
             logger.warning(f"[LIVE RESEARCH] Unexpected next_stage={next_stage}")
 
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
+        return state
+
+    # ──── Backward Navigation（plan: lr-backward-nav, CEO 拍板 2026-06-19）────
+
+    # 中文 stage label（user-facing；不含術語）
+    _NAV_STAGE_LABELS = {
+        1: "研究主題與架構",
+        2: "資料蒐集",
+        3: "文筆設定",
+        4: "報告格式與大綱",
+        5: "章節撰寫",
+    }
+
+    async def _navigate_back_one(self, state):
+        """退回上一階段（Stage N→N-1）。reset_to_stage(N-1) + emit 通用通知 checkpoint。"""
+        cur = state.current_stage
+        if cur <= 1:
+            # 邊界：Stage 1 無更早 stage → narration + 維持原 checkpoint
+            await self._emit_narration("已經在最開始的階段了，沒有可以再退回的步驟。")
+            await self._emit_checkpoint(stage=cur, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)
+            return state
+        target = cur - 1
+        state.reset_to_stage(target)
+        await self._emit_stage_change(target)  # 前端據此自動清更晚 stage section cards (#6)
+        proposal = lr_copy.NAV_BACK_NOTICE
+        state.set_checkpoint(proposal)
+        await self._emit_checkpoint(stage=target, proposal=proposal)
+        await self._persist_checkpoint_boundary(state)
+        return state
+
+    async def _navigate_restart(self, state, user_message, auto_continue):
+        """Full restart（回 Stage 1，#3 復用 evidence）。#4 兩段式：先 emit confirm。"""
+        # 第一輪：set pending flag + emit confirm prompt（章節未清）
+        state.pending_restart_confirmation = True
+        proposal = lr_copy.NAV_RESTART_CONFIRM_PROMPT
+        state.set_checkpoint(proposal)
+        await self._emit_checkpoint(stage=state.current_stage, proposal=proposal)
+        await self._persist_checkpoint_boundary(state)
+        return state
+
+    async def _consume_restart_confirmation(self, state, user_message):
+        """#4 restart 確認 consume：上一輪已 emit restart confirm，這輪 user 回答。
+
+        沿 _handle_stage_5_response recollect consent gate 形態（token 確認 / abort 取消 /
+        bounded affirmative 兜底 / substantive fall-through），**並補上 export gate
+        :5713-5723 的 meta is None fail-loud 分支**（recollect gate 缺，export gate 有）。
+        """
+        state.pending_restart_confirmation = False  # 一律先清（這輪已消費）
+        msg_norm = user_message.strip()
+        # 段1：含確認 token 的快路徑（不打 LLM）→ 確認重新規劃。
+        if _looks_like_recollect_confirm(msg_norm):
+            logger.info("[LIVE RESEARCH] nav restart confirmed by user (token)")
+            return await self._do_restart(state)
+        # 段2：非 token → 打 abort 分類器。
+        meta = await _classify_meta_intent(user_message, self.handler)
+        # ── B1 fail-loud（抄 orchestrator.py:5713-5723）：meta is None = LLM 故障。
+        #    必在 abort / bounded-affirmative 判定**之前**攔截。絕不放行清章節，
+        #    停原地問確認、發系統端旁白；不可 silent fail（#21）、不可怪 user。
+        if meta is None:
+            logger.warning(
+                "[LIVE RESEARCH] nav restart-confirm meta-intent classify failed "
+                "(None) — stay at checkpoint, NOT clearing sections"
+            )
+            await self._emit_narration(lr_copy.LLM_UNAVAILABLE_NARRATION)
+            # 停在原 checkpoint（章節未清、stage 未退）；下一輪 user 再回覆。
+            # 重設 pending flag 讓 user 仍可在系統恢復後再確認一次（不誤觸刪章）。
+            state.pending_restart_confirmation = True
+            state.set_checkpoint(lr_copy.NAV_RESTART_CONFIRM_PROMPT)
+            await self._emit_checkpoint(
+                stage=state.current_stage, proposal=state.checkpoint_prompt
+            )
+            await self._persist_checkpoint_boundary(state)
+            return state
+        if meta == META_INTENT_ABORT:
+            # 取消 → 回原 checkpoint，不動章節
+            logger.info("[LIVE RESEARCH] nav restart cancelled by user (abort)")
+            await self._emit_narration("好的，那就維持現在的內容，不重新規劃。")
+            state.set_checkpoint(state.checkpoint_prompt)
+            await self._emit_checkpoint(
+                stage=state.current_stage, proposal=state.checkpoint_prompt
+            )
+            await self._persist_checkpoint_boundary(state)
+            return state
+        # 段3：非 abort 的無 token 短肯定句 → 確認（與 recollect gate 段3 同形態）。
+        #     meta 已保證非 None（上方 fail-loud 已攔），此處才安全兜底。
+        if _looks_like_bounded_affirmative_shape(msg_norm):
+            logger.info(
+                "[LIVE RESEARCH] nav restart confirmed by user "
+                f"(bounded affirmative shape, no token, meta={meta})"
+            )
+            return await self._do_restart(state)
+        # 段4：其餘 substantive（如「改第3段」「再多查經濟面」）→ 不重新規劃，回傳 None
+        # 讓 caller fall through 到下方既有 forward dispatch 正常路由處理 user 實質訴求
+        # （「不漏使用者任何一句話」鐵律）。pending flag 已於本方法開頭清除。
+        logger.info(
+            "[LIVE RESEARCH] nav restart pending-confirm got substantive reply "
+            f"(meta={meta}) — fall through to normal forward dispatch"
+        )
+        return None
+
+    async def _do_restart(self, state):
+        """確認後執行 restart：reset_to_stage(1) + emit Stage 1 通知 checkpoint（#3 復用 evidence）。"""
+        state.reset_to_stage(1)
+        await self._emit_stage_change(1)
+        proposal = lr_copy.NAV_RESTART_NOTICE
+        state.set_checkpoint(proposal)
+        await self._emit_checkpoint(stage=1, proposal=proposal)
+        await self._persist_checkpoint_boundary(state)
         return state
 
     # ──── Stage 1: 建立研究結構 ────────────────────────────────
 
     async def _run_stage_1(
-        self, state: LiveResearchStageState, query: str, initial_items: list = None
+        self, state: LiveResearchStageState, query: str, initial_items: list = None,
+        seed_evidence_pool: dict = None, seed_counter: int = 0,
     ) -> LiveResearchStageState:
-        """Stage 1: 跑 BABLoopEngine 建立研究結構。"""
+        """Stage 1: 跑 BABLoopEngine 建立研究結構。
+
+        seed_evidence_pool / seed_counter：recollect 退回補搜時注入既有 pool 當 seed，
+        engine 從 seed_counter+1 起分配新 ID 疊加（對齊 Stage 2 :1656-1703 寫法）。
+        forward 首跑（Stage 1 一般進場）兩者為 None/0 = 行為不變。
+        """
+        # online substantive advance → 重置離線計數（plan 3d；離線 auto-advance 不 reset）。
+        self._maybe_reset_offline_counters(state)
         await self._emit_stage_change(1)
         await self._emit_narration("開始分析研究主題，建立研究結構，可能會蒐集好幾分鐘，請耐心等候。")
 
@@ -909,6 +1195,16 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 f"state.book_outline_json + format_specs.chapters synced"
             )
 
+            # 設計鎖定：mock_bab 路徑以 fixture book_outline 為 ground truth，
+            # **不跑**初始格式抽取（_maybe_extract_initial_format 僅真實路徑呼叫），
+            # 避免抽取覆蓋 E2E fixture 章節。regression 守門見
+            # test_mock_bab_initial_format_uses_fixture_not_extraction。
+            #
+            # 刻意不同步（AR round 2 nit）：mock_bab proposal 由 ContextMap topics
+            # 生成（_context_map_to_outline）；writer override chapters 來自
+            # fixture book_outline — 兩者語意不同（研究結構概覽 vs 分章 override），
+            # 非 bug，見 E2E-3 說明。
+
             outline = self._context_map_to_outline(context_map)
             proposal = f"## 研究結構提案\n\n{outline}\n\n這是我整理的研究結構，你覺得如何？需要調整嗎？"
             state.set_checkpoint(proposal)
@@ -917,6 +1213,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 proposal=proposal,
                 context_map_summary=context_map_to_summary(context_map),
             )
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         # Format initial items if available
@@ -933,6 +1230,8 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 "live_research_consistency_monitor", True
             ),
             dry_run=self.dry_run,
+            seed_evidence_pool=seed_evidence_pool,
+            seed_counter=seed_counter,
         )
         # Track A (sprint 2026-05-28): enable evidence_usage indexing
         # — Stage 1 全域 BAB loop 沒對應特定 topic, source_topic 默認 "global"
@@ -953,15 +1252,39 @@ class LiveResearchOrchestrator(OrchestratorBase):
         state.executed_searches = engine.executed_searches
 
         # 持久化 evidence pool（references master list 來源）
-        state.evidence_pool_json = serialize_evidence_pool(engine.evidence_pool)
+        # F (Codex #1+#8): defensive merge —— 以本輪 caller 傳入的 seed 為底，
+        # engine 結果疊加。即使 engine 補搜全失敗、內部把 evidence_pool 重建成比
+        # seed 少，也不丟失既有 seed（:94 只保證起點含 seed，不保證終點 ⊇ seed）。
+        # forward 首跑（seed_evidence_pool=None）→ seed_base={} → 行為與原樣相同。
+        seed_base = dict(seed_evidence_pool) if seed_evidence_pool else {}
+        final_pool = {**seed_base, **engine.evidence_pool}
+        if len(final_pool) < len(seed_base):
+            # 理論上 dict-merge 後不可能小於 seed_base（merge 是 union）；此 log 為
+            # forensic 兜底，若觸發代表 seed_base 本身異常（非 silent fail 紀律）。
+            logger.warning(
+                f"[LIVE RESEARCH] Stage 1 evidence merge anomaly: "
+                f"final={len(final_pool)} < seed={len(seed_base)}"
+            )
+        state.evidence_pool_json = serialize_evidence_pool(final_pool)
         logger.info(
             f"[LIVE RESEARCH] Stage 1 evidence_pool persisted: "
-            f"{len(engine.evidence_pool)} entries"
+            f"{len(final_pool)} entries"
         )
 
         # 產出提案
         outline = self._context_map_to_outline(context_map)
         proposal = f"## 研究結構提案\n\n{outline}\n\n這是我整理的研究結構，你覺得如何？需要調整嗎？"
+
+        # 初始 query 格式 spec 抽取（傳輸層）：把 user 初始 prompt 內嵌的
+        # 章節 / 字數 / 引用格式 / 特殊元素抽成結構化欄位、落進既有下游欄位，
+        # 並在此 checkpoint 跟 user 確認一次。抽不到 → 零變化（不問、不落庫）。
+        # dry_run 不打真 LLM（associator method 內 call_llm_validated 會真呼叫，
+        # 故 dry_run 下 skip 整段）。
+        if not self.dry_run:
+            proposal = await self._maybe_extract_initial_format(
+                query, state, proposal
+            )
+
         state.set_checkpoint(proposal)
 
         # P0 #5: build evidence_list from all topics in context_map
@@ -977,7 +1300,48 @@ class LiveResearchOrchestrator(OrchestratorBase):
             evidence_list=all_evidence,
         )
 
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
+
+    async def _maybe_extract_initial_format(
+        self, query: str, state, proposal: str
+    ) -> str:
+        """抽初始 query 格式 spec、落庫、回傳（可能附確認句的）proposal。
+
+        不可 silent fail（AR B3）：抽取 LLM 出錯 → 記 WARN **+ 發 user-visible 旁白**
+        （降級為現行自由發揮，但告知 user 格式需求這次沒被解析），不中斷 Stage 1。
+        空 spec → 原 proposal 不變（這是「user 沒指定格式」的正常情形，非故障，不旁白）。
+        """
+        try:
+            spec = await self.associator.extract_initial_format_spec(query)
+        except Exception as e:
+            logger.warning(
+                f"[LIVE RESEARCH] initial format spec extraction failed "
+                f"(降級為自由發揮): {e}"
+            )
+            # AR B3：no-silent-fail — 故障≠user 需求被接受，補即時旁白告知。
+            await self._emit_narration(
+                lr_copy.INITIAL_FORMAT_EXTRACTION_FAILED_NARRATION
+            )
+            return proposal
+
+        if spec is None or not spec.has_meaningful_spec():
+            return proposal
+
+        self._apply_initial_format_spec(state, spec)
+
+        chapter_names = [c.name for c in spec.chapters]
+        special = [
+            {"type": e.type, "target_chapter": e.target_chapter}
+            for e in spec.special_elements
+        ]
+        confirmation = lr_copy.initial_format_confirmation_line(
+            chapter_names=chapter_names,
+            total_word_count=spec.total_word_count,
+            citation_style=spec.citation_style,
+            special_elements=special,
+        )
+        return proposal + confirmation
 
     async def _handle_stage_1_response(
         self, state: LiveResearchStageState, user_message: str, auto_continue: bool
@@ -1027,6 +1391,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             logger.info("[LIVE RESEARCH] Stage 1: auto-continue with current structure")
             state.failed_intent_parse_count = 0
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         context_map = ContextMap.model_validate_json(state.context_map_json)
@@ -1073,6 +1438,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if intent.action == "confirm":
             logger.info("[LIVE RESEARCH] Stage 1: user confirmed structure")
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         # action == "adjust"
@@ -1101,6 +1467,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             )
             await self._emit_narration("沒問題，目前的結構直接用。")
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         # UX-9: reframe_structure → 不立即 apply，存 pending + emit detail-rich confirm
@@ -1176,6 +1543,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             proposal=proposal,
             context_map_summary=context_map_to_summary(mutated_cm),
         )
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
 
     def _format_delta_summary(
@@ -1244,6 +1612,70 @@ class LiveResearchOrchestrator(OrchestratorBase):
             logger.info(
                 f"[LIVE RESEARCH] Stage 1 reframe: total_word_count={total_wc} "
                 f"captured → user_voice + format_specs (C8 fix)"
+            )
+
+    def _apply_initial_format_spec(self, state, spec) -> None:
+        """把初始 query 抽出的 InitialFormatSpec 落進既有 format_specs / user_voice。
+
+        沿用既有下游欄位形狀（零新 schema 欄位）：
+        - spec.chapters → format_specs["chapters"]（{name, outline[, word_target]}）
+          形狀對齊 _extract_chapters_from_ops 輸出 → _resolve_chapter_source 直接 honor。
+        - spec.total_word_count → user_voice.target_word_count + mirror
+          format_specs["target_word_count"]（對齊 _apply_stage1_format_prefs C8 寫法）。
+        - spec.citation_style → user_voice.citation_style。
+        - spec.special_elements → format_specs["special_elements"]
+          （{type, target_chapter, description}，對齊 Stage 4 寫法）。
+
+        每項抽不到（空 / None）→ 不寫該欄位（維持現行行為，保守 default）。
+        時序紀律：本 helper 在 Stage 1 第一次 checkpoint **之前**呼叫；後續 user
+        reply 的 reframe / Stage 4 dispatch 後寫覆蓋（user 最新意圖優先）。
+        """
+        if spec.chapters:
+            chapters = []
+            for ch in spec.chapters:
+                entry = {"name": ch.name, "outline": ch.description or ""}
+                # AR B1：InitialChapterSpec.word_target 真帶出（下游 outline planner
+                # per_chapter_targets 消費）。None → 不寫該 key（同 _extract_chapters_from_ops）。
+                wt = ch.word_target
+                if isinstance(wt, int) and wt > 0:
+                    entry["word_target"] = wt
+                chapters.append(entry)
+            state.format_specs = dict(state.format_specs or {})
+            state.format_specs["chapters"] = chapters
+            logger.info(
+                f"[LIVE RESEARCH] initial format spec: {len(chapters)} chapters "
+                f"→ format_specs.chapters"
+            )
+
+        if spec.total_word_count is not None:
+            state.user_voice.target_word_count = spec.total_word_count
+            state.format_specs = dict(state.format_specs or {})
+            state.format_specs["target_word_count"] = spec.total_word_count
+            logger.info(
+                f"[LIVE RESEARCH] initial format spec: total_word_count="
+                f"{spec.total_word_count} → user_voice + format_specs"
+            )
+
+        if spec.citation_style is not None:
+            state.user_voice.citation_style = spec.citation_style
+            logger.info(
+                f"[LIVE RESEARCH] initial format spec: citation_style="
+                f"{spec.citation_style} → user_voice"
+            )
+
+        if spec.special_elements:
+            state.format_specs = dict(state.format_specs or {})
+            state.format_specs["special_elements"] = [
+                {
+                    "type": e.type,
+                    "target_chapter": e.target_chapter,
+                    "description": e.description,
+                }
+                for e in spec.special_elements
+            ]
+            logger.info(
+                f"[LIVE RESEARCH] initial format spec: "
+                f"{len(spec.special_elements)} special_elements → format_specs"
             )
 
     async def _emit_reframe_proposal(
@@ -1330,6 +1762,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             proposal=proposal,
             context_map_summary=context_map_to_summary(context_map),
         )
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
 
     async def _handle_pending_reframe(
@@ -1392,6 +1825,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     "重組資料讀取失敗，先用目前結構繼續。"
                 )
                 state.complete_stage()
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state
 
             context_map = ContextMap.model_validate_json(state.context_map_json)
@@ -1456,6 +1890,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     f"接下來進入下一階段，蒐集每段所需的資料。"
                 )
                 state.complete_stage()
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state
 
             # Stage 4 entry：reframe 套完，保持 Stage 4 等格式 reply
@@ -1585,6 +2020,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
     async def _run_stage_2(self, state: LiveResearchStageState) -> LiveResearchStageState:
         """Stage 2: 對每個 section 執行 focused B->A->B' loop。"""
+        self._maybe_reset_offline_counters(state)  # online substantive advance → reset（plan 3d）
         state.advance_to_stage(2)
         await self._emit_stage_change(2)
         await self._emit_narration("接下來進入資料蒐集階段，每個主題都需要搜尋並分析資料，可能會蒐集好幾分鐘，請耐心等候。")
@@ -1612,6 +2048,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             for _topic in context_map.topics:
                 _mb_evidence.extend(self._build_topic_evidence_list(_topic, _mb_pool))
             await self._emit_checkpoint(stage=2, proposal=proposal, evidence_list=_mb_evidence)
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         context_map = ContextMap.model_validate_json(state.context_map_json)
@@ -1715,6 +2152,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
         await self._emit_checkpoint(stage=2, proposal=proposal, evidence_list=_stage2_evidence)
 
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
 
     async def _emit_stage2_consolidation(self, context_map: ContextMap, total_evidence: int) -> None:
@@ -1783,6 +2221,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if auto_continue or not user_message.strip():
             logger.info("[LIVE RESEARCH] Stage 2: auto-continue")
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         feedback_text = user_message.strip()
@@ -1802,12 +2241,14 @@ class LiveResearchOrchestrator(OrchestratorBase):
             "謝謝你的建議，我已經把它記下來，寫稿階段會盡量採用。"
         )
         state.complete_stage()
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
 
     # ──── Stage 3: 寫作準備 ────────────────────────────────────
 
     async def _run_stage_3(self, state: LiveResearchStageState) -> LiveResearchStageState:
         """Stage 3: Style Analysis dialogue loop。"""
+        self._maybe_reset_offline_counters(state)  # online substantive advance → reset（plan 3d）
         state.advance_to_stage(3)
         await self._emit_stage_change(3)
 
@@ -1820,6 +2261,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         state.set_checkpoint(proposal)
         await self._emit_checkpoint(stage=3, proposal=proposal)
 
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
 
     async def _handle_stage_3_response(self, state, user_message, auto_continue):
@@ -1828,10 +2270,36 @@ class LiveResearchOrchestrator(OrchestratorBase):
             logger.info("[LIVE RESEARCH] Stage 3: skip style analysis")
             state.style_features_json = ""
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         # 判斷是否是對現有分析的確認/修正
         if state.style_features_json:
+            # 「重新提供範本」按鈕（明確手勢）：前端送 sentinel user_message。
+            # 設計鎖定（2026-06-05）：覆蓋整份分析這個不可逆動作鎖在明確按鈕之後，
+            # 不靠 LLM intent。比對 sentinel → 清空既有分析 + 重問新範本。清空後，
+            # 使用者下一則訊息因 `state.style_features_json` 為空，自然落入下方第一輪
+            # else 入口，經 _classify_meta_intent 守門 + full _run_style_analysis +
+            # o7 input-guard 重新分析（DRY：不在此重貼一份守門邏輯）。
+            if user_message.strip() == STAGE3_NEW_SAMPLE_SENTINEL:
+                logger.info(
+                    "[LIVE RESEARCH] Stage 3: '重新提供範本' button → clear analysis, reprompt."
+                )
+                await self._emit_narration(
+                    "好的，我們重來。請再貼一段你的文筆範本，我會重新分析。"
+                )
+                state.style_features_json = ""
+                reprompt = (
+                    "請提供一段你的文筆範本（貼一段你寫過的段落），我會重新分析文筆特徵。\n\n"
+                    "不提供也沒關係，回覆「用預設就好」我會用預設的學術寫作風格。"
+                )
+                state.set_checkpoint(reprompt)
+                # 重問 checkpoint **不**帶 show_new_sample_button：此時 style_features_json
+                # 已空，沒有分析可覆蓋；按鈕本身就是「再給一次範本」，重複無意義。
+                await self._emit_checkpoint(stage=3, proposal=reprompt)
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
+                return state  # 回到索取範本的 checkpoint，等使用者貼新範本
+
             # 已有分析結果 — 這是使用者對分析的回覆
             # 用 LLM intent parsing 判斷（CEO 決策：文筆分析是細緻的東西，keyword matching 不可接受）
             intent = await self._parse_style_confirmation_intent(user_message, state.style_features_json)
@@ -1849,6 +2317,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 )
                 state.set_checkpoint(checkpoint_prompt)
                 await self._emit_checkpoint(stage=3, proposal=checkpoint_prompt)
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state  # 停原地，等 user 再回
             # round-3（Gemini）：移除 .get("action","confirm") 預設。intent 非 None 時
             # parser 已保證 action 合法（見 Task 2 Step 4 驗證），直接取；拿不到就是
@@ -1858,8 +2327,15 @@ class LiveResearchOrchestrator(OrchestratorBase):
             if action == "confirm":
                 logger.info("[LIVE RESEARCH] Stage 3: style analysis confirmed")
                 state.complete_stage()
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state
-            elif action == "adjust":
+            else:
+                # round-2 對話回饋只有兩種：confirm（上面）/ adjust（這裡）。
+                # 設計鎖定（2026-06-05）：移除 conversational redo——「重新提供範本」
+                # 這個覆蓋整份分析的不可逆動作改鎖在前端明確按鈕（sentinel 路徑），
+                # 不再從對話文字觸發整碗重抽。intent parser schema 已收緊為
+                # ["confirm","adjust"]，action 非 confirm 即 adjust，走 merge
+                # （reconcile：保留未提及維度，只更新使用者點到的維度）。
                 # #6 fix: merge user adjustment into existing analysis.
                 # Do NOT re-analyse user_message as a new writing sample — that
                 # produces 1 feature from sparse input and discards all others.
@@ -1880,64 +2356,10 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 feedback_text += "\n這次準確嗎？"
 
                 state.set_checkpoint(feedback_text)
-                await self._emit_checkpoint(stage=3, proposal=feedback_text)
-                return state  # 保持 checkpoint，等下一輪確認
-
-            else:
-                # redo — full re-analysis from scratch (user wants entirely new analysis)
-                # O7 INTERIM：redo 終局 plan land 後本 try/except 連同 None guard
-                # 一併由該 plan 拆除（redo 不再呼叫 _run_style_analysis）。見 o7 plan 協調節。
-                await self._emit_narration("了解，讓我重新分析...")
-                try:
-                    style_output = await self._run_style_analysis(user_message)
-                except StyleInputNotASampleError:
-                    # O7: redo 誤判 + 輸入非範本（語意降級）→ 保留既有分析不覆蓋。
-                    logger.info(
-                        "[LIVE RESEARCH] Stage 3 redo: input judged not a writing "
-                        "sample; keeping existing analysis, holding at checkpoint."
-                    )
-                    await self._emit_narration(lr_copy.STYLE_INPUT_NOT_SAMPLE_REDO_NARRATION)
-                    # fallback 文案用 round-2 版（與相鄰 S2-2 redo None guard 同理由）：
-                    # 此路徑保留既有 style_features_json（非空），user 下一則訊息仍走
-                    # round-2 _parse_style_confirmation_intent，不是 round-1 meta gate —
-                    # 不可用「請提供你的文筆範本」誤導。
-                    checkpoint_prompt = state.checkpoint_prompt or (
-                        "這份文筆分析準確嗎？需要調整的話告訴我。"
-                    )
-                    state.set_checkpoint(checkpoint_prompt)
-                    await self._emit_checkpoint(stage=3, proposal=checkpoint_prompt)
-                    return state  # 保留既有 style_features_json
-                if style_output is None:
-                    # LLM 整個回空 → 不覆蓋既有 style_features_json，系統端文案 +
-                    # 重 emit checkpoint 讓 user 重試。對齊 SUBSTANTIVE branch 的 soft-fail pattern。
-                    logger.warning(
-                        "[LIVE RESEARCH] Stage 3 redo: _run_style_analysis returned None "
-                        "(LLM empty), preserving existing analysis, stay at checkpoint"
-                    )
-                    await self._emit_narration(lr_copy.LLM_UNAVAILABLE_NARRATION)
-                    # fallback 文案用 round-2 版（review 修訂）：此路徑保留既有
-                    # style_features_json（非空），user 下一則訊息仍走 round-2
-                    # _parse_style_confirmation_intent（confirm/adjust/redo），不是
-                    # round-1 meta gate — 不可用「請提供你的文筆範本」誤導。
-                    # 與已 land 的 round-2 intent None guard（L1805-1807）同文案。
-                    checkpoint_prompt = state.checkpoint_prompt or (
-                        "這份文筆分析準確嗎？需要調整的話告訴我。"
-                    )
-                    state.set_checkpoint(checkpoint_prompt)
-                    await self._emit_checkpoint(stage=3, proposal=checkpoint_prompt)
-                    return state  # 停原地，保留既有分析，等 user 再回
-                state.style_features_json = style_output.model_dump_json()
-
-                feedback_text = (
-                    f"重新分析完成。整體語氣：{style_output.overall_tone}。\n\n"
-                    f"文筆特徵：\n"
+                await self._emit_checkpoint(
+                    stage=3, proposal=feedback_text, show_new_sample_button=True
                 )
-                for f in style_output.features:
-                    feedback_text += f"- **{f.dimension}**：{f.observation} → {f.instruction}\n"
-                feedback_text += "\n這次準確嗎？"
-
-                state.set_checkpoint(feedback_text)
-                await self._emit_checkpoint(stage=3, proposal=feedback_text)
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state  # 保持 checkpoint，等下一輪確認
 
         else:
@@ -1955,6 +2377,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 )
                 state.set_checkpoint(checkpoint_prompt)
                 await self._emit_checkpoint(stage=3, proposal=checkpoint_prompt)
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state  # 停原地，等 user 再回
             if meta in (META_INTENT_SKIP, META_INTENT_ABORT):
                 # 「用預設/跳過/不提供」或「算了不弄範本」→ 用預設學術風格往下
@@ -1964,6 +2387,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 )
                 state.style_features_json = ""
                 state.complete_stage()
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state
             # META_INTENT_SUBSTANTIVE → 實質範本（或混合句）→ 跑 Style Analysis
             if self.features.get("live_research_style_analysis", True):
@@ -1983,6 +2407,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     )
                     state.set_checkpoint(checkpoint_prompt)
                     await self._emit_checkpoint(stage=3, proposal=checkpoint_prompt)
+                    await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                     return state  # 停原地，不覆蓋 style_features_json
                 if style_output is None:
                     # LLM 整個回空 → 不可 silent fail，也不寫半成品 style_features_json：
@@ -1998,6 +2423,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     )
                     state.set_checkpoint(checkpoint_prompt)
                     await self._emit_checkpoint(stage=3, proposal=checkpoint_prompt)
+                    await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                     return state  # 停原地，等 user 再回
                 state.style_features_json = style_output.model_dump_json()
 
@@ -2011,10 +2437,17 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 feedback_text += "\n準確嗎？需要調整的話告訴我。"
 
                 state.set_checkpoint(feedback_text)
-                await self._emit_checkpoint(stage=3, proposal=feedback_text)
+                # 首輪成功分析後的 checkpoint 帶 show_new_sample_button=True：
+                # 此後使用者已有一份分析，「重新提供範本」按鈕才有意義。降級 / soft-fail
+                # 分支（請貼範本）不帶按鈕——此時還沒有分析可覆蓋。
+                await self._emit_checkpoint(
+                    stage=3, proposal=feedback_text, show_new_sample_button=True
+                )
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state  # 等確認
 
         state.complete_stage()
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
 
     async def _run_style_analysis(self, sample_text: str) -> Optional[StyleAnalysisOutput]:
@@ -2257,7 +2690,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         CEO 決策：文筆分析是非常細緻的東西，不可以用 keyword matching。
 
         Returns:
-            意圖 dict（含 'action': confirm/adjust/redo）；LLM API 失敗（空回應 /
+            意圖 dict（含 'action': confirm/adjust）；LLM API 失敗（空回應 /
             exception）或回壞 dict（缺 action / action 不在 enum）時回 None — caller
             須視為系統端失敗，emit lr_copy.LLM_UNAVAILABLE_NARRATION + 保持 Stage 3
             checkpoint，不可 silent confirm（#21；與 Stage 1/4/5 None 分流一致）。
@@ -2277,29 +2710,31 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
 判斷使用者的意圖，回傳 JSON：
 
-- action:
+- action（只有兩種，沒有第三種）：
   * "confirm"（user 明確且只表達接受分析正確、沒有提出任何調整，例如：
       「準確」/「對」/「沒問題」/「就是這樣」/「OK 繼續」/「分析得很準」）
-  * "adjust"（user 指出分析中特定維度需要微調、或補充指示，例如：
+  * "adjust"（user 提出任何形式的修改、補充、不滿或方向調整，例如：
       「第三項講得不夠準，應該是 X」/「整體 OK 但句式那項換成 Y」/
-      「降低正式程度」/「再多一點口語感」）
-  * "redo"（user 要求整體重新分析，或對分析整體不滿，例如：
-      「重新分析」/「不對，重來」/「換個方向試試」/「整個錯了」）
+      「降低正式程度」/「再多一點口語感」/「不太對」/「換個方向試試」/
+      「整體再嚴謹一點」）。**只要 user 表達了任何想改的訴求，一律歸 adjust**，
+      由下游以「在現有分析上局部調整」處理，保留未提及的維度。
 
 - adjustments: 如果 action 是 adjust，列出需要調整的維度和新指示（陣列）
 - reason: 簡述判斷原因（繁體中文）
 
 紀律：
 - 任何指出特定維度錯誤、或要求微調具體面向的訊息 → adjust（不是 confirm）
-- 「不對」「重來」「整個錯了」這類整體否定 → redo
+- 「不對」「不太準」「整體再 X 一點」「換個方向」這類**對話式不滿**也 → adjust。
+  系統會在現有分析上做局部調整（reconcile），不會整碗重抽。使用者若真的想換掉
+  整份範本重來，介面上有獨立的「重新提供範本」按鈕負責，**不由你判斷**。
 - confirm 僅適用於：user 完全沒提任何修改、純粹表達接受
 - 如果分類錯誤（例如把 adjust 誤判為 confirm），caller 會直接 advance 階段、
-  把 user 的調整訴求吃掉 — 寧可分 adjust/redo 也不要錯分 confirm
+  把 user 的調整訴求吃掉 — 寧可偏 adjust 也不要錯分 confirm
 """
         schema = {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["confirm", "adjust", "redo"]},
+                "action": {"type": "string", "enum": ["confirm", "adjust"]},
                 "adjustments": {
                     "type": "array",
                     "items": {
@@ -2337,7 +2772,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             # 取值 fall 回 confirm（silent-confirm 換條路重現）。一律當 parse-fail 回 None，
             # 由 caller None 分支處理（對齊空/exception）。isinstance 檢查同時防 list 型態
             # response.get 噴 AttributeError。
-            if not isinstance(response, dict) or response.get("action") not in ("confirm", "adjust", "redo"):
+            if not isinstance(response, dict) or response.get("action") not in ("confirm", "adjust"):
                 logger.warning(
                     f"[LIVE RESEARCH] _parse_style_confirmation_intent: invalid/missing "
                     f"action in response, treat as parse-fail (None): {response!r}"
@@ -2717,6 +3152,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
     async def _run_stage_4(self, state: LiveResearchStageState) -> LiveResearchStageState:
         """Stage 4: 詢問格式需求。"""
+        self._maybe_reset_offline_counters(state)  # online substantive advance → reset（plan 3d）
         state.advance_to_stage(4)
         await self._emit_stage_change(4)
 
@@ -2729,6 +3165,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         state.set_checkpoint(proposal)
         await self._emit_checkpoint(stage=4, proposal=proposal)
 
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
 
     async def _handle_stage_4_response(self, state, user_message, auto_continue):
@@ -2749,6 +3186,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if auto_continue or not user_message.strip():
             state.format_specs = self._merge_format_specs_default(state.format_specs)
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         # === UX-9: Reframe confirm round short-circuit ===
@@ -2769,6 +3207,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             # v8 Bug 2 partial root fix — typed confirm 不 re-emit checkpoint
             state.pending_format_confirmation = False
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         if action == Stage4ResponseAction.confirm_both:
@@ -2776,6 +3215,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             # 走到這代表 pending_reframe_json 為空、只剩 format。退化為 confirm_format。
             state.pending_format_confirmation = False
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         if action == Stage4ResponseAction.confirm_reframe:
@@ -2819,6 +3259,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 state.format_specs = dict(state.format_specs or {})
                 state.format_specs["target_word_count"] = fc.target_word_count
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         if action == Stage4ResponseAction.add_special_element:
@@ -2878,6 +3319,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if action == Stage4ResponseAction.auto_continue:
             state.format_specs = self._merge_format_specs_default(state.format_specs)
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         if action == Stage4ResponseAction.unclear:
@@ -3110,6 +3552,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
             state, reframe_op, context_map, summary, target_stage=4,
         )
 
+    # APA title fallback (2026-06-18)：author 缺時用文章標題取代，截前 N 字。
+    # N=10 是繁中標題「足以辨識 + 不破壞 inline 緊湊」的折衷；中文無「詞」邊界，
+    # 故以字元數 adapt APA 7th 英文「前 1-4 words」規則。超長加全形省略號「…」。
+    _TITLE_FALLBACK_MAXLEN = 10
+
     @staticmethod
     def _render_section_citations(
         section: "LiveWriterSectionOutput",
@@ -3128,13 +3575,19 @@ class LiveResearchOrchestrator(OrchestratorBase):
         - footnote: {cite:1} → ¹ (unicode superscript)
         - none: {cite:1} → '' (移除)
 
-        Fallback rule（LR VP-3 RCA 2026-05-16 修正 — 不可用 source_domain
-        偽裝成 author 誤導 user。CLAUDE.md no silent fail）：
-        - author / year 任一空 → 整個 citation render 為「(來源不明, n.d.)」明示
-          metadata 缺，**不再** fallback 到 source_domain（避免 example.com /
-          cna.com.tw 被誤讀為 author）。
-        - 觸發時 methodology_note append「[citation metadata 缺：N 筆 citation
-          缺 author/year，已標示為 (來源不明, n.d.)]」紀錄缺失筆數。
+        Fallback rule（LR VP-3 RCA 2026-05-16 + APA title fallback 2026-06-18）：
+        author 與 year 各自獨立 fallback，互不連坐：
+        - year 空 → 先試 published_at derive 年份（YYYY-MM-DD 前 4 字）；
+          仍空 → 標準「n.d.」。
+        - author 空 → 取 entry.title 前 N 字（_TITLE_FALLBACK_MAXLEN）加全形引號
+          「」（超長加全形省略號），即 APA 7th「無作者時以標題取代作者位置」標準做法。
+          **與 2026-05-16 RCA 禁止的 source_domain 偽裝本質不同**：domain（cna.com.tw）
+          放 author 位會被讀成人名而誤導；title 是文章本體資訊 + 加引號已明示「這是標題
+          不是作者」，不誤導，且為 APA 標準。**絕不**回退到 source_domain。
+        - author 空且 title 也空（極端，理論上不該發生）→ 維持「(來源不明, n.d.)」兜底
+          （CLAUDE.md no silent fail —— 明示 metadata 全缺）。
+        - author 缺（含極端來源不明）筆數計入 missing_metadata_count，
+          觸發時 methodology_note append 記錄並說明已依 APA 慣例改用標題（audit trail）。
         """
         import re
 
@@ -3163,19 +3616,37 @@ class LiveResearchOrchestrator(OrchestratorBase):
             if citation_format == "none":
                 return ""
 
-            # author_year (OQ-3: 中文 author 整名 render)
-            # RCA 2026-05-16: author / year 任一缺 → 整個 citation 顯示「來源不明」
-            # 不可 fallback 到 source_domain（example.com 偽裝成 author 退化）
+            # author_year (OQ-3: 中文 author 整名 render)。
+            # author 與 year 各自獨立 fallback，互不連坐（2026-06-18 APA title fallback）。
             author = (entry.author or "").strip()
-            # FIX-3 (Cayenne #10): year 缺時從 published_at 取年份（YYYY-MM-DD 前 4 字）。
-            # real-retrieval evidence 只填 published_at（Track E），year 欄常空 →
-            # 不 derive 則永遠 n.d.。published_at 也缺才落 fallback「來源不明」。
+
+            # year fallback（維持現狀）。FIX-3 (Cayenne #10): year 缺時從 published_at
+            # 取年份（YYYY-MM-DD 前 4 字）。real-retrieval evidence 只填 published_at
+            # （Track E），year 欄常空 → 不 derive 則永遠 n.d.。
             year = (entry.year or "").strip()
             if not year and getattr(entry, "published_at", None):
                 year = (entry.published_at or "")[:4].strip()
-            if not author or not year:
-                missing_metadata_count += 1
-                return "(來源不明, n.d.)"
+            if not year:
+                year = "n.d."
+
+            # author fallback（APA 7th「無作者時以標題取代作者」）。
+            # RCA 2026-05-16: 禁止用 source_domain 偽裝 author（cna.com.tw 被讀成人名）。
+            # title 取代與 domain 偽裝本質不同：title 是文章本體 + 全形引號明示「這是標題」。
+            if not author:
+                title = (getattr(entry, "title", "") or "").strip()
+                if title:
+                    maxlen = LiveResearchOrchestrator._TITLE_FALLBACK_MAXLEN
+                    if len(title) > maxlen:
+                        title_short = title[:maxlen] + "…"  # 全形省略號（引號內）
+                    else:
+                        title_short = title
+                    author = f"「{title_short}」"
+                    missing_metadata_count += 1  # 缺 author 已用 title 取代，計入 audit
+                else:
+                    # 連 title 都沒有（極端，理論上不該發生）→ no silent fail 兜底
+                    missing_metadata_count += 1
+                    return "(來源不明, n.d.)"
+
             return f"({author}, {year})"
 
         new_content = re.sub(r"\{cite:(\d+)\}", _replace, content)
@@ -3183,8 +3654,8 @@ class LiveResearchOrchestrator(OrchestratorBase):
         new_note = section.methodology_note
         if missing_metadata_count > 0:
             note_addition = (
-                f"[citation metadata 缺：{missing_metadata_count} 筆 citation "
-                f"缺 author/year，已標示為 (來源不明, n.d.)]"
+                f"[citation metadata：{missing_metadata_count} 筆 citation 缺作者，"
+                f"已依 APA 慣例改用文章標題標示（標題亦缺者標示為來源不明）]"
             )
             new_note = (
                 f"{new_note} {note_addition}".strip()
@@ -3227,131 +3698,6 @@ class LiveResearchOrchestrator(OrchestratorBase):
             merged["special_elements"] = list(special_elements)
         return merged
 
-    async def _try_stage_4_reframe_entry(
-        self,
-        state: LiveResearchStageState,
-        user_message: str,
-        format_spec_extracted: str,
-        stage4_intent=None,
-    ) -> LiveResearchStageState:
-        """UX-9 D-7：Stage 4 結構訴求 → 直接 trigger reframe entry。
-
-        Bug 4b (2026-05-18) root-fix：
-        - 優先用 `stage4_intent.new_chapters`（Stage 4 parser 已抽出的 chapter outline）
-          **直接**構造 reframe op，不再 round-trip 給 Stage 1 prompt 重解。
-        - Stage 1 prompt 對 `special_elements` 零知識，原本 round-trip 會把
-          「最後加比較表」誤判為第 6 章。
-        - 只有當 Stage 4 沒抽出 new_chapters 時才 fallback 給 Stage 1 parser
-          （legacy path，留作 LLM hallucination safety net）。
-
-        format_spec_extracted: mixed path 已抽出的格式偏好（log 用）；
-                               pure structure_change path 傳 ""
-        stage4_intent: caller 傳入的 Stage4Intent，含 `new_chapters` 欄位。
-                       None = legacy caller（保留為向後相容，走 Stage 1 fallback）。
-        """
-        try:
-            context_map = ContextMap.model_validate_json(state.context_map_json)
-        except Exception as e:
-            logger.warning(
-                f"[LIVE RESEARCH] Stage 4 reframe entry: context_map parse fail: {e}"
-            )
-            await self._emit_narration(
-                "目前結構讀取失敗，先繼續格式確認。"
-            )
-            await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
-            return state
-
-        # Bug 4b root-fix：優先用 Stage 4 抽出的 new_chapters 直接構造 reframe op
-        # TypeAgent refactor (2026-05-19)：stage4_intent.new_chapters 為 List[ChapterSpec]，
-        # 轉 dict 給 ContextMapRevisionOperation.new_chapters: List[dict]（不傳 `type` 內 field）
-        stage4_new_chapters = (
-            [ch.model_dump(exclude={"type"}) for ch in stage4_intent.new_chapters]
-            if stage4_intent is not None and getattr(stage4_intent, "new_chapters", None)
-            else []
-        )
-        if stage4_new_chapters:
-            logger.info(
-                f"[LIVE RESEARCH] Stage 4 reframe entry: 用 Stage 4 抽出的 "
-                f"{len(stage4_new_chapters)} 章直接構造 reframe op "
-                f"(跳過 Stage 1 round-trip)"
-            )
-            reframe_op = ContextMapRevisionOperation(
-                op_type="reframe_structure",
-                new_chapters=stage4_new_chapters,
-            )
-            summary = (
-                stage4_intent.format_spec_extracted
-                if getattr(stage4_intent, "format_spec_extracted", "")
-                else f"整體重組為 {len(stage4_new_chapters)} 章"
-            )
-            return await self._emit_reframe_proposal(
-                state, reframe_op, context_map, summary, target_stage=4,
-            )
-
-        # Legacy fallback：Stage 4 沒抽出 new_chapters → 走 Stage 1 parser
-        # （保留為 LLM hallucination safety net；新主路徑不會走到這）
-        intent = await self._parse_stage_1_intent(user_message, context_map)
-        if intent is None:
-            # #20 改善：intent is None = LLM API 失敗（系統端），非「user 結構訴求講不清」。
-            # 怪 user「沒看懂你的結構訴求」會誤導 → 系統端文案。保持 Stage 4 checkpoint。
-            logger.warning(
-                "[LIVE RESEARCH] Stage 4 reframe entry: intent parse returned None "
-                "(LLM API fail), keep Stage 4 checkpoint"
-            )
-            await self._emit_narration(lr_copy.LLM_UNAVAILABLE_NARRATION)
-            await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
-            return state
-
-        # 找 reframe op
-        reframe_ops = [
-            op for op in intent.operations if op.op_type == "reframe_structure"
-        ]
-        if not reframe_ops:
-            # Plan 2 Phase 4 (CEO 決策：reuse reframe parser 的 new_chapters 輸出)：
-            # LLM 沒 dispatch reframe_structure，但某 op 仍含 new_chapters 欄位 →
-            # extract 並寫進 state.format_specs["chapters"] 作 writer override fallback。
-            # 不 trigger reframe pipeline、不 mutate cm.topics — 純 writer 結構 hint。
-            extracted_chapters = _extract_chapters_from_ops(intent.operations)
-            if extracted_chapters:
-                state.format_specs["chapters"] = extracted_chapters
-                logger.info(
-                    f"[LIVE RESEARCH] Stage 4 reframe entry fallback: LLM 沒 dispatch "
-                    f"reframe_structure 但 op 帶 new_chapters，extract {len(extracted_chapters)} "
-                    f"章寫進 format_specs.chapters (writer override fallback)"
-                )
-                # 通知 user：結構已記下、writer 會 honor，但 cm.topics 沒動
-                names_preview = "、".join(c["name"] for c in extracted_chapters[:5])
-                if len(extracted_chapters) > 5:
-                    names_preview += "..."
-                await self._emit_narration(
-                    f"我記下你的 {len(extracted_chapters)} 章結構（{names_preview}），"
-                    "writer 階段會依此撰寫。請繼續告訴我格式偏好（字數、引用樣式、表格等）。"
-                )
-                await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
-                return state
-
-            logger.info(
-                f"[LIVE RESEARCH] Stage 4 reframe entry: LLM 沒解出 reframe_structure "
-                f"(action={intent.action}, ops={[o.op_type for o in intent.operations]}), "
-                f"fallback narration"
-            )
-            await self._emit_narration(
-                "我看到你提到結構，但細節不夠明確 — 整體要幾章、每章標題大概是什麼？"
-                "或者也可以只調格式偏好，結構不動。"
-            )
-            await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
-            return state
-
-        # 有 reframe op → emit detail-rich confirm proposal
-        if len(intent.operations) > 1:
-            logger.warning(
-                f"[LIVE RESEARCH] Stage 4 reframe entry: reframe + 其他 ops 共 "
-                f"{len(intent.operations)} 個，採第一個 reframe，其餘忽略"
-            )
-        return await self._emit_reframe_proposal(
-            state, reframe_ops[0], context_map, intent.summary, target_stage=4
-        )
-
     # ──── Stage 5: 分段輸出 ────────────────────────────────────
 
     def _resolve_chapter_source(
@@ -3383,6 +3729,84 @@ class LiveResearchOrchestrator(OrchestratorBase):
         core_topics = [t for t in context_map.topics if t.relevance == "core"]
         return core_topics, False
 
+    def _recollect_cap(self) -> int:
+        """同一 session recollect 次數上限（S5，default 2）。可由 features override。"""
+        return int(self.features.get("lr_recollect_cap", 2)) if getattr(self, "features", None) else 2
+
+    async def _dispatch_recollect(self, state: LiveResearchStageState) -> LiveResearchStageState:
+        """Stage 5 退回 analyst 補搜 → 重進 analyst→critic→writer→critic loop。
+
+        補搜引擎復用 BABLoopEngine.run_loop（Task2 SEARCH_REQUIRED cap 3 internal +
+        gap routing max_external 6），不新增無上限補搜路徑。保留的 evidence_pool 當 seed
+        傳進 _run_stage_1（pool + counter 同傳，防 ID 衝突），疊加新 evidence（S2）。
+
+        H（cap 並發 race）：count += 1 後、await _run_stage_1（30-60s）前先強制持久化，
+        防雙擊/重送/SSE reconnect 兩 request 都過 cap 檢查 → 雙倍燒錢。
+        I（半重置）：reset + count 在 try 內，_run_stage_1 失敗 → rollback 到入口 snapshot
+        + emit 明確 error checkpoint（非半重置 broken state）。
+        """
+        # cap 二次防護（confirm 路徑也檢查，防 pending 期間其他輪推進計數）
+        if state.recollect_count >= self._recollect_cap():
+            logger.info("[LIVE RESEARCH] _dispatch_recollect: capped, blocked")
+            await self._emit_narration(lr_copy.RECOLLECT_CAPPED_NARRATION)
+            state.set_checkpoint(lr_copy.RECOLLECT_CAPPED_NARRATION)
+            await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)
+            return state
+
+        # deserialize 研究問題 + 保留的 pool（當 seed）— 先取再 reset（reset 不動這兩個）
+        context_map = ContextMap.model_validate_json(state.context_map_json)
+        query = context_map.research_question
+        seed_pool = (
+            deserialize_evidence_pool(state.evidence_pool_json)
+            if state.evidence_pool_json else None
+        )
+        seed_counter = max(seed_pool.keys()) if seed_pool else 0
+
+        # I（Codex #7）：commit reset/count 前先 snapshot 入口 state（淺序列化）。
+        # _run_stage_1 失敗 → 用此 snapshot 還原，避免「章節已清 + count 已耗 + 補搜沒跑完」
+        # 的半重置破碎 state。最小版 rollback：用既有 to_dict/from_dict 對稱，不引入新
+        # state-snapshot 架構（見「待 CEO」段 I 的取捨說明 → 已採最小版）。
+        snapshot = state.to_dict()
+
+        state.recollect_count += 1
+        logger.info(
+            f"[LIVE RESEARCH] Stage 5 recollect dispatch "
+            f"(count={state.recollect_count}/{self._recollect_cap()})"
+        )
+        # 清過期下游 + 幽靈 guard + 推理產物，退回 Stage 1（保留 pool / context / 設定 / audit）
+        state.reset_for_recollect()
+
+        # H（Gemini #4 + Codex #4）：count+1 + reset 後、await 長跑 _run_stage_1 前
+        # 先強制持久化 checkpoint boundary。並發第二 request 重入時讀到已遞增的
+        # recollect_count → cap 檢查擋下 → 不雙倍燒錢。
+        await self._persist_checkpoint_boundary(state)
+
+        try:
+            # B1：seed pool + counter 同傳，engine 從 counter+1 起分配新 ID 疊加（不覆蓋既有）
+            return await self._run_stage_1(
+                state, query, [],
+                seed_evidence_pool=seed_pool, seed_counter=seed_counter,
+            )
+        except Exception as e:
+            # I：rollback 到入口 snapshot（還原章節 + count + 所有清掉的欄位），
+            # emit 明確 error checkpoint（不可 silent fail，不留半重置 broken state）。
+            logger.error(
+                f"[LIVE RESEARCH] _dispatch_recollect: _run_stage_1 failed, "
+                f"rolling back recollect reset: {type(e).__name__}: {e}"
+            )
+            restored = LiveResearchStageState.from_dict(snapshot)
+            # 就地覆寫 state 的所有欄位（caller 持有同一 state ref）
+            state.__dict__.update(restored.__dict__)
+            await self._emit_narration(
+                "重新蒐集資料時發生問題，已保留你原本的報告內容，沒有變動。"
+                "可以稍後再試，或繼續編輯目前的章節。"
+            )
+            state.set_checkpoint("目前所有段落已寫完。要修改哪個段落，或進入匯出？")
+            await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)
+            return state
+
     async def _run_stage_5(self, state: LiveResearchStageState) -> LiveResearchStageState:
         """Stage 5: Per-section 寫作（VP-7 反轉 — single-step per call）。
 
@@ -3403,6 +3827,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
         user 透過 checkpoint 選擇繼續/修改/匯出。停止按鈕與 stop flag 機制已移除
         （2026-06-04，placebo — writer_status="stopped" 從未真正 emit）。
         """
+        # online substantive advance → 重置離線計數（plan 3d）。
+        # 注意：Stage 5 離線 auto-advance（offline 寫下一段）時 online=False → 不 reset，
+        # cap 才能累積；只有重連後 online + 進來寫 = reset。
+        self._maybe_reset_offline_counters(state)
+
         # 只有第一次進入 Stage 5 才 advance；resume 路徑保留既有 stage_status
         if state.current_stage != 5:
             state.advance_to_stage(5)
@@ -3540,6 +3969,27 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     )
 
             state.book_outline_json = outline.model_dump_json()
+            # P2 W1（§0 #21，C2/C3）：evidence→章正向回填，涵蓋 LLM plan_outline +
+            # skeleton fallback 兩路匯流（此處 outline 是兩路同一變數）。不放在
+            # build_skeleton_outline（漏 LLM 主線 → prod 非 dry_run suggested_chapters 恆空）。
+            from reasoning.agents.outline_planner import (
+                invert_allocation_to_suggested_chapters,
+            )
+            _per_chapter = {
+                i: ch.planned_evidence_ids for i, ch in enumerate(outline.chapters)
+            }
+            _suggested_map = invert_allocation_to_suggested_chapters(_per_chapter)
+            if _evidence_pool_for_plan:
+                for _eid, _chapters in _suggested_map.items():
+                    _entry = _evidence_pool_for_plan.get(_eid)
+                    if _entry is not None:
+                        _entry.suggested_chapters = sorted(_chapters)
+                # SF4/R2-4：mutate 後 serialize 回 json，否則 hint 只在 in-memory，
+                # writer / revise / continue reload 時遺失。serialize 點 = 此處
+                # （outline stage 兩路匯流點），非 Stage 1/2 的 evidence serialize。
+                state.evidence_pool_json = serialize_evidence_pool(
+                    _evidence_pool_for_plan
+                )
             await self._persist_progress(state)
         # ────────────────────────────────────────────────────────────────────
         # Plan 2 Phase 3 (Option B-a): chapter override 模式下預先計算所有 evidence_ids
@@ -3587,17 +4037,26 @@ class LiveResearchOrchestrator(OrchestratorBase):
             state.set_checkpoint(proposal)
             state.stage5_waiting_for_user = True
             await self._emit_checkpoint(stage=5, proposal=proposal)
-            await self._persist_progress(state)
+            await self._persist_checkpoint_boundary(state)  # plan: persist + offline-count
             return state
 
-        # ── Hard disconnect check：在開寫前確認連線還在 ──
+        # ── 離線檢查（plan: lr-sse-reconnect-resume, 2026-06-15 改語意）──
+        # 舊行為「斷線就 abort return」與「斷線不取消、跑到 checkpoint 才停」矛盾 → 移除。
+        # 新行為：離線時 mark offline_since + 檢查防呆上限；未達上限 → 繼續寫這一段
+        #（寫完到 per-section checkpoint 才停存檔）；已達上限 → 標 capped、persist、停。
         alive = getattr(self.handler, 'connection_alive_event', None)
-        if alive is not None and not alive.is_set():
-            logger.info(
-                f"[LIVE RESEARCH] Stage 5 disconnect before section i={next_i}, aborting"
-            )
-            # 不 emit、不 set checkpoint，保留 state 給 resume
-            return state
+        offline = alive is not None and not alive.is_set()
+        if offline:
+            self._mark_offline_since(state)
+            if self._offline_cap_reached(state):
+                logger.warning(
+                    f"[LIVE RESEARCH] Offline cap reached at Stage 5 section i={next_i}; "
+                    f"stopping LR (reason={state.offline_cap_reason})"
+                )
+                state.offline_capped = True
+                await self._persist_progress(state)
+                return state
+        # 未達上限（或仍在線）→ 照常寫這一段
 
         # Parse book_outline + 初始化 prev_summary（Plan 4 Phase 3）
         # Resume 路徑：從 written_sections[-1] 復原 prev_summary
@@ -3701,7 +4160,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             state.last_completed_section_index = next_i
 
             # 推送 section 到前端
-            await self._emit_section(next_i, section_output)
+            await self._emit_section(next_i, section_output, state)
 
             await self._emit_writer_status({
                 "status": "section_done",
@@ -3734,7 +4193,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             state.set_checkpoint(_retry_proposal)
             state.stage5_waiting_for_user = True
             await self._emit_checkpoint(stage=5, proposal=_retry_proposal)
-            await self._persist_progress(state)
+            await self._persist_checkpoint_boundary(state)  # plan: persist + offline-count
             return state
 
         except asyncio.CancelledError:
@@ -3776,7 +4235,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         state.set_checkpoint(proposal)
         state.stage5_waiting_for_user = True
         await self._emit_checkpoint(stage=5, proposal=proposal)
-        await self._persist_progress(state)
+        await self._persist_checkpoint_boundary(state)  # plan: persist + offline-count
         return state
 
     async def _persist_progress(self, state: LiveResearchStageState) -> None:
@@ -3795,6 +4254,99 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 exc_info=True,
             )
             raise
+
+    # ──── 離線防呆燒錢上限 helpers（plan: lr-sse-reconnect-resume, 2026-06-15）────
+
+    def _mark_offline_since(self, state: LiveResearchStageState) -> None:
+        """首次偵測離線時，把 offline 起點寫進 state（跨 instance 持久化，防重連歸零）。
+
+        state.offline_since 已有值就不覆寫（重連仍離線時保留原始起點）。
+        """
+        if getattr(state, "offline_since", None) is None:
+            since = getattr(self.handler, "_client_offline_since", None)
+            state.offline_since = since if since is not None else time.time()
+
+    def _offline_cap_reached(self, state: LiveResearchStageState) -> bool:
+        """離線後是否已達任一防呆上限。只在 connection_alive_event 已 clear 時被呼叫。
+
+        上限狀態讀自 state（DB 持久化），不讀 orchestrator instance counter
+        （CEO 拍板：instance counter 重連歸零防不住「斷→連→斷→連」燒錢）。
+        config 用扁平 key（對齊既有 analyst_timeout 慣例），非巢狀 live_research dict。
+        """
+        # wall-clock：自 state.offline_since 起算
+        since = getattr(state, "offline_since", None)
+        if since is not None:
+            elapsed = time.time() - since
+            if elapsed >= CONFIG.reasoning_params.get("offline_max_wall_seconds", 900):
+                state.offline_cap_reason = "wall_seconds"
+                return True
+        # 跨 checkpoint 上限：離線後已前進的 checkpoint 數（進 state）
+        advances = getattr(state, "offline_checkpoint_advances", 0)
+        if advances >= CONFIG.reasoning_params.get("offline_max_checkpoint_advances", 1):
+            state.offline_cap_reason = "next_checkpoint"
+            return True
+        return False
+
+    def _maybe_reset_offline_counters(self, state: LiveResearchStageState) -> None:
+        """重置離線計數 — 只在「已通過 intent validation、確定推進 workflow 的 reply」之後。
+
+        正確條件（plan 3d + R3-verify nit）= 兩者皆成立：
+        1. **substantive advance 確認**：呼叫此 helper 的位置是 `_run_stage_N` 真正往前跑
+           stage 的進入點（vague / invalid / abort reply 不會到 `_run_stage_N`，只 set
+           checkpoint 後從 `_handle_stage_N_response` return）→ 到這裡 = 確定推進。
+        2. **client 在線**：離線中的 auto-advance（如 offline 跑到 _run_stage_5 寫下一段）
+           **絕不** reset，否則 cap 永遠歸零、防呆失效。只有重連後送 substantive reply
+           （online）才 reset。
+
+        read-only reconnect（無 POST /continue）不會進 orchestrator → 自然不 reset。
+        """
+        alive = getattr(self.handler, "connection_alive_event", None)
+        online = alive is None or alive.is_set()
+        if not online:
+            return  # 離線 auto-advance 不 reset（保住 cap）
+        if (state.offline_since is not None
+                or state.offline_capped
+                or state.offline_checkpoint_advances):
+            logger.info(
+                "[LIVE RESEARCH] Online substantive advance — resetting offline counters "
+                f"(was advances={state.offline_checkpoint_advances}, "
+                f"capped={state.offline_capped})"
+            )
+        state.offline_since = None
+        state.offline_capped = False
+        state.offline_cap_reason = ""
+        state.offline_checkpoint_advances = 0
+
+    async def _persist_checkpoint_boundary(self, state: LiveResearchStageState) -> None:
+        """每個 durable boundary（set_checkpoint / complete_stage）return 前統一呼叫。
+
+        職責（plan Task 2 + 3d）：
+        1. 離線時：mark offline_since + 跨 checkpoint 計數（off-by-one 順序寫死：
+           increment → 立刻判 capped → 才 persist），per-call guard 確保一次 continue
+           只 +1（即使同一 call 穿越多個 boundary）。
+        2. persist state（idempotent：重複呼叫覆寫同 row；連線正常時也存，等同既有行為）。
+        """
+        alive = getattr(self.handler, "connection_alive_event", None)
+        offline = alive is not None and not alive.is_set()
+        if offline:
+            self._mark_offline_since(state)
+            # 順序寫死（Codex off-by-one）：先 increment、再立刻判上限並標 capped、最後才 persist。
+            # per-call guard：一次 continue call 只計一次（同 call 多 boundary 不重複加）。
+            if not self._offline_advance_counted_this_call:
+                state.offline_checkpoint_advances = (
+                    getattr(state, "offline_checkpoint_advances", 0) + 1
+                )
+                self._offline_advance_counted_this_call = True
+                _max = CONFIG.reasoning_params.get("offline_max_checkpoint_advances", 1)
+                if state.offline_checkpoint_advances >= _max:
+                    state.offline_capped = True
+                    state.offline_cap_reason = "next_checkpoint"
+                    logger.warning(
+                        f"[LIVE RESEARCH] Offline cap reached (next_checkpoint): "
+                        f"advances={state.offline_checkpoint_advances} >= max={_max}; "
+                        f"LR paused for offline protection (stage={state.current_stage})"
+                    )
+        await self._persist_progress(state)
 
     async def _emit_writer_status(self, payload: dict) -> None:
         """Emit `live_research_writer_status` SSE event.
@@ -3815,6 +4367,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         analyst_citations: List[int],
         current_chapter_index: int,
         reason: str,
+        evidence_pool: Optional[Dict[int, Any]] = None,   # P2 W7 I1（§0 #23）：全 pool 合法集
     ) -> Any:
         """R1 fail-closed：grounding 判讀 LLM 不可用（exception / 爆窗 / 無法解析）時的
         DR 式退化。**正文一字不改**（不知哪句有問題，不可亂刪）+ confidence 降 Low +
@@ -3834,9 +4387,13 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if not self._grounding_unavailable_narrated:
             self._grounding_unavailable_narrated = True
             await self._emit_narration(lr_copy.GROUNDING_UNAVAILABLE_NARRATION)
+        # P2 W7 I1（§0 #23）：退化時保留全 pool 合法引用（非只 analyst_citations 交集），
+        # 否則砍掉 pool 內 analyst_citations 外的合法引用 → 線上偶發引用流失。
+        # 0（{cite:0} placeholder）一律視為合法（與 W8 allowed ∪ {0} 對齊）。
+        _allowed_sources = set((evidence_pool or {}).keys()) | set(analyst_citations or []) | {0}
         _kept_sources = [
             s for s in (section_output.sources_used or [])
-            if s in set(analyst_citations or [])
+            if s in _allowed_sources
         ]
         _existing = section_output.methodology_note or ""
         _note = lr_copy.GROUNDING_UNAVAILABLE_NOTE
@@ -3873,6 +4430,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         current_chapter_index: int,
         label: str,
         grounded_entities: Optional[List[str]] = None,
+        evidence_pool: Optional[Dict[int, Any]] = None,   # P2 W7 I1（§0 #24）：全 pool 合法集
     ) -> Tuple[Any, bool]:
         """Fix 2 (CEO 決策④): 主路徑 (b) sentence-level partial block（只刪「純未驗證句」，
         保留其餘有據 prose）。當刪句會刪掉過多／不安全時，退化路徑 (a) 採 DR 做法——
@@ -3927,10 +4485,14 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 f"citation_loss={_citation_loss_ratio:.2f}, ungrounded={ungrounded}）"
                 f"→ 退化路徑 (a)：保留正文、降 Low、methodology 標註。"
             )
-            # sources_used 取與 analyst_citations 交集，移除 invalid 引用（DR 做法）
+            # P2 W7 I1（§0 #24）：sources_used 取與「全 pool 合法集」交集（非只
+            # analyst_citations），移除 invalid 引用但保留 pool 內合法引用。0 placeholder 視為合法。
+            _allowed_sources = (
+                set((evidence_pool or {}).keys()) | set(analyst_citations or []) | {0}
+            )
             _kept_sources = [
                 s for s in (section_output.sources_used or [])
-                if s in set(analyst_citations or [])
+                if s in _allowed_sources
             ]
             _existing = section_output.methodology_note or ""
             _degrade_note = lr_copy.degraded_low_confidence_note(ungrounded)
@@ -4316,12 +4878,19 @@ class LiveResearchOrchestrator(OrchestratorBase):
             section_title = topic.name
             section_outline = topic.description
             section_topic_id = topic.topic_id
+            # P2 W2：topic.evidence_ids 只是初值；下游 W3 全 pool evidence_lookup 蓋過
+            # writer 可見集，此 list 退居優先 tier 排序提示，非白名單邊界。
             analyst_citations = list(topic.evidence_ids) if topic.evidence_ids else []
 
         # Plan 4 Phase 3: 升級 analyst_citations — 若有 book_outline，改用
         # ChapterPlan.planned_evidence_ids（LLM-assisted allocation），通過 valid_ids
         # 白名單過濾。Skeleton fallback 的 build_skeleton_outline 已把 union-to-first
         # 邏輯 encode 進 planned_evidence_ids，故兩種模式統一行為（CEO 拍板項 #7）。
+        #
+        # P2 全局 evidence 模型（W2）：此 list **不再是 writer 可見集的「白名單邊界」**
+        # （evidence_lookup 已改全 pool，見 W3）。改作「writer 視圖的優先 tier 提示」餵
+        # render_grounding_evidence_view / writer prompt（W5/W6）決定排序與 budget 內誰先進。
+        # strip/cap 演算法不變（仍產正確 priority tier），只是消費語意改。
         if book_outline is not None and 0 <= current_chapter_index < len(book_outline.chapters):
             planned = book_outline.chapters[current_chapter_index].planned_evidence_ids
             if planned:
@@ -4361,23 +4930,19 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 )
 
         # ────────────────────────────────────────────────────────────────────
-        # 模塊5 Task 5: per-chapter evidence 充分度（calibration 通道 B）。
-        # 用本章 cap 後的 analyst_citations 量判斷；與 specificity_check 互斥分工。
-        # intro/conclusion 章不施加（與 specificity_check 的 _is_intro_or_conclusion 排除對齊）。
+        # 模塊5 Task 5 / P2 W9（SF1）: per-chapter evidence 充分度（calibration 通道 B）。
+        # 改用「全 pool 有料量」判（_compute_chapter_sufficiency），非 analyst_citations 量
+        # —— 全局模型下 writer 讀全 pool，analyst_citations 空 ≠ 沒 evidence。
+        # 與 specificity_check 互斥分工；intro/conclusion 章不施加。
         # ────────────────────────────────────────────────────────────────────
-        EVIDENCE_THIN_CHAPTER_CITATIONS = 2  # <= 此值 → thin；可調
-        if len(analyst_citations) == 0:
-            chapter_sufficiency = "critical"
-        elif len(analyst_citations) <= EVIDENCE_THIN_CHAPTER_CITATIONS:
-            chapter_sufficiency = "thin"
-        else:
-            chapter_sufficiency = "ok"
+        chapter_sufficiency = _compute_chapter_sufficiency(analyst_citations, evidence_pool)
         # intro/conclusion 章不做 calibration（這些章本就偏綜述，不該被叫保守也不被逼具體）
         if book_outline is not None and _is_intro_or_conclusion(book_outline, current_chapter_index):
             chapter_sufficiency = "ok"
         logger.info(
             f"[LIVE RESEARCH] chapter {current_chapter_index} sufficiency="
-            f"{chapter_sufficiency} (citations={len(analyst_citations)})"
+            f"{chapter_sufficiency} (pool={len(evidence_pool or {})}, "
+            f"citations={len(analyst_citations)})"
         )
         # FIX-5: 四個 compose_section callsite 共用的背景透傳參數（time_constraint /
         # evidence_sufficiency / knowledge_graph），單一來源避免漏帶即靜默退化。
@@ -4398,10 +4963,21 @@ class LiveResearchOrchestrator(OrchestratorBase):
         # 紅隊 #2 (LLM 把 body 標 intro 想繞 gate): _is_intro_or_conclusion runtime
         # double-check role + idx 雙重一致才回 True。
         # ────────────────────────────────────────────────────────────────────
+        # P2 W10：入口 gate 改判。
+        # - book_outline 有（真正的全局 evidence 模型 path）：只擋「pool 完全空」（render 前能判的）。
+        #   全局模型下 analyst_citations 空 ≠ 沒料（writer 讀全 pool），故不能再用它當 gate 條件；
+        #   「有 source 但 render 後實質空」交 post-render gate（下方）。
+        # - book_outline=None 純 legacy path（union-to-first，無 evidence_pool dict 但有
+        #   all_evidence_ids）：保留既有 `not analyst_citations` 語意（idx>0 空 union → 擋；
+        #   idx=0 union 非空 → 不擋），對齊 test_..._uses_union_evidence_ids。
+        # R2-3：保留 _is_intro_or_conclusion guard — intro/conclusion 本就可無 evidence，不誤擋。
+        _entry_gate_no_evidence = (
+            (not evidence_pool) if book_outline is not None else (not analyst_citations)
+        )
         if (
             is_chapter_override
             and not _is_intro_or_conclusion(book_outline, current_chapter_index)
-            and not analyst_citations
+            and _entry_gate_no_evidence
         ):
             chapter_title_gate = (
                 book_outline.chapters[current_chapter_index].title
@@ -4417,9 +4993,9 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 status="blocked_no_evidence",
             )
             logger.warning(
-                f"[LIVE RESEARCH] C-1 gate: body chapter {current_chapter_index} "
-                f"({chapter_title_gate!r}) has empty analyst_citations — "
-                "returning BlockedSection without calling writer LLM"
+                f"[LIVE RESEARCH] C-1 入口 gate: evidence_pool 全空 — chapter "
+                f"{current_chapter_index} ({chapter_title_gate!r}) BlockedSection "
+                "（真零 evidence，明確擋，不呼叫 writer LLM）"
             )
             return blocked, False
 
@@ -4470,18 +5046,25 @@ class LiveResearchOrchestrator(OrchestratorBase):
         # path; 入口 gate 已用 analyst_citations 攔過 body chapter empty, 此處
         # render 後 gate 只在「state+book_outline 都有, 但 render 仍空」時觸發)。
         rendered_via_state = False
+        writer_evidence_view = None  # P2 W5：全 pool grounding 視圖（chapter_override 分支內組）
         if is_chapter_override:
             if state is not None and book_outline is not None:
-                from reasoning.schemas_live import render_grounded_narrative
-                chapter_eids = (
+                from reasoning.schemas_live import (
+                    render_grounded_narrative, GROUNDING_VIEW_CHAR_BUDGET,
+                )
+                # P2 W4：narrative 走全 pool（對齊 W3/W5），不再逐章 planned。
+                # 本章 planned 當排序提示（priority_eids），不當過濾邊界。
+                _planned_here = (
                     book_outline.chapters[current_chapter_index].planned_evidence_ids
                     if 0 <= current_chapter_index < len(book_outline.chapters)
                     else []
                 )
                 relevant_findings = render_grounded_narrative(
-                    chapter_eids=chapter_eids,
+                    chapter_eids=list((evidence_pool or {}).keys()),  # 全 pool
                     evidence_usage=state.evidence_usage,
                     evidence_pool=evidence_pool or {},
+                    priority_eids=_planned_here,                       # 軟排序提示
+                    char_budget=GROUNDING_VIEW_CHAR_BUDGET,
                 )
                 rendered_via_state = True
             else:
@@ -4496,6 +5079,29 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     "C-1 gate already blocks body chapters with empty analyst_citations)."
                 )
                 relevant_findings = ""
+
+            # P2 W5（I2）：組 writer 全 pool grounding 視圖（對齊 Critic 範本）。
+            # 組裝點在 narrative render（W4）之後、post-render gate（W10）之前 →
+            # gate 讀得到同一變數、無 NameError。view 只需 evidence_pool（此處作用域已有），
+            # 不需 evidence_lookup（下方才產生）。analyst_citations 當優先 tier、
+            # suggested_chapters 含本章升 tier（current_chapter_index）。
+            from reasoning.schemas_live import (
+                render_grounding_evidence_view as _render_writer_view,
+                GROUNDING_VIEW_CHAR_BUDGET as _WRITER_VIEW_BUDGET,
+            )
+            # §3：12000 起點，可獨立 tune（現先別名同值）
+            WRITER_GROUNDING_VIEW_CHAR_BUDGET = _WRITER_VIEW_BUDGET
+            writer_evidence_view = _render_writer_view(
+                chapter_eids=list((evidence_pool or {}).keys()),          # 全 pool
+                evidence_usage=(
+                    getattr(state, "evidence_usage", {}) if state is not None else {}
+                ),
+                evidence_pool=evidence_pool or {},
+                prior_grounded_entities=prior_used_entities or [],         # _write_section 參數
+                analyst_citations=analyst_citations,                       # 優先 tier
+                char_budget=WRITER_GROUNDING_VIEW_CHAR_BUDGET,
+                current_chapter_index=current_chapter_index,               # suggested_chapters 軟排序
+            )
 
             # 第二層 gate (R1 reviewer I-1 fix, sprint 2026-05-28):
             # 「is_chapter_override + book_outline 有 + body chapter + relevant_findings 空」
@@ -4516,10 +5122,18 @@ class LiveResearchOrchestrator(OrchestratorBase):
             # test_write_section_chapter_override_first_index_uses_union_evidence_ids:
             # state=None + book_outline=None + idx=0 → analyst_citations=union → 入口 gate 不 fire
             # → writer 被叫 (legacy 行為保留)。
+            # P2 W10（R1）：relevant_findings 空 ≠ pool 空。render_grounded_narrative 只渲
+            # 有 grounded claim 的 entry；raw pool 可能有 snippet 但還沒 claim → narrative 空但
+            # writer 仍可用 grounding view（snippet）寫。故只在「全 pool grounding view + narrative
+            # 都實質空」才擋（全 REJECT / 真零料）。移除綜合章特例（全局視圖綜合章本就讀得到
+            # 前文 evidence）；R2-3 保留 intro/conclusion guard。明確 log（不可 silent fail）。
+            writer_view_empty = not (writer_evidence_view or "").strip()   # W5 全 pool snippet 視圖
+            narrative_empty = not (relevant_findings or "").strip()
             if (
                 book_outline is not None
                 and not _is_intro_or_conclusion(book_outline, current_chapter_index)
-                and not (relevant_findings or "").strip()
+                and writer_view_empty
+                and narrative_empty
             ):
                 chapter_title_post = (
                     book_outline.chapters[current_chapter_index].title
@@ -4533,24 +5147,20 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     status="blocked_no_evidence",
                 )
                 logger.warning(
-                    f"[LIVE RESEARCH] C-1 gate (post-render): body chapter "
-                    f"{current_chapter_index} ({chapter_title_post!r}) "
-                    f"analyst_citations={analyst_citations} but "
-                    f"render_grounded_narrative returned empty — returning BlockedSection"
+                    f"[LIVE RESEARCH] C-1 post-render gate: 全 pool grounding view + "
+                    f"narrative 都實質空 — chapter {current_chapter_index} "
+                    f"({chapter_title_post!r}) BlockedSection（真沒料，明確擋）"
                 )
                 return blocked, False
+            # narrative 空但 grounding view 非空 → 不擋（writer 用 snippet 寫，raw pool 有料只是還沒 claim）
         else:
             relevant_findings = context_map_extract_for_section(context_map, [section_topic_id])
 
-        # evidence_lookup：從 evidence_pool 抽出本 section 引用的子集（解決 phantom citation）
-        # phantom ID（topic 引用了 pool 沒有的 ID）會被 filter 掉，不塞 None entry
-        evidence_lookup = None
-        if evidence_pool:
-            evidence_lookup = {
-                eid: evidence_pool[eid]
-                for eid in analyst_citations
-                if eid in evidence_pool
-            }
+        # P2 全局 evidence 模型（W3）：writer 讀全 pool（與 Critic 對齊）。
+        # analyst_citations / suggested_chapters 僅當排序提示（W5/W6），非白名單。
+        # phantom 不可能存在（直接從 pool 取）；evidence_pool None/空 → None，
+        # 交 W10 gate 明確擋並 log（不在此 silent 放行）。
+        evidence_lookup = dict(evidence_pool) if evidence_pool else None
 
         # format_spec：從 format_specs dict 組合為字串
         format_spec = None
@@ -4615,6 +5225,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 context_map_summary=summary,
                 citation_format=citation_format,
                 evidence_lookup=evidence_lookup,
+                writer_evidence_view=writer_evidence_view,  # P2 W7：全 pool 視圖
                 is_chapter_override=is_chapter_override,
                 book_outline=book_outline,
                 current_chapter_index=current_chapter_index,
@@ -4692,6 +5303,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     analyst_citations=analyst_citations,
                     current_chapter_index=current_chapter_index,
                     reason=str(_gce),
+                    evidence_pool=evidence_pool,   # P2 W7 I1：全 pool 合法集
                 )
                 ungrounded = []      # 已退化處理；不再進 rewrite / partial block
                 was_corrected = True
@@ -4724,6 +5336,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     context_map_summary=summary,
                     citation_format=citation_format,
                     evidence_lookup=evidence_lookup,
+                    writer_evidence_view=writer_evidence_view,  # P2 W7：全 pool 視圖
                     is_chapter_override=is_chapter_override,
                     book_outline=book_outline,
                     current_chapter_index=current_chapter_index,
@@ -4766,6 +5379,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                         analyst_citations=analyst_citations,
                         current_chapter_index=current_chapter_index,
                         reason=str(_gce2),
+                        evidence_pool=evidence_pool,   # P2 W7 I1：全 pool 合法集
                     )
                     remaining = []   # 已退化處理；不再進 partial block
                     was_corrected = True
@@ -4794,6 +5408,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                         current_chapter_index=current_chapter_index,
                         label="entity-guard rewrite",
                         grounded_entities=_verified_for_section,
+                        evidence_pool=evidence_pool,   # P2 W7 I1：全 pool 合法集
                     )
                     was_corrected = True
 
@@ -4847,6 +5462,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                         context_map_summary=summary,
                         citation_format=citation_format,
                         evidence_lookup=evidence_lookup,
+                        writer_evidence_view=writer_evidence_view,  # P2 W7：全 pool 視圖
                         is_chapter_override=is_chapter_override,
                         book_outline=book_outline,
                         current_chapter_index=current_chapter_index,
@@ -4891,6 +5507,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                             analyst_citations=analyst_citations,
                             current_chapter_index=current_chapter_index,
                             reason=str(_gce3),
+                            evidence_pool=evidence_pool,   # P2 W7 I1：全 pool 合法集
                         )
                         _spec_ungrounded = []   # 已退化處理；不再進 partial block
                         was_corrected = True
@@ -4909,6 +5526,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                             current_chapter_index=current_chapter_index,
                             label="specificity rewrite",
                             grounded_entities=(prior_used_entities or []),  # R3 句子分類
+                            evidence_pool=evidence_pool,   # P2 W7 I1：全 pool 合法集
                         )
                         was_corrected = True
                         _composed_entities = []
@@ -4959,6 +5577,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                         context_map_summary=summary,
                         citation_format=citation_format,
                         evidence_lookup=evidence_lookup,
+                        writer_evidence_view=writer_evidence_view,  # P2 W7：全 pool 視圖
                         is_chapter_override=is_chapter_override,
                         book_outline=book_outline,
                         current_chapter_index=current_chapter_index,
@@ -5019,6 +5638,16 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if _f_was_corrected:
             was_corrected = True
 
+        # (a) 字數軟提示（lr-chapter-word-budget plan）：章節定稿後（所有 guard /
+        # publish gate mutate 完）、citation render 之前計算字數，超標只發旁白透明化，
+        # 不觸發重寫（排除 b）。content 此時仍是 {cite:N}，_count_chapter_words 剝除後算。
+        await self._maybe_narrate_word_overshoot(
+            chapter_title=section_output.section_title or section_title,
+            target=self._chapter_target_words(book_outline, current_chapter_index),
+            actual=_count_chapter_words(section_output.section_content),
+            status=getattr(section_output, "status", "drafted"),
+        )
+
         # TypeAgent Target 3 (2026-05-19, CEO 拍板 OQ-5): typed citations render
         # 在 guard 之後跑（guard 已過濾 phantom citations / sources_used），
         # 用 evidence_lookup 真實 author/year metadata 統一 render `{cite:N}` placeholder。
@@ -5033,6 +5662,44 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 section_output, evidence_lookup, citation_format,
             )
         return section_output, was_corrected
+
+    # 字數超標閾值（lr-chapter-word-budget plan 設計細節 2）：
+    # 實際 > target * 1.3（超標 30%）才發提示【初值，可調】。原 prompt 勸告 ±15%；
+    # a 是「明顯超標才透明化」的通道，用 1.15 會在正常波動就洗訊息。
+    _WORD_OVERSHOOT_RATIO = 1.3
+
+    @staticmethod
+    def _chapter_target_words(book_outline, current_chapter_index: int) -> int:
+        """從 book_outline 取本章規劃字數（0 = 未指定）。"""
+        if book_outline is None:
+            return 0
+        chapters = getattr(book_outline, "chapters", None) or []
+        if not (0 <= current_chapter_index < len(chapters)):
+            return 0
+        return getattr(chapters[current_chapter_index], "target_word_count", 0) or 0
+
+    async def _maybe_narrate_word_overshoot(
+        self, *, chapter_title: str, target: int, actual: int, status: str,
+    ) -> None:
+        """(a) 軟提示：章節實際字數明顯超出規劃時，發一則 user-facing 旁白透明化。
+
+        純讀觀測：**不**重寫、**不** mutate section、**不**改 was_corrected（排除 b）。
+        - target <= 0（未指定字數）→ 跳過。
+        - status != "drafted"（被 block / critic_rejected / guard_failed，content 已是
+          替換文）→ 跳過（替換文字數無意義）。
+        - 每個超標章各發一則（不 per-run dedup）：各章超多少不同，逐章發資訊才完整。
+        """
+        if target <= 0 or status != "drafted":
+            return
+        if actual <= target * self._WORD_OVERSHOOT_RATIO:
+            return
+        logger.info(
+            f"[LIVE RESEARCH] Chapter word overshoot: {chapter_title!r} "
+            f"target={target} actual={actual} (ratio={actual / max(target, 1):.2f})"
+        )
+        await self._emit_narration(
+            lr_copy.chapter_word_overshoot_narration(chapter_title, target, actual)
+        )
 
     def _stage5_remaining_count(self, state) -> int:
         """回傳還有幾段沒寫完（0 = 全寫完）。
@@ -5057,6 +5724,63 @@ class LiveResearchOrchestrator(OrchestratorBase):
         4. LLM intent parse：revise_section / continue_writing / done / structure_change
            （done 含 completeness gate：未寫完不匯出、停 checkpoint 問釐清 — #11B 對齊）
         """
+        # S1 四段式 confirm（A/B/K + K Round 4，3方共識 + in-house R3 終驗）：上一輪已 emit
+        # recollect consent prompt，這輪 user 回答。分四段路由，避免 v1「非確認詞一律當取消」
+        # 吞掉 substantive 訴求，並修 K Round 4「無 token 自然肯定句漏接 → 二次 consent loop」。
+        # M-1（已知低風險邊界）：此攔截在 auto_continue 分支**之前**，但條件含
+        # `user_message.strip()` —— auto_continue / 離線 auto-advance 通常無 user 文字
+        # （空訊息）→ 不會誤觸此攔截、pending flag 保留到下次真 user 回覆。極端情況
+        # （pending=True 期間恰有非空 auto 訊息）才可能脫節，機率低且最壞結果是多問一次
+        # consent（非刪錯章節）→ 標為已知低風險，不額外加 guard（避免過度工程）。
+        if getattr(state, "pending_recollect_confirmation", False) and user_message.strip():
+            msg_norm = user_message.strip()
+            # 一律先清旗標：無論走哪段，這輪都已消費此 consent（避免殘留下輪誤攔）。
+            state.pending_recollect_confirmation = False
+            if _looks_like_recollect_confirm(msg_norm):
+                # 段1：含確認 token 的 bounded affirmative（「確認」「OK。」「好，開始吧」）
+                # → 直接執行補搜（不打 LLM，省成本）。快路徑，明確確認詞即命中。
+                logger.info("[LIVE RESEARCH] Stage 5: recollect confirmed by user (token)")
+                return await self._dispatch_recollect(state)
+            # 段2：未含確認 token 的訊息 → 先打既有 abort 分類器。abort 必須**先於**
+            # 段3 的「無 token 短肯定兜底」判定 —— 否則「算了」（短、無修改 marker、無 token）
+            # 會被段3 誤當 confirm 觸發不可逆刪章。abort 優先級最高（誤判代價最高）。
+            meta = await _classify_meta_intent(user_message, self.handler)
+            if meta == META_INTENT_ABORT:
+                # 明確取消（「算了/取消/不要了」）→ 回常規 Stage 5 checkpoint，不刪章節。
+                logger.info("[LIVE RESEARCH] Stage 5: recollect cancelled by user (abort)")
+                await self._emit_narration(lr_copy.RECOLLECT_CANCELLED_NARRATION)
+                state.set_checkpoint("目前所有段落已寫完。要修改哪個段落，或進入匯出？")
+                await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+                await self._persist_checkpoint_boundary(state)
+                return state
+            # 段3（K Round 4，in-house R3 終驗修）：非 abort、且**無修改 marker 的短肯定句**
+            # → 視為確認，執行補搜。這一段**不依賴確認 token 白名單** —— 解決「好，那就重新
+            # 蒐集吧」「是的」「行」「成」這類**無 token 自然肯定句**漏接落 substantive →
+            # _parse_revision_intent 因含「重新蒐集」重 parse 成 recollect → recollect 分支
+            # 再設 pending + 再 emit consent = **二次 consent loop**（user 已確認卻被再問）。
+            #
+            # 為何不靠 _classify_meta_intent 判「肯定」：親驗 _classify_meta_intent（orchestrator.py
+            # :320，2026-06-16）只有 3 個 category（SKIP / ABORT / SUBSTANTIVE），**無 affirmative
+            # 類**。「好，那就重新蒐集吧」會被它判 substantive（非 abort、非 skip）→ 無法用它
+            # 區分「確認」vs「實質訴求」。故改用語意上界：**在 consent gate 內**（剛被問
+            # 「確認要重新蒐集嗎？」），非 abort 的「無修改 marker 短句」語意明確就是確認。
+            #
+            # B 原罪防護仍在：含修改名詞 marker（段/章/改/加/經濟…）→ 不走此兜底，落段4
+            # substantive fall through（「改第3段」「資料還是不夠，連經濟面也查」不會誤觸刪章）。
+            if _looks_like_bounded_affirmative_shape(msg_norm):
+                logger.info(
+                    "[LIVE RESEARCH] Stage 5: recollect confirmed by user "
+                    f"(bounded affirmative shape, no token, meta={meta})"
+                )
+                return await self._dispatch_recollect(state)
+            # 段4：其餘 substantive（如「改第3段」「再多查經濟面」「資料不夠連政治面也查」）
+            # → 不 return，fall through 到下方既有 dispatch（_parse_revision_intent 正常路由）。
+            # 「不漏使用者任何一句話」鐵律：consent round 的 substantive 回覆不可被吞。
+            logger.info(
+                "[LIVE RESEARCH] Stage 5: pending-confirm got substantive reply "
+                f"(meta={meta}) — fall through to normal dispatch"
+            )
+
         if auto_continue or not user_message.strip():
             # mock_bab E2E fix (2026-05-29): 「讀豹決定」/auto_continue 不可在未寫完時
             # 匯出。total 來源 = _resolve_chapter_source (與 _run_stage_5 同源)；
@@ -5075,6 +5799,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 return await self._run_stage_5(state)
             logger.info("[LIVE RESEARCH] Stage 5: all sections written, proceed to export")
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         # Bug #14 root fix：shortcut 改「正規化後整句完全匹配白名單」取代 substring + veto
@@ -5097,9 +5822,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 await self._emit_narration(narration)
                 state.set_checkpoint(narration)
                 await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state
             # 全寫完 → 維持現狀，直接進 Stage 6
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         # VP-7 Phase 3：continue keyword shortcut — 整句完全等於 continue 動詞 → 直接寫下一段
@@ -5123,6 +5850,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             await self._emit_narration(lr_copy.LLM_UNAVAILABLE_NARRATION)
             state.set_checkpoint("系統暫時無法處理，請告訴我要繼續寫、還是修改某段。")
             await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
         if meta == META_INTENT_ABORT:
             logger.info("[LIVE RESEARCH] Stage 5: abort/done-ish intent — NOT silent-exporting, ask confirm")
@@ -5145,6 +5873,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             await self._emit_narration(abort_prompt)
             state.set_checkpoint(abort_prompt)
             await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state  # 停原地，絕不靜默匯出；接受/繼續編輯由下一輪 reply 決定
         if meta == META_INTENT_SKIP:
             # Stage 5 沒有 Stage 3 的「用預設」下游動作（Stage 3 見 META_INTENT_SKIP→use default）。
@@ -5171,6 +5900,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             await self._emit_narration(skip_prompt)
             state.set_checkpoint(skip_prompt)
             await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state  # 停原地，等 user 下一輪明確意圖
         # 註：「接受」加入 _EXPORT_SHORTCUT_KEYWORDS（見下方）→ 下一輪「接受」
         #     走 export frozenset shortcut 直接匯出；「繼續編輯」fall through 到 revise。
@@ -5194,6 +5924,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 "目前所有段落已寫完。要修改哪個段落，或進入匯出？"
             )
             await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
         if not revision_intent.get("action"):
             logger.warning("[LIVE RESEARCH] Stage 5 intent parse: no action (vague), stay at checkpoint")
@@ -5205,9 +5936,31 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 "目前所有段落已寫完。要修改哪個段落，或進入匯出？"
             )
             await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         action = revision_intent.get("action", "done")
+
+        if action == "recollect":
+            logger.info("[LIVE RESEARCH] Stage 5: recollect intent — emit consent checkpoint")
+            # cap 預檢：已達上限直接 block（不進 consent），明確告知（非 silent）。
+            if state.recollect_count >= self._recollect_cap():
+                logger.info(
+                    f"[LIVE RESEARCH] Stage 5: recollect capped "
+                    f"(count={state.recollect_count}), blocked"
+                )
+                await self._emit_narration(lr_copy.RECOLLECT_CAPPED_NARRATION)
+                state.set_checkpoint(lr_copy.RECOLLECT_CAPPED_NARRATION)
+                await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+                await self._persist_checkpoint_boundary(state)
+                return state
+            # 未達 cap：S1 informed consent — emit consent prompt，設旗標等下一輪確認。
+            state.pending_recollect_confirmation = True
+            await self._emit_narration(lr_copy.RECOLLECT_CONSENT_PROMPT)
+            state.set_checkpoint(lr_copy.RECOLLECT_CONSENT_PROMPT)
+            await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)
+            return state
 
         if action == "structure_change":
             logger.info("[LIVE RESEARCH] Stage 5: structure_change redirect")
@@ -5220,6 +5973,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 "目前所有段落已寫完。要修改哪個段落，或進入匯出？"
             )
             await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         if action == "done":
@@ -5240,9 +5994,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 await self._emit_narration(done_gate_prompt)
                 state.set_checkpoint(done_gate_prompt)
                 await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+                await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state
             logger.info("[LIVE RESEARCH] Stage 5: user confirmed done")
             state.complete_stage()
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
         if action == "continue_writing":
@@ -5301,6 +6057,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 f"請指明要修改哪一段（第幾章）？{chapter_hint}。"
             )
             await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+            await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
         if not (0 <= revision_target < len(writer_sections)):
             logger.warning(
@@ -5309,11 +6066,16 @@ class LiveResearchOrchestrator(OrchestratorBase):
             )
             revision_target = fallback_target
 
-        # 取 topic（可能是 dict 或 ContextMapTopic）
+        # 取 topic（可能是 dict 或 ContextMapTopic）— 下游 _write_section 用 writer 端 spec
         topic_spec = writer_sections[revision_target]
+        # narration 章名須與 revision_target 的 index 來源對齊：revision_target 是
+        # written_sections-based（_parse_revision_intent 用 enumerate(written_sections)
+        # 餵段號給 LLM），故從 state.written_sections 取章名、key 為 "title"。
+        # （舊 bug：narration 誤用 writer_sections[revision_target]，兩 list 順序不同步 → 顯示錯章名）
         topic_name = (
-            topic_spec["name"] if isinstance(topic_spec, dict)
-            else topic_spec.name
+            state.written_sections[revision_target].get("title", "該段落")
+            if 0 <= revision_target < len(state.written_sections)
+            else "該段落"
         )
         await self._emit_narration(f"正在修改「{topic_name}」段落...")
 
@@ -5460,12 +6222,13 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 )
             )
 
-        await self._emit_section(revision_target, section_output)
+        await self._emit_section(revision_target, section_output, state)
 
         # 再次 checkpoint — 保持在 Stage 5 dialogue loop
         checkpoint_text = "修改完成。還需要調整其他段落嗎？或者可以進入匯出？"
         state.set_checkpoint(checkpoint_text)
         await self._emit_checkpoint(stage=5, proposal=checkpoint_text)
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state  # 保持在 Stage 5 checkpoint
 
     async def _parse_revision_intent(self, user_message: str, written_sections: list) -> dict:
@@ -5494,20 +6257,35 @@ class LiveResearchOrchestrator(OrchestratorBase):
 判斷使用者的意圖，回傳 JSON：
 
 - action:
-  * "revise_section"（user 要求修改某個特定段落，例如：
+  * "revise_section"（user 要求修改某個特定段落，**包含對「一段之內」的任何編輯**：
+      重寫整段、加強、補資料、精簡、刪掉段內某些句子，以及**段內順序操作**
+      （把一段裡的論點/句子對調、重排、調順序、換順序）。例如：
       「第 2 段太弱，多加引用」/「把離岸風電那段重寫」/「改第三段」/
-      「第一段論點不清楚，重組一下」/「核能那段加上 IAEA 數據」）
+      「第一段論點不清楚，重組一下」/「核能那段加上 IAEA 數據」/
+      「把第1段重新排列，先講結論再講背景」/「把這段的論點順序對調」/
+      「最後一段順序調一下」/「這部分的順序調一下」。
+      ⚠ 只要順序/排列動詞（對調/重排/調順序/換順序）作用在**一段之內**，
+      無論錨點是段號、章節標題、近指代「這段/這部分/這裡」還是位置序數
+      「最後一段」，都是 revise_section，**不是** structure_change）
   * "revise_all"（user 要求全部重寫或整體大規模重做，例如：
       「全部重寫」/「整篇重來」/「都不滿意，重做」/「整份報告重新寫過」）
   * "done"（user 明確表達完成接受、要進入匯出，例如：
       「先這樣」/「可以了」/「夠了」/「完成」/「進入匯出」/「OK 匯出吧」/「就這樣」）
-  * "structure_change"（user 要改章節結構：合併/拆分/重排章節、改章數、刪整章。
+  * "structure_change"（**僅限「章 / 章與章之間 / 整章」層級**的結構操作：
+      合併整章、拆分整章、刪整章、改章數、章與章之間重排。
       例如：「合併第 1+3 章」/「拆分第 2 章」/「改成 5 章」/「刪掉第 3 章」。
+      ⚠ 關鍵區隔：**一段之內**的重排/對調/調順序/刪句/改寫**不屬於**
+      structure_change（那是 revise_section）。structure_change 的操作對象
+      一定是「整章」或「章與章之間」，不會是某一段內部。
       這類訴求現階段無法處理，分類即可，後續會 friendly redirect 給 user）
   * "continue_writing"（user 剛 stop 後選擇繼續寫剩下的段落，例如：
       「繼續」/「繼續寫」/「寫完剩下的」/「continue」/「剩下的」/「把剩下的寫完」/
       「往下寫」/「接著寫」。只在 user 之前按過停按鈕後出現此意圖，
       表示 user 想 resume writer loop 從上次中斷處繼續）
+  * "recollect"（user 要求**去找更多/新的資料**來補強，而非用現有資料重寫。例如：
+      「這部分資料不夠，去多查一些」/「證據太薄，需要更多來源」/「再去找一些相關報導」/
+      「資料量不足，請補充蒐集」。與 revise_section 的關鍵區別：revise_section 是用
+      現有資料重寫某段；recollect 是要求重新蒐集**新資料**再整體重做。）
 
 - target_index: **只有當 user 用「段號」或「章節標題」明確指出是哪一段時**才填。填**使用者口語的段號（第 N 段就填整數 N，從 1 開始算）**，對齊上方「已完成的段落」清單的段號。例如使用者說「第 2 段」就填 2；用標題指定（如「離岸風電那段」「核能那段」）時，對照清單找出該標題對應的段號（第幾段）填入。
   **位置序數**（如「第一段」「最後一段」「倒數第二段」）可對照上方清單算出是第幾段 → 視同明確指定，填該段整數（最後一段 = 清單最後一筆的段號；倒數第二段 = 倒數第二筆）。
@@ -5521,8 +6299,13 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
 紀律：
 - 任何包含「繼續」「寫完」「剩下的」「接著寫」等 resume 動詞 → continue_writing
-- 任何包含「特定段落 index/標題」+「修改動詞」（重寫/加強/補/改/精簡/換/重組）→ revise_section
-- 任何包含章節結構動詞（合併/拆分/重排/改章數/刪整章）→ structure_change
+- 任何「資料不夠/不足/太薄/去多查/找更多來源/補充蒐集」等要求蒐集新資料的訊號 → recollect
+  （注意：「第 N 段重寫/加強」用現有資料 → revise_section；「去找更多資料」→ recollect）
+- 順序/排列動詞（對調/重排/調順序/換順序）**作用在「一段之內」**→ revise_section
+  （錨點是段號、標題、「這段/這部分/這裡」或「最後一段」都一樣，是段內操作）
+- 任何包含「特定段落 index/標題」+「修改動詞」（重寫/加強/補/改/精簡/換/重組/刪句）→ revise_section
+- **章 / 章與章之間 / 整章**層級的結構操作（合併整章/拆分整章/改章數/刪整章/章與章重排）→ structure_change
+- ⚠ 動詞本身不決定 action：「重排/對調/調順序」要看作用層級 —— 一段之內 = revise_section，章與章之間 = structure_change
 - 任何明確的接受/完成/匯出訊號 → done
 - done 僅適用於 user 完全沒提任何修改、只表達接受或要求匯出
 - 如果無法明確分類，傾向 revise_section（保守）而非 done（會吃掉 user 訴求）
@@ -5532,7 +6315,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             "properties": {
                 "action": {"type": "string", "enum": [
                     "revise_section", "revise_all", "done",
-                    "structure_change", "continue_writing",
+                    "structure_change", "continue_writing", "recollect",
                 ]},
                 "target_index": {"type": ["integer", "null"]},
                 "instruction": {"type": "string"},
@@ -5564,6 +6347,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
     async def _run_stage_6(self, state: LiveResearchStageState) -> LiveResearchStageState:
         """Stage 6: 組合並匯出。"""
+        self._maybe_reset_offline_counters(state)  # online substantive advance → reset（plan 3d）
         state.advance_to_stage(6)
         await self._emit_stage_change(6)
 
@@ -5630,17 +6414,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
         # export 後仍看得到。**兩處都做**, 不可只做其中之一。
         if problematic:
             n = len(problematic)
-            problem_lines = []
-            for s in problematic:
-                ch_idx = s.get("section_index", "?")
-                ch_title = s.get("title", "?")
-                reason_zh = _PROBLEMATIC_REASON_ZH.get(
-                    s.get("status", "?"), "未完成"
-                )
-                problem_lines.append(
-                    f"- 第 {ch_idx} 章「{ch_title}」（{reason_zh}）"
-                )
-            problems_md = "\n".join(problem_lines)
+            # Bug G：章號 1-based 組裝抽到 lr_copy.build_problematic_chapters_md
+            # （reason_map 由此處單一來源 _PROBLEMATIC_REASON_ZH 傳入，不重複定義）。
+            problems_md = lr_copy.build_problematic_chapters_md(
+                problematic, _PROBLEMATIC_REASON_ZH
+            )
             parts.append(
                 lr_copy.problematic_chapters_header(n, problems_md)
             )
@@ -5680,12 +6458,22 @@ class LiveResearchOrchestrator(OrchestratorBase):
             )
             full_report += kg_section_md
 
+        # 路 3 (P-回顧): 把組好的完整報告（含 H1 + sections + references + KG section）
+        # 存進 state，隨下方 _persist_checkpoint_boundary 落 live_research_state JSONB。
+        # 前端回顧主路徑直接讀此字串丟 showLRExport，與本次 export 逐字一致
+        # （含 KG metadata.generated_at — 因存的就是當下組好的字串，時戳已凍結）。
+        # 雙重組裝根源消除：前端不再自己重組報告（fallback 僅供欄位上線前舊 session）。
+        # NOTE: assign 必須在 full_report 完全組好之後（含 += kg_section_md），否則缺 KG section。
+        state.final_report_markdown = full_report
+
         # 推送完整報告（O5+O5b: 走 emit_sse，sender None/例外時 fallback + log，
         # 不靜默吞整份報告）
         await emit_sse(self.handler, {
             "message_type": "live_research_export",
             "format": "markdown",
             "content": full_report,
+            # O2 / O2-TF: eid -> {url,title,domain,quote}（與 section event 同 schema）
+            "citation_sources": self._build_citation_sources(state),
             # Track D D1: KG metadata 隨 export event 一起送前端
             # (前端 displayKnowledgeGraph 消費；N-9: 擴張 Optional 欄位不破壞
             # 既有 consumer — 沿 Track E E-AMB-3 邊界 lemma)
@@ -5694,6 +6482,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
         state.complete_stage()
         await self._emit_narration("報告匯出完成！")
+        await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
 
     def _build_kg_export_payload(self, state_kg) -> Optional[Dict[str, Any]]:
@@ -5724,6 +6513,65 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 "relationship_count": len(state_kg.relationships),
             },
         }
+
+    # 採納 Decision 2'：只有 internal source 的 snippet 是 articleBody 逐字
+    # （spike 2026-06-15 雙錨點 29/32=90% 命中）；web 是 Google snippet 含省略號
+    # （必 miss）、wiki/llm_knowledge 無對應站外逐字原文 → 一律不交 quote。
+    _TEXTFRAG_OK_SOURCES = frozenset({"internal"})
+
+    @staticmethod
+    def _extract_quote(snippet: str) -> str:
+        """從 EvidencePoolEntry.snippet 取 verbatim 子句供前端組 text fragment。
+
+        紀律（命中率風險專章 Decision 3，採納 normalize 矛盾修正）：
+        - **只 trim 頭尾空白、不動內部空白**（不 collapse、不轉全半形、不去標點）。
+          「collapse 連續空白」會讓 fragment 偏離瀏覽器 rendered text → 反而 miss；
+          spike 的成功比對是「去所有空白後比」，但錨點不能去空白塞 URL（瀏覽器拿
+          錨點去比帶空白的 rendered text）。短錨點（前端 12–16 字）本身已大幅降低
+          內部空白差異的命中影響面。
+        - 不在此截 START/END 短錨點（那是前端 buildTextFragmentUrl 的職責）。後端
+          只負責交出乾淨的 verbatim quote。
+        - snippet 空 → 回 ""（前端據此降級裸 URL）。
+        """
+        if not snippet:
+            return ""
+        return snippet.strip()  # 只 trim 頭尾，不動內部空白
+
+    @staticmethod
+    def _build_citation_sources(state: "LiveResearchStageState") -> Dict[str, Dict[str, str]]:
+        """攤平 evidence_pool 為 eid(str) -> {url,title,domain,quote}，供前端 inline
+        citation 點擊回溯 + text fragment highlight（O2 / O2-TF）。
+
+        - key 用 str(eid)：跨 SSE/JSON 後前端用 String(eid) 查，避免 int/str 比對陷阱。
+        - quote = verbatim snippet 子句（text fragment 來源；空 → 前端降級裸 URL）。
+          **Decision 2' 分流**：只有 source ∈ _TEXTFRAG_OK_SOURCES（internal）才交
+          quote；web / wiki / llm_knowledge 一律交 quote=""（spike 證 web 含省略號
+          必 miss），讓前端降級判據維持單一（quote 空 → 裸 URL），不需感知 source。
+        - 帶原始 url（含 urn:llm:knowledge: / private:// 等非 http scheme），由前端
+          決定渲染（外部連結 vs 標籤），與後端 references master list 一致。
+        - pool 空 → 回 {}（caller emit 時帶空 dict，前端 graceful no-op）。
+        - 不可 silent fail：deserialize 失敗讓例外自然浮現（與 _build_references_block 同層）。
+        """
+        evidence_pool = deserialize_evidence_pool(state.evidence_pool_json)
+        if not evidence_pool:
+            return {}
+        out: Dict[str, Dict[str, str]] = {}
+        for eid, entry in evidence_pool.items():
+            src = (getattr(entry, "source", "internal") or "internal").strip()
+            raw_snippet = getattr(entry, "snippet", "") or ""
+            # Decision 2'：非 internal source 不交 quote（避免組必 miss 的 fragment）
+            quote = (
+                LiveResearchOrchestrator._extract_quote(raw_snippet)
+                if src in LiveResearchOrchestrator._TEXTFRAG_OK_SOURCES
+                else ""
+            )
+            out[str(eid)] = {
+                "url": (getattr(entry, "url", "") or "").strip(),
+                "title": (getattr(entry, "title", "") or "").strip(),
+                "domain": (getattr(entry, "source_domain", "") or "").strip(),
+                "quote": quote,
+            }
+        return out
 
     def _build_references_block(self, state: LiveResearchStageState) -> str:
         """組合 references master list — 列 evidence_pool 全部條目（DR parity B1）。
@@ -6110,6 +6958,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         proposal: str,
         context_map_summary: str = "",
         evidence_list: Optional[List[dict]] = None,
+        show_new_sample_button: bool = False,
     ):
         await emit_sse(self.handler, {
             "message_type": "live_research_checkpoint",
@@ -6118,15 +6967,21 @@ class LiveResearchOrchestrator(OrchestratorBase):
             "context_map_summary": context_map_summary,
             "auto_continue_option": True,
             "evidence_list": evidence_list or [],
+            # Stage 3 風格 checkpoint 才設 True：前端據此顯示「重新提供範本」按鈕。
+            "show_new_sample_button": show_new_sample_button,
         })
 
-    async def _emit_section(self, index: int, section: LiveWriterSectionOutput):
+    async def _emit_section(self, index: int, section: LiveWriterSectionOutput,
+                            state: "LiveResearchStageState"):
         await emit_sse(self.handler, {
             "message_type": "live_research_section",
             "section_index": index,
             "title": section.section_title,
             "content": section.section_content,
             "sources": section.sources_used,
+            # O2 / O2-TF: eid -> {url,title,domain,quote}，供前端 inline citation
+            # 點擊回溯 + text fragment highlight
+            "citation_sources": self._build_citation_sources(state),
             # #4 fix (2026-05-29): L3 WARN marker 存在 methodology_note，
             # 即時 SSE 也要帶（不只 _section_dict 持久化），否則 live 渲染收不到
             "methodology_note": getattr(section, "methodology_note", "") or "",

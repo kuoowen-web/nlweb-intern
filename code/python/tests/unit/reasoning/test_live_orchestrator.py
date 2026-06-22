@@ -231,6 +231,50 @@ class TestLiveResearchOrchestrator:
         assert state.stage_status == "completed"
 
     @pytest.mark.asyncio
+    async def test_stage6_export_header_chapter_one_based(
+        self, orchestrator, monkeypatch
+    ):
+        """Bug G production-path：真跑 _run_stage_6（不 AsyncMock 它），驗匯出 header 1-based。
+
+        AR R4 Codex blocker：helper test 只證組裝邏輯對，不證 orchestrator 傳對參數給
+        helper。只有真跑 _run_stage_6 抓得到「接線參數錯誤」。patch 周邊 side effects
+        （非 _run_stage_6 本身），捕捉 export markdown 斷言「第 4 章」非「第 3/0 章」。
+        """
+        # patch side effects（非 _run_stage_6 本身）
+        orchestrator._emit_stage_change = AsyncMock()
+        orchestrator._emit_narration = AsyncMock()
+        orchestrator._persist_checkpoint_boundary = AsyncMock()
+        orchestrator._build_references_block = lambda *a, **k: ""
+        captured = []
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.emit_sse",
+            AsyncMock(side_effect=lambda handler, payload: captured.append(payload)),
+        )
+        # 最小 valid state：valid context_map_json + problematic written_section index=3
+        state = LiveResearchStageState(
+            current_stage=5,
+            context_map_json=_make_context_map().model_dump_json(),
+            written_sections=[
+                {
+                    "section_index": 3,
+                    "title": "結果與討論",
+                    "status": "guard_failed",
+                    "content": "本章內容。",
+                },
+            ],
+        )
+        await orchestrator._run_stage_6(state)
+        # 從 emit_sse 捕捉到的 live_research_export payload 取 final_report markdown
+        export_payloads = [
+            p for p in captured
+            if p.get("message_type") == "live_research_export"
+        ]
+        assert export_payloads, f"未捕捉到 export payload；captured={captured!r}"
+        export_md = export_payloads[0]["content"]
+        assert "第 4 章" in export_md       # index 3 → 第 4 章（接線對）
+        assert "第 3 章" not in export_md and "第 0 章" not in export_md
+
+    @pytest.mark.asyncio
     async def test_emit_checkpoint_called_in_stage_1(self, orchestrator, mock_handler):
         """Stage 1 完成時應推送 live_research_checkpoint SSE event。"""
         mock_engine_cm = _make_context_map()
@@ -254,6 +298,20 @@ class TestLiveResearchOrchestrator:
         ]
         assert len(checkpoint_calls) >= 1
         assert checkpoint_calls[0].args[0]["stage"] == 1
+
+    @pytest.mark.asyncio
+    async def test_emit_checkpoint_default_no_new_sample_button(self, orchestrator, mock_handler):
+        """預設 show_new_sample_button=False，SSE payload 帶 False。"""
+        await orchestrator._emit_checkpoint(stage=1, proposal="p")
+        sent = mock_handler.message_sender.send_message.call_args[0][0]
+        assert sent["show_new_sample_button"] is False
+
+    @pytest.mark.asyncio
+    async def test_emit_checkpoint_new_sample_button_true(self, orchestrator, mock_handler):
+        """Stage 3 風格 checkpoint 帶 show_new_sample_button=True。"""
+        await orchestrator._emit_checkpoint(stage=3, proposal="p", show_new_sample_button=True)
+        sent = mock_handler.message_sender.send_message.call_args[0][0]
+        assert sent["show_new_sample_button"] is True
 
     @pytest.mark.asyncio
     async def test_context_map_to_outline(self, orchestrator):
@@ -525,6 +583,23 @@ class TestLiveResearchOrchestrator:
             )
         assert result is None, f"invalid action must return None, got: {result!r}"
 
+    @pytest.mark.asyncio
+    async def test_parse_style_confirmation_intent_redo_returns_none(self, orchestrator):
+        """收緊 enum 的行為斷言：LLM 回舊的 redo → action 不在收緊後 enum
+        → 視為 parse-fail 回 None（fail-loud，不 silent confirm）。
+
+        這同時是本 Task「收緊 enum」的 TDD driver：
+        - 收緊前（enum 含 redo）：redo 通過守門 → 回 intent dict（非 None）→ FAIL（紅）。
+        - 收緊後（enum 只剩 confirm/adjust）：redo 落入 invalid → 回 None → PASS（綠）。
+        """
+        from unittest.mock import AsyncMock, patch
+        with patch("core.llm.ask_llm",
+                   new=AsyncMock(return_value={"action": "redo", "reason": "x"})):
+            out = await orchestrator._parse_style_confirmation_intent(
+                "重來", '{"features":[]}'
+            )
+        assert out is None
+
     # ──── UX-6: Stage 4 confirmation round 不蓋寫 format_specs ────
 
     @pytest.mark.asyncio
@@ -686,6 +761,138 @@ class TestLiveResearchOrchestrator:
         assert _looks_like_confirmation("再加") is False
         assert _looks_like_confirmation("不要") is False
 
+    # ──── Backward Navigation (plan: lr-backward-nav, 2026-06-19) ────
+
+    @pytest.mark.asyncio
+    async def test_continue_nav_back_one_resets_to_prev_stage(self, orchestrator):
+        # orchestrator = 既有 instance fixture（已 patch AssociatorAgent + mock_handler）
+        state = LiveResearchStageState()
+        state.current_stage = 4
+        state.stage_status = "checkpoint"
+        state.book_outline_json = '{"old": true}'
+        state.context_map_json = '{"rq": "x", "topics": []}'
+        state.evidence_pool_json = '{"1": {"keep": "me"}}'
+
+        new_state = await orchestrator.continue_from_checkpoint(
+            state, user_message="", auto_continue=False, nav_action="back_one"
+        )
+        # back_one from Stage 4 → target Stage 3, checkpoint emitted, no forward run
+        assert new_state.current_stage == 3
+        assert new_state.stage_status == "checkpoint"
+        assert new_state.book_outline_json == ""        # Stage 4 輸出清
+        assert new_state.evidence_pool_json == '{"1": {"keep": "me"}}'  # pool 保留
+
+    @pytest.mark.asyncio
+    async def test_continue_nav_restart_emits_confirm_first(self, orchestrator):
+        # #4：restart 先發確認，不立即清章節
+        state = LiveResearchStageState()
+        state.current_stage = 5
+        state.stage_status = "checkpoint"
+        state.written_sections = [{"section_index": 0, "title": "保留待確認"}]
+        state.context_map_json = '{"rq": "x", "topics": []}'
+
+        new_state = await orchestrator.continue_from_checkpoint(
+            state, user_message="", auto_continue=False, nav_action="restart"
+        )
+        # 第一輪：只 emit confirm，set pending flag，章節未清
+        assert new_state.pending_restart_confirmation is True
+        assert new_state.written_sections != []   # 尚未清
+        assert new_state.stage_status == "checkpoint"
+        assert new_state.current_stage == 5       # 尚未退回
+
+    @pytest.mark.asyncio
+    async def test_continue_nav_back_at_stage_1_is_noop(self, orchestrator):
+        # 邊界：Stage 1 back_one 無更早 stage → narration + 維持原 checkpoint
+        state = LiveResearchStageState()
+        state.current_stage = 1
+        state.stage_status = "checkpoint"
+        state.context_map_json = '{"rq": "x", "topics": []}'
+        new_state = await orchestrator.continue_from_checkpoint(
+            state, user_message="", auto_continue=False, nav_action="back_one"
+        )
+        assert new_state.current_stage == 1
+        assert new_state.stage_status == "checkpoint"
+
+    @pytest.mark.asyncio
+    async def test_nav_restart_confirm_clears_to_stage_1(self, orchestrator):
+        orch = orchestrator
+        state = LiveResearchStageState()
+        state.current_stage = 5
+        state.stage_status = "checkpoint"
+        state.pending_restart_confirmation = True   # 第一輪已 set
+        state.written_sections = [{"section_index": 0, "title": "待清"}]
+        state.evidence_pool_json = '{"1": {"keep": "me"}}'
+        state.context_map_json = '{"rq": "x", "topics": []}'
+
+        # 用含 token 的強確認詞「確認」走段1 快路徑（不打 LLM），避免依賴 _classify_meta_intent
+        new_state = await orch.continue_from_checkpoint(
+            state, user_message="確認", auto_continue=False
+        )
+        assert new_state.current_stage == 1           # 退回 Stage 1
+        assert new_state.written_sections == []        # 章節清
+        assert new_state.evidence_pool_json == '{"1": {"keep": "me"}}'  # pool 保留
+        assert new_state.pending_restart_confirmation is False
+
+    @pytest.mark.asyncio
+    async def test_nav_restart_cancel_keeps_sections(self, orchestrator):
+        orch = orchestrator
+        state = LiveResearchStageState()
+        state.current_stage = 5
+        state.stage_status = "checkpoint"
+        state.pending_restart_confirmation = True
+        state.written_sections = [{"section_index": 0, "title": "保留"}]
+        state.context_map_json = '{"rq": "x", "topics": []}'
+
+        with patch(
+            "reasoning.live_research.orchestrator._classify_meta_intent",
+            new=AsyncMock(return_value="abort_cancel"),
+        ):
+            new_state = await orch.continue_from_checkpoint(
+                state, user_message="算了，不要了", auto_continue=False
+            )
+        assert new_state.written_sections != []        # 取消 → 不動
+        assert new_state.current_stage == 5
+        assert new_state.pending_restart_confirmation is False
+
+    @pytest.mark.asyncio
+    async def test_nav_restart_confirm_llm_down_does_not_clear_sections(
+        self, orchestrator
+    ):
+        # ★ B1 silent-fail 紅線回歸：LLM 故障（_classify_meta_intent 回 None）+ user 打短肯定詞
+        # 「好」→ 絕不可落入 _looks_like_bounded_affirmative_shape → reset_to_stage(1) 清章節。
+        # 必 fail-loud（停 checkpoint、發系統旁白、章節原封不動、pending flag 保留）。
+        orch = orchestrator
+        state = LiveResearchStageState()
+        state.current_stage = 5
+        state.stage_status = "checkpoint"
+        state.pending_restart_confirmation = True
+        state.written_sections = [{"section_index": 0, "title": "務必保留"}]
+        state.evidence_pool_json = '{"1": {"keep": "me"}}'
+        state.context_map_json = '{"rq": "x", "topics": []}'
+
+        # 模擬 LLM API 失敗：_classify_meta_intent 回 None（fail-loud 觸發條件）
+        with patch(
+            "reasoning.live_research.orchestrator._classify_meta_intent",
+            new=AsyncMock(return_value=None),
+        ):
+            new_state = await orch.continue_from_checkpoint(
+                state, user_message="好", auto_continue=False
+            )
+        # 斷言：章節未清、stage 未退、pool 保留、停在 checkpoint、pending flag 仍在
+        assert new_state.written_sections == [{"section_index": 0, "title": "務必保留"}]
+        assert new_state.current_stage == 5
+        assert new_state.stage_status == "checkpoint"
+        assert new_state.evidence_pool_json == '{"1": {"keep": "me"}}'
+        assert new_state.pending_restart_confirmation is True   # 未被消費成「確認」
+        # fail-loud narration 已發（系統端文案，非靜默）
+        sent = [
+            c.args
+            for c in orch.handler.message_sender.send_message.call_args_list
+        ]
+        assert any(
+            lr_copy.LLM_UNAVAILABLE_NARRATION in str(s) for s in sent
+        )
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # spec §4.10: Stage 4 special_elements parsing + dispatch (2026-05-16)
@@ -708,6 +915,7 @@ class TestStage4SpecialElementsParsing:
         handler.query_params = {}
         handler.site = "all"
         handler.final_retrieved_items = []
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         return handler
 
     @pytest.fixture
@@ -881,6 +1089,7 @@ class TestWriteSectionSpecialElementsFilter:
         h.query_params = {}
         h.site = "all"
         h.final_retrieved_items = []
+        h._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         return h
 
     @pytest.fixture
@@ -1508,20 +1717,28 @@ class TestStage5UserStop:
         assert captured["all_prior"] == ["第1章摘要", "第2章摘要"]
 
     @pytest.mark.asyncio
-    async def test_stage_5_disconnect_returns_without_emit(self, orch, mock_handler):
-        """connection_alive=False 進場 → 不寫、不 emit checkpoint，保留 state for resume。"""
+    async def test_stage_5_disconnect_capped_stops_without_write(self, orch, mock_handler):
+        """plan: lr-sse-reconnect-resume — 斷線**且已達防呆上限** → 停、標 capped、不寫。
+
+        舊行為「斷線就 abort」已改：斷線只標離線；唯有達上限才停。此處用 already-capped
+        state（offline_checkpoint_advances 已達 max）驗「達上限即停」。
+        """
         cm = _make_stage_5_context_map(n=3)
         state = LiveResearchStageState(
             current_stage=5,
             stage_status="in_progress",
             context_map_json=cm.model_dump_json(),
+            offline_since=1.0,                  # 久遠 → wall cap 也會觸發
+            offline_checkpoint_advances=1,      # 已達 default max=1
         )
 
         mock_handler.connection_alive_event.is_set = MagicMock(return_value=False)
 
         result = await orch._run_stage_5(state)
 
-        # No section written (disconnect detected before write)
+        # 達上限：停、標 capped、不寫 section
+        assert result.offline_capped is True
+        assert result.offline_cap_reason in ("next_checkpoint", "wall_seconds")
         assert len(result.written_sections) == 0
         assert result.last_completed_section_index == -1
         assert result.stage_5_writer_running is False
@@ -2505,6 +2722,7 @@ class TestStage4CitationStyleEnum:
         h.query_params = {}
         h.site = "all"
         h.final_retrieved_items = []
+        h._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         return h
 
     @pytest.fixture
@@ -2652,6 +2870,7 @@ class TestWriteSectionCitationResolution:
         h.query_params = {}
         h.site = "all"
         h.final_retrieved_items = []
+        h._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         return h
 
     @pytest.fixture
@@ -2798,6 +3017,7 @@ class TestStage5RevisionInstructionWriteThrough:
         h.query_params = {}
         h.site = "all"
         h.final_retrieved_items = []
+        h._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         return h
 
     @pytest.fixture
@@ -2994,6 +3214,7 @@ class TestStage2UserVoiceCapture:
         h.query_params = {}
         h.site = "all"
         h.final_retrieved_items = []
+        h._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         return h
 
     @pytest.fixture
@@ -3224,14 +3445,15 @@ class TestTrackAWriteSectionGroundedFindings:
         assert captured["analyst_citations"] == [2]
 
     @pytest.mark.asyncio
-    async def test_write_section_body_chapter_empty_evidence_returns_blocked_section(
+    async def test_write_section_body_chapter_empty_planned_but_pool_nonempty_calls_writer(
         self, t3_handler, monkeypatch
     ):
-        """addendum C-1: body chapter 入口偵測 chapter_eids 為空 → 不呼叫 writer LLM,
-        回 LiveWriterSectionOutput status=blocked_no_evidence。"""
+        """P2 W10（C-1 根治）：body chapter planned 空但 evidence_pool 非空（有 title/snippet）
+        → 入口 gate 只擋 pool 真空，此處 pool 有料 → writer 仍被呼叫（讀全 pool），不擋。
+        （原 addendum C-1 在 planned 空即 block 是誤判，全局模型下根因移除。）"""
         from reasoning.schemas_live import (
             ContextMap, ContextMapTopic, BookOutline, ChapterPlan,
-            EvidencePoolEntry,
+            EvidencePoolEntry, LiveWriterSectionOutput,
         )
 
         cm = ContextMap(
@@ -3247,7 +3469,7 @@ class TestTrackAWriteSectionGroundedFindings:
             ChapterPlan(chapter_index=0, title="前言", brief="x",
                         planned_evidence_ids=[1], role="intro"),
             ChapterPlan(chapter_index=1, title="本章 body", brief="y",
-                        planned_evidence_ids=[],  # 空 — 觸發 gate
+                        planned_evidence_ids=[],  # 空 planned，但 pool 有料
                         role="body"),
         ], overall_arc="x", redundancy_warnings=[])
 
@@ -3259,8 +3481,10 @@ class TestTrackAWriteSectionGroundedFindings:
 
         async def fake_compose(self, **kw):
             writer_called["n"] += 1
-            raise AssertionError(
-                "writer must NOT be called when body chapter has empty evidence"
+            return LiveWriterSectionOutput(
+                section_title=kw["section_title"], section_content="c",
+                sources_used=[1], confidence_level="Medium",
+                narration="x", chapter_summary="s",
             )
 
         monkeypatch.setattr(
@@ -3275,7 +3499,56 @@ class TestTrackAWriteSectionGroundedFindings:
             state=state,
         )
 
-        assert writer_called["n"] == 0  # writer LLM 必須沒被呼叫
+        assert writer_called["n"] == 1  # pool 有料 → writer 被呼叫（不擋）
+        assert getattr(result, "status", None) != "blocked_no_evidence"
+
+    @pytest.mark.asyncio
+    async def test_write_section_body_chapter_pool_truly_empty_returns_blocked(
+        self, t3_handler, monkeypatch
+    ):
+        """P2 W10：body chapter pool 完全空 → 入口 gate 擋（真零 evidence，明確擋）。"""
+        from reasoning.schemas_live import (
+            ContextMap, ContextMapTopic, BookOutline, ChapterPlan,
+        )
+
+        cm = ContextMap(
+            research_question="q", version=0,
+            topics=[ContextMapTopic(topic_id="t", name="n", domain="d",
+                                    relevance="core", description="d",
+                                    evidence_ids=[])],
+        )
+        state = LiveResearchStageState()
+        state.evidence_usage = {}
+        book_outline = BookOutline(chapters=[
+            ChapterPlan(chapter_index=0, title="前言", brief="x",
+                        planned_evidence_ids=[], role="intro"),
+            ChapterPlan(chapter_index=1, title="本章 body", brief="y",
+                        planned_evidence_ids=[], role="body"),
+        ], overall_arc="x", redundancy_warnings=[])
+
+        with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
+            orch = LiveResearchOrchestrator(handler=t3_handler)
+        orch.dry_run = False
+
+        writer_called = {"n": 0}
+
+        async def fake_compose(self, **kw):
+            writer_called["n"] += 1
+            raise AssertionError("writer must NOT be called when pool truly empty")
+
+        monkeypatch.setattr(
+            "reasoning.agents.writer.WriterAgent.compose_section", fake_compose
+        )
+
+        result, _ = await orch._write_section(
+            context_map=cm, topic={"name": "本章 body", "outline": "y"},
+            style_features=None, format_specs={}, evidence_pool={},
+            chapter_index=1, all_evidence_ids=[],
+            book_outline=book_outline, current_chapter_index=1,
+            state=state,
+        )
+
+        assert writer_called["n"] == 0  # pool 真空 → writer 不被呼叫
         assert getattr(result, "status", None) == "blocked_no_evidence"
         assert "[本章資料不足]" in result.section_content
 
@@ -3464,15 +3737,15 @@ class TestTrackAWriteSectionGroundedFindings:
         assert captured.get("prior_used_entities") == ["丹麥", "台電"]
 
     @pytest.mark.asyncio
-    async def test_write_section_body_chapter_render_empty_returns_blocked_section(
+    async def test_write_section_narrative_empty_but_pool_snippet_calls_writer(
         self, t3_handler, monkeypatch
     ):
-        """addendum C-1 二層 gate: chapter_eids 非空但 render_grounded_narrative
-        後 relevant_findings 仍空 (evidence_usage 對該章 eid 都空)
-        → 同樣走 BlockedSection。"""
+        """P2 W10（R1）：narrative 空（evidence_usage 無對應 claim）但 evidence_pool 有
+        title/snippet → writer_evidence_view 非空 → writer 仍被呼叫（用 snippet 寫），不擋。
+        （raw pool 有料只是還沒 grounded claim，不該因 narrative 空就擋。）"""
         from reasoning.schemas_live import (
             ContextMap, ContextMapTopic, BookOutline, ChapterPlan,
-            EvidencePoolEntry,
+            EvidencePoolEntry, LiveWriterSectionOutput,
         )
 
         cm = ContextMap(
@@ -3482,14 +3755,13 @@ class TestTrackAWriteSectionGroundedFindings:
                                     evidence_ids=[2])],
         )
         state = LiveResearchStageState()
-        state.evidence_usage = {}  # 沒對應 eid=2 的 GroundedClaim → render 後仍空
+        state.evidence_usage = {}  # 無 claim → narrative 空，但 pool 有 snippet
         pool = {2: EvidencePoolEntry(evidence_id=2, title="T2", url="u", snippet="s2")}
         book_outline = BookOutline(chapters=[
             ChapterPlan(chapter_index=0, title="前言", brief="x",
                         planned_evidence_ids=[2], role="intro"),
             ChapterPlan(chapter_index=1, title="本章 body", brief="y",
-                        planned_evidence_ids=[2],  # 非空, 但 render 後空
-                        role="body"),
+                        planned_evidence_ids=[2], role="body"),
         ], overall_arc="x", redundancy_warnings=[])
 
         with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
@@ -3500,7 +3772,11 @@ class TestTrackAWriteSectionGroundedFindings:
 
         async def fake_compose(self, **kw):
             writer_called["n"] += 1
-            raise AssertionError("writer must NOT be called when render empty")
+            return LiveWriterSectionOutput(
+                section_title=kw["section_title"], section_content="c",
+                sources_used=[2], confidence_level="Medium",
+                narration="x", chapter_summary="s",
+            )
 
         monkeypatch.setattr(
             "reasoning.agents.writer.WriterAgent.compose_section", fake_compose
@@ -3514,7 +3790,60 @@ class TestTrackAWriteSectionGroundedFindings:
             state=state,
         )
 
-        assert writer_called["n"] == 0  # writer 不可被呼叫
+        assert writer_called["n"] == 1  # pool 有 snippet → writer 被呼叫
+        assert getattr(result, "status", None) != "blocked_no_evidence"
+
+    @pytest.mark.asyncio
+    async def test_write_section_pool_entries_empty_returns_blocked_section(
+        self, t3_handler, monkeypatch
+    ):
+        """P2 W10：pool 有 key 但 entry 無 title/snippet 且無 claim →
+        writer_evidence_view + narrative 都實質空 → post-render gate 擋（真沒料）。"""
+        from reasoning.schemas_live import (
+            ContextMap, ContextMapTopic, BookOutline, ChapterPlan,
+            EvidencePoolEntry,
+        )
+
+        cm = ContextMap(
+            research_question="q", version=0,
+            topics=[ContextMapTopic(topic_id="t", name="n", domain="d",
+                                    relevance="core", description="d",
+                                    evidence_ids=[2])],
+        )
+        state = LiveResearchStageState()
+        state.evidence_usage = {}
+        # entry 無 title/snippet → view 跳過該 entry → view 空；narrative 也空
+        pool = {2: EvidencePoolEntry(evidence_id=2, title="", url="", snippet="")}
+        book_outline = BookOutline(chapters=[
+            ChapterPlan(chapter_index=0, title="前言", brief="x",
+                        planned_evidence_ids=[2], role="intro"),
+            ChapterPlan(chapter_index=1, title="本章 body", brief="y",
+                        planned_evidence_ids=[2], role="body"),
+        ], overall_arc="x", redundancy_warnings=[])
+
+        with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
+            orch = LiveResearchOrchestrator(handler=t3_handler)
+        orch.dry_run = False
+
+        writer_called = {"n": 0}
+
+        async def fake_compose(self, **kw):
+            writer_called["n"] += 1
+            raise AssertionError("writer must NOT be called when truly empty")
+
+        monkeypatch.setattr(
+            "reasoning.agents.writer.WriterAgent.compose_section", fake_compose
+        )
+
+        result, _ = await orch._write_section(
+            context_map=cm, topic={"name": "本章 body", "outline": "y"},
+            style_features=None, format_specs={}, evidence_pool=pool,
+            chapter_index=1, all_evidence_ids=[2],
+            book_outline=book_outline, current_chapter_index=1,
+            state=state,
+        )
+
+        assert writer_called["n"] == 0  # 真沒料 → writer 不被呼叫
         assert getattr(result, "status", None) == "blocked_no_evidence"
 
 
@@ -3900,6 +4229,7 @@ class TestStyleAnalysisSparseInput:
         handler.query_params = {}
         handler.site = "all"
         handler.final_retrieved_items = []
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         return handler
 
     @pytest.fixture
@@ -4331,6 +4661,47 @@ class TestPartialBlock:
         assert new_out.section_content == content
         assert new_out.confidence_level == "Low"
 
+    @pytest.mark.asyncio
+    async def test_degraded_path_keeps_full_pool_citations(self, orch):
+        """P2 W7 I1（§0 #24）：退化路徑 sources_used 放寬到全 pool 合法集。
+        sources_used=[1,3]，analyst_citations=[1]，pool={1,2,3} → 3 是 pool 內合法
+        引用，不該被砍（舊版 set(analyst_citations) 交集只留 [1]）。"""
+        from reasoning.schemas_live import LiveWriterSectionOutput, EvidencePoolEntry
+        # 短正文 → 命中 _degenerate（kept<150）→ 走退化路徑 (a)
+        section = LiveWriterSectionOutput(
+            section_title="t",
+            section_content="某水泥公司爭議短句[3]。",
+            sources_used=[1, 3], confidence_level="Medium",
+        )
+        pool = {i: EvidencePoolEntry(evidence_id=i, title=f"T{i}", url="u",
+                                     snippet="s") for i in (1, 2, 3)}
+        new_out, degraded = orch._apply_partial_or_degraded_block(
+            section_output=section, ungrounded=["某水泥公司"],
+            analyst_citations=[1], current_chapter_index=1, label="t",
+            grounded_entities=[], evidence_pool=pool,
+        )
+        assert degraded is True
+        # pool 內合法引用 3 保留（不因不在 analyst_citations 被砍）
+        assert 3 in new_out.sources_used
+        assert 1 in new_out.sources_used
+
+    @pytest.mark.asyncio
+    async def test_grounding_unavailable_keeps_full_pool_citations(self, orch):
+        """P2 W7 I1（§0 #23）：grounding-unavailable 退化路徑同樣放寬全 pool。"""
+        from reasoning.schemas_live import LiveWriterSectionOutput, EvidencePoolEntry
+        section = LiveWriterSectionOutput(
+            section_title="t", section_content="內容[3]。",
+            sources_used=[1, 3], confidence_level="Medium",
+        )
+        pool = {i: EvidencePoolEntry(evidence_id=i, title=f"T{i}", url="u",
+                                     snippet="s") for i in (1, 2, 3)}
+        new_out = await orch._apply_degraded_grounding_unavailable(
+            section_output=section, analyst_citations=[1],
+            current_chapter_index=1, reason="test", evidence_pool=pool,
+        )
+        assert 3 in new_out.sources_used        # pool 內合法引用保留
+        assert 1 in new_out.sources_used
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # 模塊5 Task 5: 條件式 writer calibration（通道 B）— orchestrator 整合
@@ -4656,3 +5027,216 @@ def test_lr_user_facing_strings_have_no_dev_jargon():
         f"f-string 直接插值 raw status（須經 _PROBLEMATIC_REASON_ZH 映射）: "
         f"{status_leaks}"
     )
+
+
+def test_legacy_stage4_reframe_entry_removed():
+    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
+    assert not hasattr(LiveResearchOrchestrator, "_try_stage_4_reframe_entry"), \
+        "legacy _try_stage_4_reframe_entry 仍存在；_typed 版已取代"
+    # typed 版必須仍在
+    assert hasattr(LiveResearchOrchestrator, "_try_stage_4_reframe_entry_typed")
+
+
+@pytest.mark.asyncio
+async def test_mock_bab_initial_format_uses_fixture_not_extraction():
+    """mock_bab 路徑：format_specs.chapters 為 fixture 章節，不跑初始抽取覆蓋。"""
+    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
+    from reasoning.live_research.stage_state import LiveResearchStageState
+
+    handler = MagicMock()
+    # 路 A merge 後 _persist_progress 為 async 會 `await self.handler._save_state(state)`，須補 AsyncMock。
+    handler._save_state = AsyncMock()
+    # 既有 pattern：mock_bab 是 attribute（非 __init__ kwarg），post-construction 設定。
+    # dry_run=False 才有真 associator instance 可掛 mock method。
+    orch = LiveResearchOrchestrator(handler=handler, dry_run=False)
+    orch.mock_bab = True
+    orch._emit_stage_change = AsyncMock()
+    orch._emit_narration = AsyncMock()
+    orch._emit_checkpoint = AsyncMock()
+    # 若初始抽取被誤呼叫 → 拋錯，讓 test fail
+    orch.associator.extract_initial_format_spec = AsyncMock(
+        side_effect=AssertionError("mock_bab 不該跑初始抽取")
+    )
+
+    state = LiveResearchStageState()
+    state = await orch._run_stage_1(state, query="任意 query")
+
+    # fixture book_outline 章節（5 章）仍在
+    assert len(state.format_specs["chapters"]) == 5
+
+
+class TestParseRevisionIntentPromptContract:
+    """段內順序調整（對調/重排/調順序/換順序）被誤判 structure_change 的 prompt 修正。
+
+    Root cause（真 LLM 矩陣已驗證）：順序動詞 + 非段號/標題錨點（「這段」「最後一段」）
+    時，low model 把「重排/對調」吸進 structure_change。現況 prompt 的 structure_change
+    定義與紀律條含裸詞「重排」，且 revise_section 範例無任何「段內順序操作」例子。
+
+    修法（純 prompt）：縮窄 structure_change 到「章節 / 章與章之間」層級；擴大
+    revise_section 明確涵蓋「作用在一段之內」的順序操作（無論錨點是段號、標題、
+    『這段/這部分/這裡』還是『最後一段』）。
+
+    這是 prompt 結構 contract test：攔截送給 ask_llm 的 prompt，斷言含上述指引。
+    （真 LLM 服從度由 GATED 臨時腳本另行驗證；此處只鎖 prompt 不退化。）
+    """
+
+    @pytest.fixture
+    def mock_handler(self):
+        h = MagicMock()
+        h.query = "台灣綠能衝突"
+        h.query_params = {}
+        return h
+
+    @pytest.fixture
+    def orchestrator(self, mock_handler):
+        with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
+            orch = LiveResearchOrchestrator(handler=mock_handler)
+        orch.dry_run = False  # dry_run=True 會 early-return done 不組 prompt
+        return orch
+
+    @staticmethod
+    def _written():
+        return [
+            {"section_index": 0, "title": "離岸風電", "content": "x"},
+            {"section_index": 1, "title": "收益分配", "content": "y"},
+        ]
+
+    async def _capture_prompt(self, orchestrator, user_message):
+        captured = {}
+
+        async def fake_ask_llm(prompt, *args, **kwargs):
+            captured["prompt"] = prompt
+            return {"action": "revise_section", "target_index": None, "reason": "x"}
+
+        with patch("core.llm.ask_llm", new=fake_ask_llm):
+            await orchestrator._parse_revision_intent(user_message, self._written())
+        return captured["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_prompt_routes_intra_section_order_change_to_revise_section(self, orchestrator):
+        """段內順序操作（對調/重排/調順序/換順序，作用在一段之內）→ revise_section。"""
+        prompt = await self._capture_prompt(orchestrator, "把這段的論點順序對調")
+        assert "段內" in prompt, "prompt 應出現「段內」概念以區隔 revise_section"
+        # 順序動詞至少有一個出現在 revise_section 引導語境
+        assert any(v in prompt for v in ("對調", "調順序", "重排", "換順序")), (
+            "prompt 應在 revise_section 列出順序類動詞（對調/重排/調順序/換順序）"
+        )
+
+    @pytest.mark.asyncio
+    async def test_prompt_revise_section_covers_non_index_anchors(self, orchestrator):
+        """revise_section 涵蓋『這段/這部分/這裡/最後一段』等非段號錨點的段內順序操作。"""
+        prompt = await self._capture_prompt(orchestrator, "最後一段順序調一下")
+        # 修法須明示：錨點是『這段』『最後一段』等也算段內操作，不因錨點非段號就升級 structure_change
+        assert "一段之內" in prompt or "段內" in prompt, (
+            "prompt 應說明順序操作只要作用在『一段之內』即 revise_section（不論錨點形式）"
+        )
+
+    @pytest.mark.asyncio
+    async def test_prompt_restricts_structure_change_to_chapter_level(self, orchestrator):
+        """structure_change 必須被釐清為『章節 / 章與章之間 / 整章』層級操作。"""
+        prompt = await self._capture_prompt(orchestrator, "合併第1章和第3章")
+        assert ("章與章" in prompt or "章節層級" in prompt or "整章" in prompt), (
+            "prompt 應釐清 structure_change 限『章 / 章與章之間 / 整章』層級"
+        )
+
+    @pytest.mark.asyncio
+    async def test_prompt_preserves_recollect_action(self, orchestrator):
+        """致命約束 1：6-action 不可退回 5-action，recollect 必須仍在 prompt。"""
+        prompt = await self._capture_prompt(orchestrator, "隨便")
+        assert "recollect" in prompt, "修法不可移除 recollect action（必須維持 6-action）"
+
+    @pytest.mark.asyncio
+    async def test_prompt_preserves_target_index_null_rule(self, orchestrator):
+        """致命約束 3：target_index 的近指代『這段』→ null 規則不可被破壞。"""
+        prompt = await self._capture_prompt(orchestrator, "這段順序對調")
+        assert "這段" in prompt and "null" in prompt, (
+            "近指代『這段』→ target_index null 的規則必須仍在 prompt"
+        )
+
+
+# === lr-chapter-word-budget-enforcement plan：a 軟提示字數檢查 ===
+
+
+def test_count_chapter_words_strips_cite_placeholders():
+    from reasoning.live_research.orchestrator import _count_chapter_words
+    # 純中文，無 citation
+    assert _count_chapter_words("台灣綠能政策推動。") == len("台灣綠能政策推動。")
+    # 含 {cite:N} placeholder — 剝除後才算（每個 placeholder 不計入字數）
+    content = "再生能源占比達 32.5%{cite:1}。德國經驗{cite:12}值得借鏡。"
+    expected = len("再生能源占比達 32.5%。德國經驗值得借鏡。")
+    assert _count_chapter_words(content) == expected
+    # 空字串
+    assert _count_chapter_words("") == 0
+
+
+@pytest.mark.asyncio
+async def test_word_overshoot_narrates_only_when_over_threshold(monkeypatch):
+    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
+    from reasoning.live_research import lr_copy
+
+    captured = []
+
+    handler = MagicMock()
+    handler.query = "字數測試"
+    handler.query_params = {}
+    handler.site = "all"
+    handler.message_sender = MagicMock()
+    handler.message_sender.send_message = AsyncMock()
+    handler.connection_alive_event = MagicMock()
+    handler.connection_alive_event.is_set = MagicMock(return_value=True)
+    handler.final_retrieved_items = []
+    handler._save_state = AsyncMock()
+    # B4: 非 dry_run __init__ 會建真 AssociatorAgent → 必須 patch（既有 fixture pattern
+    # test_live_orchestrator.py:43-44 / :790-792）。
+    with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
+        orch = LiveResearchOrchestrator(handler=handler)
+
+    async def fake_emit(text):
+        captured.append(text)
+    orch._emit_narration = fake_emit
+
+    # 超標（3600 > 2500 * 1.3 = 3250）→ 發一則含章名 + 兩數字
+    await orch._maybe_narrate_word_overshoot(
+        chapter_title="國內案例文獻", target=2500, actual=3600, status="drafted",
+    )
+    assert len(captured) == 1
+    assert "國內案例文獻" in captured[0]
+    assert "2500" in captured[0] and "3600" in captured[0]
+
+    # 未超標（2800 < 3250）→ 不發
+    captured.clear()
+    await orch._maybe_narrate_word_overshoot(
+        chapter_title="國外案例文獻", target=2500, actual=2800, status="drafted",
+    )
+    assert captured == []
+
+    # target=0（未指定字數）→ 不發
+    await orch._maybe_narrate_word_overshoot(
+        chapter_title="前言", target=0, actual=900, status="drafted",
+    )
+    assert captured == []
+
+    # status 非 drafted（章被 block，content 是替換文）→ 不發
+    await orch._maybe_narrate_word_overshoot(
+        chapter_title="結論", target=500, actual=5000, status="guard_failed",
+    )
+    assert captured == []
+
+
+def test_chapter_target_words_reads_from_outline():
+    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
+    from reasoning.schemas_live import BookOutline, ChapterPlan
+    outline = BookOutline(
+        chapters=[
+            ChapterPlan(chapter_index=0, title="前言", brief="鋪陳",
+                        target_word_count=500, role="intro"),
+            ChapterPlan(chapter_index=1, title="國內案例", brief="文獻",
+                        target_word_count=2500, role="body"),
+        ],
+        overall_arc="x",
+    )
+    assert LiveResearchOrchestrator._chapter_target_words(outline, 1) == 2500
+    assert LiveResearchOrchestrator._chapter_target_words(outline, 0) == 500
+    # 越界 / None → 0（未指定，不觸發檢查）
+    assert LiveResearchOrchestrator._chapter_target_words(outline, 5) == 0
+    assert LiveResearchOrchestrator._chapter_target_words(None, 0) == 0

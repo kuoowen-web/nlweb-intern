@@ -97,3 +97,46 @@ def test_grounding_view_large_pool(n):
     assert "台灣電力公司推動再生能源" in view
     # 3) 超量正確截斷：500 筆遠超 budget → 出現省略註記
     assert "context budget" in view
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# P2 W5：current_chapter_index 軟排序（suggested_chapters 含本章 → 升 tier ①b）
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_render_view_boosts_suggested_chapter_evidence():
+    from reasoning.schemas_live import (
+        render_grounding_evidence_view, EvidencePoolEntry,
+    )
+    pool = {
+        1: EvidencePoolEntry(evidence_id=1, title="A", snippet="x" * 50,
+                             suggested_chapters=[2]),
+        2: EvidencePoolEntry(evidence_id=2, title="B", snippet="y" * 50,
+                             suggested_chapters=[]),
+    }
+    view = render_grounding_evidence_view(
+        chapter_eids=list(pool.keys()), evidence_usage={}, evidence_pool=pool,
+        prior_grounded_entities=[], analyst_citations=[],
+        current_chapter_index=2,
+    )
+    # eid 1（建議本章 2）先於 eid 2
+    assert view.index("A") < view.index("B")
+
+
+def test_render_view_chapter_index_none_unchanged():
+    """current_chapter_index=None → 行為與現況一致（Critic 呼叫端不傳）。"""
+    from reasoning.schemas_live import (
+        render_grounding_evidence_view, EvidencePoolEntry,
+    )
+    pool = {
+        1: EvidencePoolEntry(evidence_id=1, title="A", snippet="x" * 50,
+                             suggested_chapters=[2]),
+        2: EvidencePoolEntry(evidence_id=2, title="B", snippet="y" * 50,
+                             suggested_chapters=[]),
+    }
+    # 不傳 current_chapter_index → suggested_chapters 不影響排序（純升冪 tier）
+    view_none = render_grounding_evidence_view(
+        chapter_eids=list(pool.keys()), evidence_usage={}, evidence_pool=pool,
+        prior_grounded_entities=[], analyst_citations=[],
+    )
+    # 兩筆都無 claim/cited → 同 tier 4，升冪：A(eid1) 先於 B(eid2)
+    assert view_none.index("A") < view_none.index("B")

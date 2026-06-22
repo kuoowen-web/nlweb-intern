@@ -6,6 +6,14 @@ reasoning:
   writer_timeout: 90    # 縮短以讓 OpenAI Responses API hang 模式提早顯化，舊值 300 會遮蔽 5 分鐘 hang
   outline_planner_timeout: 90  # gpt-5.1 reasoning model 跑多章 outline (prompt~9500) 慢，30s 不夠致 skeleton fallback；對齊 writer_timeout
 
+  # 離線防呆燒錢上限（plan: lr-sse-reconnect-resume, 2026-06-15 CEO 拍板）。
+  # 斷線不取消、跑到 checkpoint 才停 → 離線後仍可能燒 LLM。扁平 key（對齊 analyst_timeout 慣例）。
+  # offline_max_checkpoint_advances: 離線後最多再跨幾個 checkpoint。1 = 跑完當前 stage 到它的
+  #   checkpoint 即停（CEO 拍板「跨到下個 checkpoint 就停」）。
+  offline_max_checkpoint_advances: 1
+  # offline_max_wall_seconds: 離線後 wall-clock hard cap 防呆（秒），到頂即停。900 = 15 分。
+  offline_max_wall_seconds: 900
+
   # Feature flags for enhanced reasoning capabilities
   features:
     composable_pipeline: true  # true = new composable phase path, false = legacy (both use same impl; flag gates Task 6+ enhancements)
@@ -20,11 +28,8 @@ reasoning:
     agent_isolation: false    # SEC-6: Context routing isolation (Phase 1)
     # Live Research: conversation-driven research assistant mode
     live_research: true           # Master switch: enable all Live Research behaviors
-    live_research_narration: true  # Sub-flag: Analyst/Critic narration (only effective when live_research=true)
-    live_research_propose_verify: true  # Sub-flag: Analyst Propose-Verify discipline (only effective when live_research=true)
     live_research_consistency_monitor: true  # Sub-flag: Critic Consistency Monitor (only effective when live_research=true)
     live_research_style_analysis: true  # Sub-flag: Style Analysis before writing (only effective when live_research=true)
-    live_research_per_section_writing: true  # Sub-flag: Per-section writing mode (only effective when live_research=true)
     # Live Research Pipeline 參數
     live_research_max_bab_iterations: 3  # B->A->B' loop 最大迭代次數
     live_research_auto_continue_delay: 2  # 「你決定就好」後的延遲（秒，讓使用者能看到 narration）
@@ -149,7 +154,6 @@ reasoning:
   # Auto-REJECT thresholds for Phase 2 structured critique
   critique_thresholds:
     critical_weakness_count: 2  # Auto-escalate to REJECT if >= N critical weaknesses
-    source_tier_violations: 1    # Max acceptable source tier violations
 
   tracing:
     console:

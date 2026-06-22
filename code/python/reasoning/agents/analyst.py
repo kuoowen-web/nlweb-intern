@@ -16,7 +16,7 @@ class AnalystAgent(BaseReasoningAgent):
     initial drafts or revised drafts based on critic feedback.
     """
 
-    def __init__(self, handler, timeout: int = 60):
+    def __init__(self, handler, timeout: int = 120):  # 60 -> 120: 對齊 base.py:168，消除 subclass < base 矛盾（真實值靠 config analyst_timeout=300）
         """
         Initialize Analyst Agent.
 
@@ -132,20 +132,35 @@ class AnalystAgent(BaseReasoningAgent):
         original_draft: str,
         review: CriticReviewOutput,
         formatted_context: str,
-        query: str = None
+        query: str = None,
+        enable_kg: bool = False,  # B9: match research() schema selection
+        enable_live_research: bool = False,  # B9: match research() schema selection
     ) -> AnalystResearchOutput:
         """
         Revise draft based on critic's feedback.
+
+        Schema selection mirrors research() (priority live_research > kg >
+        argument_graphs > base) so the revised result keeps argument_graph /
+        gap_resolutions / knowledge_graph instead of silently downgrading to
+        the base schema (B9 forensic loss).
 
         Args:
             original_draft: Previous draft content
             review: Critic's review with validated schema
             formatted_context: Pre-formatted context string with [1], [2] IDs
             query: Original user query (Stage 5: prevent topic drift)
+            enable_kg: Enable knowledge graph schema (per-request, matches research())
+            enable_live_research: Enable Live Research schema (matches research())
 
         Returns:
-            AnalystResearchOutput with validated schema
+            AnalystResearchOutput (or Enhanced/EnhancedKG/Live subclass if a
+            feature flag is active)
         """
+        # Import CONFIG here to avoid circular dependency
+        from core.config import CONFIG
+
+        enable_graphs = CONFIG.reasoning_params.get("features", {}).get("argument_graphs", False)
+
         # Build the revision prompt from PDF (pages 14-15)
         revision_prompt = self.prompt_builder.build_revision_prompt(
             original_draft=original_draft,
@@ -154,15 +169,52 @@ class AnalystAgent(BaseReasoningAgent):
             original_query=query
         )
 
+        # Choose schema based on feature flags (dynamic schema selection)
+        # Priority: live_research > kg > argument_graphs > base — must stay in
+        # lockstep with research() (analyst.py research() schema selection).
+        if enable_live_research:
+            from reasoning.schemas_live import AnalystResearchOutputLive
+            response_schema = AnalystResearchOutputLive
+            self.logger.info("Using AnalystResearchOutputLive schema (revise, Live Research)")
+        elif enable_kg:
+            from reasoning.schemas_enhanced import AnalystResearchOutputEnhancedKG
+            response_schema = AnalystResearchOutputEnhancedKG
+            self.logger.info("Using AnalystResearchOutputEnhancedKG schema (revise, with KG)")
+        elif enable_graphs:
+            from reasoning.schemas_enhanced import AnalystResearchOutputEnhanced
+            response_schema = AnalystResearchOutputEnhanced
+            self.logger.info("Using AnalystResearchOutputEnhanced schema (revise, no KG)")
+        else:
+            response_schema = AnalystResearchOutput
+            self.logger.info("Using basic AnalystResearchOutput schema (revise)")
+
         # Call LLM with validation
         result, retry_count, fallback_used = await self.call_llm_validated(
             prompt=revision_prompt,
-            response_schema=AnalystResearchOutput,
+            response_schema=response_schema,
             level="high"
         )
 
         # Log TypeAgent metrics for analytics
         self.logger.debug(f"TypeAgent metrics (revise): retries={retry_count}, fallback={fallback_used}")
+
+        # Validate graphs if present (mirror research() post-validation)
+        if hasattr(result, 'argument_graph') and result.argument_graph:
+            self._validate_argument_graph(result.argument_graph, result.citations_used)
+        if hasattr(result, 'knowledge_graph') and result.knowledge_graph:
+            self._validate_knowledge_graph(result.knowledge_graph, result.citations_used)
+
+        # C5 (observability only — Zoe ruling: do NOT mutate the prompt to force
+        # the LLM to emit a graph; B9's goal is to stop the *type* from forcing the
+        # field away, not to coerce the LLM into filling it). When a graph-capable
+        # schema was selected but the LLM omitted argument_graph, log so on-call can
+        # distinguish "LLM legitimately produced no graph" from "a type bug ate it".
+        if response_schema is not AnalystResearchOutput and not getattr(result, 'argument_graph', None):
+            self.logger.info(
+                f"Revise selected {response_schema.__name__} but argument_graph is "
+                f"empty — LLM omitted it (not a type bug; revision prompt does not "
+                f"mandate graph emission)"
+            )
 
         return result
 

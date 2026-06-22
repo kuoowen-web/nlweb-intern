@@ -2,6 +2,7 @@
 import sys
 import os
 import pytest
+from unittest.mock import AsyncMock, MagicMock, patch  # plan: durable boundary persist needs AsyncMock in scope
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
@@ -338,6 +339,7 @@ class TestParseStage1Intent:
         from unittest.mock import MagicMock, patch
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
@@ -420,6 +422,7 @@ class TestParseStage1IntentClarifyingQuestion:
         from unittest.mock import MagicMock, patch
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
@@ -475,6 +478,7 @@ class TestHandleStage1Response:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -672,6 +676,7 @@ class TestTrackEStage1TimeConstraintWiring:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -756,6 +761,7 @@ class TestHandleStage1EmptyOpsClarification:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -878,6 +884,7 @@ class TestStage4Redirect:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -1038,6 +1045,7 @@ class TestStage5StructureChange:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -1331,6 +1339,7 @@ class TestHandleStage1ReframeConfirmRound:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -1625,6 +1634,7 @@ class TestStage1ReframeConfirmAcknowledgeNarration:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -1742,6 +1752,7 @@ class TestStage1ReframeConfirmAcknowledgeNarration:
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
 
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -1793,6 +1804,7 @@ class TestStage4ReframeEntry:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -1941,39 +1953,11 @@ class TestStage4ReframeEntry:
         cm = ContextMap.model_validate_json(result.context_map_json)
         assert len(cm.topics) == 3
 
-    @pytest.mark.asyncio
-    async def test_stage_4_legacy_fallback_intent_none_emits_system_unavailable(
-        self, orchestrator, stage4_state
-    ):
-        """#20 改善：Stage 4 reframe entry legacy fallback（_parse_stage_1_intent 回 None
-        = LLM API 失敗）→ narration 該說「系統暫時無法處理」，不該怪 user「我沒看懂你的結構訴求」。
-        保持 Stage 4 checkpoint。"""
-        from unittest.mock import AsyncMock, patch
-
-        with patch.object(
-            orchestrator, "_parse_stage_1_intent",
-            new=AsyncMock(return_value=None),  # LLM API fail
-        ):
-            # legacy caller：stage4_intent=None → 走 Stage 1 parser fallback
-            result = await orchestrator._try_stage_4_reframe_entry(
-                stage4_state,
-                user_message="重新組織章節結構",
-                format_spec_extracted="",
-                stage4_intent=None,
-            )
-
-        assert result.current_stage == 4
-        sent_messages = [
-            c.args[0] for c in orchestrator.handler.message_sender.send_message.call_args_list
-        ]
-        narration_texts = [
-            m.get("text", "") for m in sent_messages
-            if m.get("message_type") == "live_research_narration"
-        ]
-        assert any("系統暫時無法處理" in t for t in narration_texts), \
-            f"expect system-unavailable narration, got {narration_texts}"
-        assert not any("沒看懂你的結構訴求" in t for t in narration_texts), \
-            f"API fail 不該怪 user 結構訴求, got {narration_texts}"
+    # NOTE: 舊 test_stage_4_legacy_fallback_intent_none_emits_system_unavailable
+    # 已隨 legacy `_try_stage_4_reframe_entry` 一併移除（_typed 版 OQ-2 strict mode
+    # 無 _parse_stage_1_intent fallback 路徑，該 narration 無 typed entry point）。
+    # 「LLM 模糊 → narration + 保持 checkpoint」語意由上方
+    # test_stage_4_unclear_action_stays_at_checkpoint 涵蓋。
 
 
 # ============================================================================
@@ -2127,6 +2111,7 @@ class TestStage1OutlineCueLLMIntegration:
         from unittest.mock import MagicMock, patch
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
             return LiveResearchOrchestrator(handler=handler, dry_run=False)
@@ -2243,6 +2228,7 @@ class TestClassifyConfirmationIntentR1:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -2347,6 +2333,7 @@ class TestStage4ConfirmRoundR1Integration:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -2413,6 +2400,7 @@ class TestReframeAdjustPathR2:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -2529,6 +2517,7 @@ class TestFormatSpecsMergeR3:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -2704,6 +2693,7 @@ class TestReframeProposalDecoupledFromCheckpointPrompt:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -2872,6 +2862,7 @@ class TestReframeAddedTopicsOrdered:
         }
 
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
@@ -2903,6 +2894,7 @@ class TestStage4ReframeEntryUsesStage4NewChapters:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()
@@ -3136,6 +3128,7 @@ class TestReframePerChapterEdit:
         from unittest.mock import MagicMock, patch, AsyncMock
         from reasoning.live_research.orchestrator import LiveResearchOrchestrator
         handler = MagicMock()
+        handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
         handler.query_params = {}
         handler.message_sender = MagicMock()
         handler.message_sender.send_message = AsyncMock()

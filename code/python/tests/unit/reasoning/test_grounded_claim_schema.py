@@ -145,6 +145,24 @@ def test_sources_used_zero_is_allowed():
     out.validate_sources_against_plan(planned_evidence_ids=[1, 2])
 
 
+def test_validate_sources_allows_full_pool_not_just_planned(monkeypatch):
+    """P2 W8（§0 #16 R2-2）：傳 allowed_evidence_ids（全 pool）→ pool 內 planned 外的
+    sources_used 不該 violation；不傳 → 向後相容退回 planned ∪ {0}。"""
+    monkeypatch.setenv("LR_STRICT_INVARIANTS", "1")
+    from reasoning.schemas_live import LiveWriterSectionOutput, InvariantViolation
+    out = LiveWriterSectionOutput(
+        section_title="x", section_content="y", sources_used=[3],
+        confidence_level="Medium",
+    )
+    # 3 不在 planned=[1,2] 但在 pool=[1,2,3] → 傳 allowed 全 pool → 不 raise
+    out.validate_sources_against_plan(
+        planned_evidence_ids=[1, 2], allowed_evidence_ids=[1, 2, 3]
+    )
+    # 不傳 allowed_evidence_ids → 向後相容（退回 planned ∪ {0}）→ raise
+    with pytest.raises(InvariantViolation):
+        out.validate_sources_against_plan(planned_evidence_ids=[1, 2])
+
+
 # ============================================================================
 # Fix 1：from_warned_critic_review 作為 GroundedClaim 正式欄位 (T1 schema review)
 # ============================================================================

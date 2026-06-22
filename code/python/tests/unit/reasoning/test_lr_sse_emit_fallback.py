@@ -233,7 +233,9 @@ async def test_orch_emit_section_delivers_via_write_stream_when_no_sender():
     section.sources_used = [1, 2]
     section.methodology_note = "L3 WARN: 樣本不足"
 
-    await orch._emit_section(0, section)
+    from reasoning.live_research.stage_state import LiveResearchStageState
+    state = LiveResearchStageState()  # 空 pool → citation_sources == {}
+    await orch._emit_section(0, section, state)
 
     h.http_handler.write_stream.assert_awaited_once()
     payload = h.http_handler.write_stream.call_args[0][0]
@@ -242,6 +244,8 @@ async def test_orch_emit_section_delivers_via_write_stream_when_no_sender():
     assert payload["title"] == "第一章"
     assert payload["content"] == "內容"
     assert payload["sources"] == [1, 2]
+    # O2 / O2-TF: citation_sources 必隨 section event（空 pool → {} 非 None）
+    assert payload["citation_sources"] == {}
     # 收斂點 8：#4 fix（2026-05-29）methodology_note 必須原樣保留
     assert payload["methodology_note"] == "L3 WARN: 樣本不足"
 

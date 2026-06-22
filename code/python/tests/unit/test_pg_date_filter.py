@@ -202,13 +202,20 @@ class TestSearchPassesFiltersToQueryBuilder(unittest.TestCase):
         client._execute_with_retry = fake_execute_with_retry
 
         filters = [{"field": "datePublished", "operator": "gte", "value": "2026-01-01"}]
+        # Own a dedicated event loop instead of asyncio.get_event_loop(): under
+        # the full suite, a prior pytest-asyncio test leaves the main thread with
+        # no current loop, so get_event_loop() raises RuntimeError ("no current
+        # event loop") on Python 3.11. new_event_loop() is immune to that global
+        # state. See tests/unit ordering-pollution fix.
+        loop = asyncio.new_event_loop()
         try:
-            asyncio.get_event_loop().run_until_complete(
+            loop.run_until_complete(
                 client.search("test query", site=[], num_results=10, filters=filters)
             )
         except Exception:
             pass  # May fail for other reasons; we only care about captured
         finally:
+            loop.close()
             pg_mod.get_embedding = original_get_embedding
 
         self.assertEqual(

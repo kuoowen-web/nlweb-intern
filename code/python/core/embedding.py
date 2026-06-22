@@ -13,6 +13,7 @@ import asyncio
 import threading
 
 from core.config import CONFIG
+from core.retry_util import retry_async
 from misc.logger.logging_config_helper import get_configured_logger, LogLevel
 
 logger = get_configured_logger("embedding_wrapper")
@@ -107,16 +108,6 @@ async def get_embedding(
             logger.debug(f"Gemini embeddings received, dimension: {len(result)}")
             return result
 
-        if provider == "huggingface":
-            logger.debug("Getting HuggingFace embeddings")
-            from embedding_providers.huggingface_embedding import get_huggingface_embedding
-            result = await asyncio.wait_for(
-                get_huggingface_embedding(text, model=model_id),
-                timeout=timeout
-            )
-            logger.debug(f"HuggingFace embeddings received, dimension: {len(result)}")
-            return result
-
         if provider == "qwen3":
             logger.debug("Getting Qwen3 embeddings")
             from embedding_providers.qwen3_embedding import get_qwen3_embedding
@@ -130,12 +121,77 @@ async def get_embedding(
         if provider == "openrouter":
             logger.debug("Getting OpenRouter embeddings")
             from embedding_providers.openrouter_embedding import get_openrouter_embedding
-            result = await asyncio.wait_for(
-                get_openrouter_embedding(text, model=model_id, timeout=float(timeout)),
-                timeout=timeout
-            )
-            logger.debug(f"OpenRouter embeddings received, dimension: {len(result)}")
-            return result
+
+            # Prod incident: OpenRouter embedding returned HTTP 429
+            # (engine_overloaded) and, having zero retry, killed the whole LR run.
+            # Wrap the provider call in retry/backoff (1s/2s/4s). Each attempt
+            # issues a fresh request and is bounded by the per-call timeout.
+            async def _call_openrouter():
+                return await asyncio.wait_for(
+                    get_openrouter_embedding(text, model=model_id, timeout=float(timeout)),
+                    timeout=timeout
+                )
+
+            try:
+                result = await retry_async(
+                    _call_openrouter,
+                    max_retries=3,
+                    description=f"embedding[{provider}]",
+                )
+                logger.debug(f"OpenRouter embeddings received, dimension: {len(result)}")
+                return result
+            except Exception as openrouter_exc:
+                # Single-provider OpenRouter has no inherent fallback: once retry is
+                # exhausted (e.g. persistent engine_overloaded / 429), the PG
+                # retrieval path that needs a fresh query embedding collapses.
+                # Fall back to a configured cross-provider (DeepInfra), which serves
+                # the SAME model (qwen3-embedding-4b, truncated to 1024 dims) and so
+                # is vector-space compatible. No silent fail: emit a warning so the
+                # degradation is visible.
+                fallback_provider = getattr(CONFIG, "embedding_fallback_provider", None)
+                if not fallback_provider:
+                    # No fallback configured -> preserve original behavior (raise).
+                    raise
+
+                if fallback_provider == "deepinfra":
+                    logger.warning(
+                        "OpenRouter embedding exhausted, falling back to DeepInfra"
+                    )
+                    from embedding_providers.deepinfra_embedding import get_deepinfra_embedding
+
+                    async def _call_deepinfra():
+                        return await asyncio.wait_for(
+                            get_deepinfra_embedding(text, model=None, timeout=float(timeout)),
+                            timeout=timeout
+                        )
+
+                    try:
+                        result = await retry_async(
+                            _call_deepinfra,
+                            max_retries=3,
+                            description="embedding[deepinfra-fallback]",
+                        )
+                        logger.debug(
+                            f"DeepInfra fallback embeddings received, dimension: {len(result)}"
+                        )
+                        return result
+                    except Exception:
+                        # Both providers failed. Surface the ORIGINAL OpenRouter
+                        # error so the primary-path failure (the incident signal)
+                        # is preserved; the DeepInfra error is already logged by
+                        # retry_async.
+                        logger.error(
+                            "DeepInfra fallback also failed; raising original "
+                            "OpenRouter error"
+                        )
+                        raise openrouter_exc
+
+                # Unknown fallback provider value -> do not silently ignore.
+                logger.error(
+                    f"Unknown embedding fallback_provider '{fallback_provider}'; "
+                    "raising original OpenRouter error"
+                )
+                raise openrouter_exc
 
         error_msg = f"No embedding implementation for provider '{provider}'"
         logger.error(error_msg)
@@ -228,16 +284,6 @@ async def batch_get_embeddings(
                 timeout=timeout
             )
             logger.debug(f"Gemini batch embeddings received, count: {len(result)}")
-            return result
-
-        if provider == "huggingface":
-            logger.debug("Getting HuggingFace batch embeddings")
-            from embedding_providers.huggingface_embedding import get_huggingface_batch_embeddings
-            result = await asyncio.wait_for(
-                get_huggingface_batch_embeddings(texts, model=model_id),
-                timeout=timeout
-            )
-            logger.debug(f"HuggingFace batch embeddings received, count: {len(result)}")
             return result
 
         if provider == "qwen3":

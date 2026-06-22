@@ -71,6 +71,7 @@ def _orch():
     h = _handler()
     h.message_sender = MagicMock()
     h.message_sender.send_message = AsyncMock()
+    h._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
         return LiveResearchOrchestrator(handler=h)
 
@@ -451,82 +452,78 @@ async def test_stage3_first_reply_non_sample_degrades_and_holds():
     assert orch._emit_checkpoint.await_args.kwargs.get("stage") == 3
 
 
+# ──── Stage 3 round-2：移除 conversational redo，只剩 confirm/adjust ────
+# 兩個 INTERIM redo 測試（test_stage3_redo_non_sample_degrades_keeps_existing /
+# test_stage3_redo_style_analysis_fail_soft_stays_checkpoint）已隨「後端 A」
+# （lr-stage3-new-sample-button-plan）移除——redo 分支已不存在，依其自身註解直接刪除。
+
+
 @pytest.mark.asyncio
-async def test_stage3_redo_non_sample_degrades_keeps_existing():
-    """O7：已有分析、判為 redo，但輸入其實是指令 → raise sentinel →
-    保留既有分析、停 checkpoint、emit O7 redo 降級 narration。
-
-    INTERIM TEST — redo 終局 plan（lr-auto-stage3-redo-reprompt-plan 或
-    lr-stage3-new-sample-button-plan 後端 A）land 後，redo 分支不再呼叫
-    _run_style_analysis，本 test 必紅。屆時**直接刪除本 test**（行為改由
-    該 plan 的新 test 護），不要把它修綠。詳見 o7 plan 協調節。
-    """
-    from reasoning.live_research import lr_copy
-    from reasoning.schemas_live import StyleInputNotASampleError, StyleAnalysisOutput, StyleFeature
-
-    existing = StyleAnalysisOutput(
-        features=[StyleFeature(dimension="句式", observation="o", instruction="i")],
-        overall_tone="原語氣",
-    ).model_dump_json()
-
+async def test_stage3_round2_no_conversational_redo_branch():
+    """round-2 對話回饋只有 confirm/adjust 兩種出路；不存在「把對話當新範本整碗
+    重抽」的 redo 分支。intent parser 回 adjust → 走 merge（保留未提及維度）。"""
     orch = _orch()
-    state = LiveResearchStageState(
-        current_stage=3, stage_status="in_progress", style_features_json=existing,
+    state = LiveResearchStageState(current_stage=3, stage_status="checkpoint")
+    state.style_features_json = '{"features":[{"dimension":"句式","observation":"o","instruction":"i"}],"overall_tone":"原"}'
+    orch._run_style_analysis = AsyncMock()  # round-2 對話路徑不得呼叫它（那是整碗重抽）
+    fake_merged = MagicMock()
+    fake_merged.model_dump_json = MagicMock(return_value='{"features":[]}')
+    fake_merged.overall_tone = "調整後"
+    fake_merged.features = []
+    orch._run_style_analysis_merge = AsyncMock(return_value=fake_merged)
+    orch._parse_style_confirmation_intent = AsyncMock(
+        return_value={"action": "adjust", "reason": "微調引用"}
     )
-    orch._run_style_analysis = AsyncMock(side_effect=StyleInputNotASampleError("x"))
-    orch._emit_narration = AsyncMock()
-    orch._emit_checkpoint = AsyncMock()
-    orch._parse_style_confirmation_intent = AsyncMock(return_value={"action": "redo"})
-
-    result = await orch._handle_stage_3_response(state, "不對重來", auto_continue=False)
-
+    result = await orch._handle_stage_3_response(state, "引用改成 APA", auto_continue=False)
+    # adjust → merge，不整碗重抽
+    orch._run_style_analysis_merge.assert_awaited_once()
+    orch._run_style_analysis.assert_not_called()
     assert result.stage_status == "checkpoint"
     assert result.current_stage == 3
-    assert result.style_features_json == existing  # 既有分析未被覆蓋
-    narrations = [c.args[0] for c in orch._emit_narration.await_args_list]
-    assert lr_copy.STYLE_INPUT_NOT_SAMPLE_REDO_NARRATION in narrations
-    orch._emit_checkpoint.assert_awaited_once()
-    assert orch._emit_checkpoint.await_args.kwargs.get("stage") == 3
+
+
+# ──── Stage 3：「重新提供範本」sentinel 按鈕 ────
 
 
 @pytest.mark.asyncio
-async def test_stage3_redo_style_analysis_fail_soft_stays_checkpoint():
-    """已有分析、user 選 redo、LLM 空回應（回 None）→ soft-fail：
-    停 Stage 3 checkpoint、保留既有 style_features_json 不覆蓋、不 raise，
-    且降級 narration + checkpoint 必須真的 emit（不可 silent fail）。
-
-    INTERIM TEST — lr-auto-stage3-redo-reprompt-plan land 後，redo 分支不再
-    呼叫 _run_style_analysis，本 test 必紅。屆時**直接刪除本 test**（行為改由
-    該 plan 的新 test 護），不要把它修綠。詳見 soft-fail plan Task 2b 協調節。
-    """
-    from reasoning.schemas_live import StyleAnalysisOutput, StyleFeature
+async def test_stage3_new_sample_sentinel_clears_and_reprompts():
+    """收到 STAGE3_NEW_SAMPLE_SENTINEL → 清空既有分析 + 回 checkpoint 請貼新範本；
+    不呼叫 intent parser、不呼叫 _run_style_analysis（不把 sentinel 當範本）。"""
+    from reasoning.live_research.orchestrator import STAGE3_NEW_SAMPLE_SENTINEL
     orch = _orch()
-    # 模擬已有分析
-    existing = StyleAnalysisOutput(
-        overall_tone="學術正式",
-        features=[StyleFeature(dimension="語氣", observation="正式", instruction="維持")],
-    )
-    state = LiveResearchStageState(
-        current_stage=3,
-        stage_status="in_progress",
-        style_features_json=existing.model_dump_json(),
-    )
-    orch._run_style_analysis = AsyncMock(return_value=None)
-    orch._emit_narration = AsyncMock()
-    orch._emit_checkpoint = AsyncMock()
-    # _parse_style_confirmation_intent 回 redo action
-    orch._parse_style_confirmation_intent = AsyncMock(return_value={"action": "redo"})
-
+    state = LiveResearchStageState(current_stage=3, stage_status="checkpoint")
+    state.style_features_json = '{"features":[{"dimension":"句式","observation":"o","instruction":"i"}],"overall_tone":"原"}'
+    orch._parse_style_confirmation_intent = AsyncMock()
+    orch._run_style_analysis = AsyncMock()
+    orch._run_style_analysis_merge = AsyncMock()
     result = await orch._handle_stage_3_response(
-        state, "重新分析吧", auto_continue=False
+        state, STAGE3_NEW_SAMPLE_SENTINEL, auto_continue=False
     )
-    orch._run_style_analysis.assert_awaited_once()
-    assert result.stage_status == "checkpoint"   # 停原地，未 advance
+    orch._parse_style_confirmation_intent.assert_not_called()
+    orch._run_style_analysis.assert_not_called()
+    orch._run_style_analysis_merge.assert_not_called()
+    assert result.style_features_json == ""       # 既有分析已清空
+    assert result.stage_status == "checkpoint"     # 停在 checkpoint 等新範本
     assert result.current_stage == 3
-    # 既有分析不被空結果覆蓋
-    assert result.style_features_json == existing.model_dump_json()
-    # 不可 silent fail：user-facing 降級訊息 + checkpoint 重 emit 必須真的發生
-    narrations = [c.args[0] for c in orch._emit_narration.await_args_list]
-    assert lr_copy.LLM_UNAVAILABLE_NARRATION in narrations
-    orch._emit_checkpoint.assert_awaited_once()
-    assert orch._emit_checkpoint.await_args.kwargs.get("stage") == 3
+
+
+@pytest.mark.asyncio
+async def test_stage3_after_new_sample_clear_next_msg_goes_through_meta_intent_gate():
+    """sentinel 清空後，使用者下一則『真範本』訊息走第一輪入口、經 meta-intent
+    守門（substantive）→ 呼叫 _run_style_analysis。證明回到正確起點。"""
+    orch = _orch()
+    state = LiveResearchStageState(current_stage=3, stage_status="checkpoint")
+    state.style_features_json = ""  # sentinel 已清空後的狀態
+    fake_style = MagicMock()
+    fake_style.model_dump_json = MagicMock(return_value='{"features":[]}')
+    fake_style.overall_tone = "口語"
+    fake_style.features = []
+    orch._run_style_analysis = AsyncMock(return_value=fake_style)
+    with patch("reasoning.live_research.orchestrator._classify_meta_intent",
+               new=AsyncMock(return_value="substantive")):
+        result = await orch._handle_stage_3_response(
+            state, "這是我寫過的一段口語化段落……", auto_continue=False
+        )
+    orch._run_style_analysis.assert_awaited_once()
+    assert result.stage_status == "checkpoint"
+    assert result.current_stage == 3

@@ -166,7 +166,7 @@ User Query
     ├──→ [L0] DR 併發限制 ← 新增：確認是 DR 後額外檢查（見 D4）
     │
     ▼
-  Retrieval (Vector + BM25)
+  Retrieval (Vector + pg_bigm)
     │
     ▼
   [L1] Ranking — LLM prompts 已加固 + chunk 隔離標記

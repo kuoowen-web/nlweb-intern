@@ -164,6 +164,14 @@ class LiveResearchStageState:
     book_outline_json: str = ""
     written_sections: List[Dict] = field(default_factory=list)
 
+    # 路 3 (P-回顧): Stage 6 後端組好的整份 full_report markdown 字串。
+    # 含 H1 研究問題標題 + sections + references + KG markdown section。
+    # 由 orchestrator._run_stage_6 在 emit_sse 前 assign（state.final_report_markdown = full_report），
+    # 隨 _persist_checkpoint_boundary 落 live_research_state JSONB。
+    # 空字串 = 尚未跑到 Stage 6，或欄位上線前已跑完的舊 session（from_dict fallback ""）。
+    # 前端回顧主路徑直接讀此字串丟 showLRExport，完全不重組（與 export 逐字一致）。
+    final_report_markdown: str = ""
+
     # === Grounding (Track A — sprint 2026-05-28) ===
     # key = evidence_id (int), value = List[GroundedClaim.model_dump()]
     # 由 loop_engine._run_mini_reasoning 寫入; Stage 5 chapter writer 讀取。
@@ -249,6 +257,39 @@ class LiveResearchStageState:
     # 跨 session resume / oncall debug / Track F 後續分析都讀此欄位。
     consistency_drift_log: List[Dict] = field(default_factory=list)
 
+    # === 離線防呆燒錢上限（plan: lr-sse-reconnect-resume, 2026-06-15）===
+    # 「斷線不取消、跑到 checkpoint 才停」會帶來離線後仍燒 LLM 的風險。
+    # CEO 拍板：上限計數**必須進 DB state**（不可放 orchestrator instance counter，
+    # 每次 continue 都 new orchestrator，instance counter 重連歸零防不住「斷→連→斷→連」）。
+    # 舊 session（無這些欄位）from_dict fallback default → 絕不被誤判 capped（backward compat）。
+    #
+    # offline_since: 首次偵測離線的 server epoch 時戳（跨 instance 比較用）。
+    #   None = 從未離線 / 已重置。重連未到 checkpoint 仍離線時**不重置**（保留原始起點）。
+    offline_since: Optional[float] = None
+    # offline_capped: 是否已達離線上限被停。前端 classifier 依此 render「研究已暫停（離線保護）」。
+    offline_capped: bool = False
+    # offline_cap_reason: "next_checkpoint" / "wall_seconds"，記錄停因（不可 silent）。
+    offline_cap_reason: str = ""
+    # offline_checkpoint_advances: 離線後已前進的 checkpoint 數（CEO 拍板「跨到下個 checkpoint 就停」核心計數）。
+    offline_checkpoint_advances: int = 0
+
+    # === Recollect cap（plan: lr-stage5-backward-recollect, S5）===
+    # 同一 session Stage 5 退回 analyst 補搜的累計次數。每次 recollect dispatch +1。
+    # 達 cap（default 2）後 block + 明確告知 user（非 silent）。舊 session（無此欄位）
+    # from_dict fallback 0 → 絕不被誤判 capped（backward compat）。
+    recollect_count: int = 0
+    # user 主動 recollect 的 informed-consent 兩段式 confirm 旗標（S1）。
+    # 第一輪 emit consent prompt 後設 True；第二輪 user 回覆 → 四段式路由後清旗標。
+    # True = 正等 user 確認補搜（會刪章節，不可逆）。
+    # G（Codex #6）：reset_for_recollect 必須清此 guard，否則 direct dispatch /
+    # cap blocked / 舊 session hydrate 殘留 True → 下輪 Stage5 回覆被錯誤攔截。
+    pending_recollect_confirmation: bool = False
+
+    # backward-nav restart 兩段式確認（plan: lr-backward-nav）。第一輪 emit confirm
+    # 後 True；第二輪 user 回覆 → 確認則 reset_to_stage(1)，取消則清旗標不動章節。
+    # 舊 session from_dict fallback False（絕不殘留誤觸）。
+    pending_restart_confirmation: bool = False
+
     # === Metadata ===
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -270,6 +311,7 @@ class LiveResearchStageState:
             "pending_reframe_proposal_markdown": self.pending_reframe_proposal_markdown,
             "book_outline_json": self.book_outline_json,
             "written_sections": self.written_sections,
+            "final_report_markdown": self.final_report_markdown,
             "executed_searches": self.executed_searches,
             "evidence_pool_json": self.evidence_pool_json,
             "hallucination_corrected": self.hallucination_corrected,
@@ -307,6 +349,15 @@ class LiveResearchStageState:
             },
             # Track F (sprint 2026-05-28): consistency_drift_log — append-only list
             "consistency_drift_log": list(self.consistency_drift_log),
+            # 離線防呆燒錢上限（plan: lr-sse-reconnect-resume, 2026-06-15）
+            "offline_since": self.offline_since,
+            "offline_capped": self.offline_capped,
+            "offline_cap_reason": self.offline_cap_reason,
+            "offline_checkpoint_advances": self.offline_checkpoint_advances,
+            # Recollect cap（plan: lr-stage5-backward-recollect, S5）
+            "recollect_count": self.recollect_count,
+            "pending_recollect_confirmation": self.pending_recollect_confirmation,
+            "pending_restart_confirmation": self.pending_restart_confirmation,
         }
 
     @classmethod
@@ -413,6 +464,7 @@ class LiveResearchStageState:
             pending_reframe_proposal_markdown=d.get("pending_reframe_proposal_markdown", ""),
             book_outline_json=d.get("book_outline_json", ""),
             written_sections=d.get("written_sections", []),
+            final_report_markdown=d.get("final_report_markdown", ""),
             executed_searches=d.get("executed_searches", []),
             evidence_pool_json=d.get("evidence_pool_json", ""),
             hallucination_corrected=d.get("hallucination_corrected", False),
@@ -433,6 +485,19 @@ class LiveResearchStageState:
             # Track F (sprint 2026-05-28)
             critic_section_reviews=critic_section_reviews,
             consistency_drift_log=consistency_drift_log,
+            # 離線防呆燒錢上限（plan: lr-sse-reconnect-resume, 2026-06-15）
+            # 舊 row 無欄位 → fallback default（offline_capped=False → 絕不誤判 capped）。
+            offline_since=d.get("offline_since"),
+            offline_capped=d.get("offline_capped", False),
+            offline_cap_reason=d.get("offline_cap_reason", ""),
+            offline_checkpoint_advances=d.get("offline_checkpoint_advances", 0),
+            # Recollect cap（plan: lr-stage5-backward-recollect, S5）
+            # 舊 session 無欄位 → fallback 0 / False（絕不誤判 capped / 殘留 pending）。
+            recollect_count=d.get("recollect_count", 0),
+            pending_recollect_confirmation=d.get("pending_recollect_confirmation", False),
+            # backward-nav restart 兩段式確認（plan: lr-backward-nav）。
+            # 舊 session 無欄位 → fallback False（絕不殘留誤觸）。
+            pending_restart_confirmation=d.get("pending_restart_confirmation", False),
         )
 
     def advance_to_stage(self, stage: int) -> None:
@@ -440,6 +505,123 @@ class LiveResearchStageState:
         self.current_stage = stage
         self.stage_status = "in_progress"
         self.checkpoint_prompt = ""
+        self.last_updated_at = datetime.now().isoformat()
+
+    def reset_to_stage(self, target_stage: int) -> None:
+        """Backward navigation：退回 target_stage，清除所有歸屬 stage > target 的
+        下游輸出 + 全部 guard 欄位，保留 evidence pool / context map / 時間約束 /
+        audit / infra / cap 計數。
+
+        規律（§D 真值表）：清「stage > target 的輸出 + 全 guard」；保留「pool /
+        context / time / append-only audit / schema / offline / recollect_count」。
+
+        target=1（restart，CEO #3）：保留 evidence_pool_json + context_map_json
+        （復用既有 evidence，不重蒐集、不重跑 BAB）；清 Stage 2+ 輸出（CEO #4）。
+        target<=4：清 book_outline_json（REVISE #4 consumer risk，避免 Stage 5
+        重入用舊大綱）。target>=3：保留 style_features_json + executed_searches。
+
+        ⚠ 與 reset_for_recollect 的差異：reset_for_recollect = 補搜語意（target 固定 1，
+        且配 _run_stage_1 seed_evidence_pool 疊加新 evidence）。reset_to_stage = 純
+        導航語意（不疊加 evidence、不動 recollect_count、target 可變）。兩者**不可合併**：
+        recollect 走 _dispatch_recollect（count+1 + seed pool 重跑 BAB），backward nav
+        只 reset + emit checkpoint（不重跑 BAB，由 forward run 自然覆蓋）。
+        """
+        # current_stage + status：退回 target，等使用者在 target checkpoint 重新決定
+        self.current_stage = target_stage
+        self.stage_status = "in_progress"
+        self.checkpoint_prompt = ""
+        # === guard 欄位：無論 target 一律清（防 phantom routing / 誤續寫）===
+        self.failed_intent_parse_count = 0
+        self.pending_reframe_json = ""
+        self.pending_reframe_proposal_markdown = ""
+        self.pending_format_confirmation = False
+        self.hallucination_corrected = False
+        self.stage_5_writer_running = False
+        self.stage5_waiting_for_user = False
+        self.pending_recollect_confirmation = False
+        # === Stage 5 輸出 + 推理產物：一律清（target 必 < 5；Stage 5 是末 checkpoint）===
+        self.completed_sections = []
+        self.written_sections = []
+        self.last_completed_section_index = -1
+        self.evidence_usage = {}
+        self.knowledge_graph = None
+        self.critic_section_reviews = {}
+        self.user_voice.revise_instructions = {}
+        # === Stage 4 輸出：target <= 4 清 book_outline + format chapters ===
+        if target_stage <= 4:
+            self.book_outline_json = ""
+            # format_specs rebind（不 in-place pop — 防污染 to_dict 淺引用，
+            # 同 reset_for_recollect 紀律）。只清 stale chapters override。
+            if isinstance(self.format_specs, dict):
+                self.format_specs = {
+                    k: v for k, v in self.format_specs.items() if k != "chapters"
+                }
+        # === Stage 3 輸出：target <= 2 清 style_features + executed_searches ===
+        # （target == 3：style/searches 是 Stage 3 的 target 內容，保留供重確認）
+        if target_stage <= 2:
+            self.style_features_json = ""
+            self.executed_searches = []
+        # 保留（不動）：evidence_pool_json / context_map_json /
+        #   initial_context_map_json / time_constraint / schema_version /
+        #   offline_* / user_voice.{citation_style,target_word_count,stage2_feedback} /
+        #   created_at / recollect_count
+        # audit append-only 保留：rejected_claims_log / consistency_drift_log
+        self.last_updated_at = datetime.now().isoformat()
+
+    def reset_for_recollect(self) -> None:
+        """Stage 5 退回 analyst 補搜：清除過期下游輸出 + 幽靈 guard + 推理產物，退回 Stage 1。
+
+        保留 evidence_pool_json（補搜在既有 pool 疊加，S2，非清空重蒐）+ context_map /
+        style / 時間約束 / 引用設定 / 離線計數 / append-only 稽核 log。
+        全欄位去留判定見 plan sweep (a) 表。
+
+        ⚠ 「保留 evidence_pool」≠「疊加生效」：必須配 Task 2（_run_stage_1 傳
+        seed_evidence_pool + seed_counter），否則進 Stage 1 後 engine 從空 pool 起跑、
+        orchestrator.py:977 用空 pool 覆蓋回 evidence_pool_json → 疊加失效變清空重蒐。
+        recollect_count 不在此清（cap 計數靠它跨輪累積）。
+        """
+        # 退回 Stage 1（重進 BAB → analyst→critic→writer→critic）
+        self.current_stage = 1
+        self.stage_status = "in_progress"
+        self.checkpoint_prompt = ""
+        self.failed_intent_parse_count = 0
+        # 過期下游輸出（補搜改 evidence 後必然過期）
+        self.completed_sections = []
+        self.written_sections = []
+        self.last_completed_section_index = -1
+        self.book_outline_json = ""
+        self.executed_searches = []
+        # format override：只清 stale chapters（_resolve_chapter_source 讀它），保留其他 format key。
+        # C-1（in-house+Gemini 2方）：**rebind 不 in-place pop**。stage_state.py:283 `to_dict`
+        # 對 format_specs 是直接淺引用（"format_specs": self.format_specs，非 copy/deepcopy —
+        # 親驗 2026-06-16），若這裡做 in-place `self.format_specs.pop("chapters")` 會連帶污染
+        # 任何已持有的 to_dict() 淺引用（含 _dispatch_recollect 的 rollback snapshot）→ rollback
+        # 後 chapters 仍缺 = finding I 想消滅的「半重置換欄位」重現。改建新 dict（rebind）切斷
+        # 與 snapshot 的共享，reset 不污染任何外部淺引用。
+        if isinstance(self.format_specs, dict):
+            self.format_specs = {
+                k: v for k, v in self.format_specs.items() if k != "chapters"
+            }
+        # 幽靈 guard（不清 = phantom reframe / format confirm / 誤續寫 / 誤判 writer 在跑）
+        self.pending_reframe_json = ""
+        self.pending_reframe_proposal_markdown = ""
+        self.pending_format_confirmation = False
+        self.hallucination_corrected = False
+        self.stage_5_writer_running = False
+        self.stage5_waiting_for_user = False
+        # G（Codex #6）：recollect consent guard 必清 —— 否則殘留 True 會讓下輪
+        # Stage5 user 回覆被 pending-confirm 攔截分支誤吃。dispatch 成功進 Stage1 後
+        # 不再需要等確認，清為 False。
+        self.pending_recollect_confirmation = False
+        # 推理產物（綁舊 analyst claim / 舊 section index → 補搜重生成）
+        self.evidence_usage = {}
+        self.knowledge_graph = None
+        self.critic_section_reviews = {}
+        self.user_voice.revise_instructions = {}
+        # 保留：evidence_pool_json / context_map_json / initial_context_map_json /
+        #   style_features_json / time_constraint / schema_version / offline_* /
+        #   user_voice.{citation_style,target_word_count,stage2_feedback} / created_at
+        # audit append-only 保留：rejected_claims_log / consistency_drift_log
         self.last_updated_at = datetime.now().isoformat()
 
     def set_checkpoint(self, prompt: str) -> None:

@@ -557,3 +557,35 @@ class TestExport:
         created = await svc.create_session(USER_ID, ORG_ID, title="Bad Format")
         with pytest.raises(ValueError, match="Unsupported export format"):
             await svc.export_session(created['id'], USER_ID, ORG_ID, format='pdf')
+
+
+class TestLRDialogSnapshot:
+    """LR dialog DOM snapshot — isolated top-level column (plan v3 Task 1)."""
+
+    @pytest.mark.asyncio
+    async def test_lr_dialog_snapshot_roundtrip_and_isolation(self, svc):
+        sid = (await svc.create_session(USER_ID, ORG_ID, title="S1"))['id']
+        # 模擬後端 _save_state 寫 per-stage state
+        await svc.update_session(sid, USER_ID, ORG_ID,
+            {'live_research_state': {'current_stage': 6, 'context_map_json': '{"k":1}'}})
+        # 前端存 snapshot（獨立欄位）
+        snap = [{'type': 'narration', 'stage': 1, 'html': '<p>x</p>', 'dataset': {}, 'ts': 1}]
+        await svc.update_session(sid, USER_ID, ORG_ID, {'lr_dialog_snapshot': snap})
+        row = await svc.get_session(sid, USER_ID, ORG_ID)
+        lrs = row['live_research_state']
+        if isinstance(lrs, str):
+            lrs = json.loads(lrs)
+        snap_out = row['lr_dialog_snapshot']
+        # 【N1 — 禁容錯掩蓋】deserialize 必須回 list（jsonb_fields 白名單已加 lr_dialog_snapshot）。
+        # 絕不可寫 `if isinstance(str): json.loads` 幫它容錯 —— 那會在 N1 漏修（SQLite 回字串）時假綠燈。
+        assert isinstance(snap_out, list), \
+            f"deserialize 必回 list 非字串(N1 jsonb_fields 漏加?) got {type(snap_out)}"
+        assert lrs['current_stage'] == 6              # live_research_state 未被 snapshot 覆蓋
+        assert snap_out == snap                        # snapshot 寫入且讀回
+        # 反向：後端再寫一次 state，不應抹掉 snapshot
+        await svc.update_session(sid, USER_ID, ORG_ID,
+            {'live_research_state': {'current_stage': 6, 'context_map_json': '{"k":2}'}})
+        row2 = await svc.get_session(sid, USER_ID, ORG_ID)
+        snap2 = row2['lr_dialog_snapshot']
+        assert isinstance(snap2, list)                 # 同上，強斷言不容錯
+        assert snap2 == snap                           # snapshot 仍在（C1 根治證明）

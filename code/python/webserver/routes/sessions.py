@@ -82,6 +82,7 @@ async def create_session_handler(request: web.Request) -> web.Response:
             chat_history=body.get('chat_history'),
             accumulated_articles=body.get('accumulated_articles'),
             research_report=body.get('research_report'),
+            lr_dialog_snapshot=body.get('lr_dialog_snapshot'),
         )
         fire_and_forget(log_action('session.create', user_id=user_info['id'], org_id=org_id, target_type='session', target_id=session['id']))
         return web.json_response({'success': True, 'session': session}, status=201)

@@ -226,6 +226,64 @@ class ClarificationPromptBuilder:
 請針對上述查詢進行判斷。"""
 
 
+def build_clarification_options_prompt(
+    query: str,
+    ambiguity_type: str,
+    current_date: str,
+) -> str:
+    """Build the single-axis clarification-OPTIONS prompt used by
+    ClarificationAgent.generate_options (clarification_type/options schema).
+    Distinct from build_clarification_prompt (multi-dimensional questions schema).
+
+    Args:
+        query: User's ambiguous query
+        ambiguity_type: Type of ambiguity (time | scope | entity)
+        current_date: Current date string (YYYY-MM-DD)
+
+    Returns:
+        Complete prompt string for LLM
+    """
+    return f"""你是一個意圖澄清助手 (Clarification Agent)。
+
+使用者的查詢：「{query}」
+
+當前日期：{current_date}
+
+歧義類型：{ambiguity_type}
+
+請分析這個查詢並生成 2-4 個明確的選項供使用者選擇。
+
+處理原則：
+1. **時間歧義 (time)**：識別查詢中的人物/事件，查找其相關時間區間（任期、事件發生期間）。
+2. **範圍歧義 (scope)**：查詢過於廣泛時，拆分成子主題。
+3. **實體歧義 (entity)**：同名人物/組織需要區分時。
+
+**重要**：不要猜測使用者意圖，你的工作是讓使用者自己選擇。
+
+請返回 JSON 格式，包含以下欄位：
+- clarification_type: "{ambiguity_type}"
+- context_hint: 簡短說明為何需要澄清（顯示給使用者）
+- options: 陣列，每個元素包含：
+  - label: 選項顯示文字
+  - intent: 系統內部使用的意圖標籤
+  - time_range: (如果是時間歧義) {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}
+- fallback_suggestion: 若以上皆非，建議使用者如何重新描述
+
+範例輸出格式請參考以下：
+{{
+  "clarification_type": "time",
+  "context_hint": "蔡英文總統任期為 2016-2024 年，請問你想了解：",
+  "options": [
+    {{"label": "任內政策回顧 (2016-2024)", "intent": "historical", "time_range": {{"start": "2016-05-20", "end": "2024-05-19"}}}},
+    {{"label": "卸任後的影響與評價 (2024至今)", "intent": "contemporary", "time_range": {{"start": "2024-05-20", "end": null}}}},
+    {{"label": "完整時間軸 (政策演變)", "intent": "timeline", "time_range": null}}
+  ],
+  "fallback_suggestion": "或者你可以直接指定時間，例如「2022年的兩岸政策」"
+}}
+
+請針對上述查詢生成澄清選項。"""
+
+
 def build_clarification_prompt(
     query: str,
     temporal_range: Optional[Dict[str, Any]] = None,

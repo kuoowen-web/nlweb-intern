@@ -67,8 +67,8 @@ async def test_reject_then_revise_pass_uses_revised_output(monkeypatch):
         MagicMock(status="PASS"),
     ])
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: fake_analyst)
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: fake_critic)
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: fake_analyst)
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: fake_critic)
 
     cm = MagicMock()
     cm.research_question = "Q"
@@ -95,8 +95,8 @@ async def test_revise_still_reject_keeps_forensic_trail(monkeypatch):
     fake_critic.review = AsyncMock(side_effect=[
         MagicMock(status="REJECT"), MagicMock(status="REJECT"),
     ])
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: fake_analyst)
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: fake_critic)
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: fake_analyst)
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: fake_critic)
     cm = MagicMock(); cm.research_question = "Q"
     await engine._run_mini_reasoning(cm, "formatted results")
     fake_analyst.revise.assert_awaited_once()  # 上限 1 輪
@@ -118,8 +118,8 @@ async def test_revise_exception_emits_degraded_narration(monkeypatch):
     fake_analyst.revise = AsyncMock(side_effect=RuntimeError("boom"))
     fake_critic = MagicMock()
     fake_critic.review = AsyncMock(return_value=MagicMock(status="REJECT"))
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: fake_analyst)
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: fake_critic)
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: fake_analyst)
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: fake_critic)
     cm = MagicMock(); cm.research_question = "Q"
     await engine._run_mini_reasoning(cm, "formatted results")
     assert lr_copy.MINI_REASONING_REVISE_DEGRADED_NARRATION in emitted

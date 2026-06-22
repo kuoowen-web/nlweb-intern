@@ -529,6 +529,8 @@ class AuthDB:
                     visibility TEXT DEFAULT 'private',
                     team_comments TEXT DEFAULT '[]',
                     is_archived INTEGER DEFAULT 0,
+                    live_research_state TEXT DEFAULT '{}',
+                    lr_dialog_snapshot TEXT DEFAULT '[]',
                     deleted_at REAL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
@@ -738,6 +740,8 @@ class AuthDB:
                     visibility VARCHAR(20) DEFAULT 'private',
                     team_comments JSONB DEFAULT '[]',
                     is_archived BOOLEAN DEFAULT FALSE,
+                    live_research_state JSONB DEFAULT '{}',
+                    lr_dialog_snapshot JSONB DEFAULT '[]',
                     deleted_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     updated_at TIMESTAMPTZ DEFAULT NOW()

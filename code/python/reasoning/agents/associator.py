@@ -10,11 +10,15 @@ Used in Live Research mode's B->A->B' loop:
 from typing import List, Optional
 from reasoning.agents.base import BaseReasoningAgent
 from reasoning.prompts.associator import AssociatorPromptBuilder
+from reasoning.prompts.stage1_format_extract import (
+    Stage1FormatExtractPromptBuilder,
+)
 from reasoning.schemas_live import (
     AssociatorBuildOutput,
     AssociatorDeriveOutput,
     AssociatorRefineOutput,
     ContextMap,
+    InitialFormatSpec,
     context_map_to_summary,
     context_map_extract_for_section,
 )
@@ -47,6 +51,7 @@ class AssociatorAgent(BaseReasoningAgent):
             max_retries=3
         )
         self.prompt_builder = AssociatorPromptBuilder()
+        self.format_extract_prompt_builder = Stage1FormatExtractPromptBuilder()
 
     async def build_context_map(
         self,
@@ -76,6 +81,28 @@ class AssociatorAgent(BaseReasoningAgent):
             prompt=prompt,
             response_schema=AssociatorBuildOutput,
             level="high"
+        )
+        return result
+
+    async def extract_initial_format_spec(
+        self, query: str
+    ) -> InitialFormatSpec:
+        """從使用者初始研究委託原文抽出明說的格式需求（InitialFormatSpec）。
+
+        Stage 1 進場一次性呼叫。沒明確指定的維度由 LLM 留 null / 空（保守 default）。
+        走 call_llm_validated（TypeAgent + Pydantic 自動 validate / retry）。
+
+        Args:
+            query: 使用者原始研究委託文字。
+
+        Returns:
+            InitialFormatSpec。空 spec（全 null）= 使用者沒指定格式。
+        """
+        prompt = self.format_extract_prompt_builder.build_extract_prompt(query)
+        result, _, _ = await self.call_llm_validated(
+            prompt=prompt,
+            response_schema=InitialFormatSpec,
+            level="low",
         )
         return result
 

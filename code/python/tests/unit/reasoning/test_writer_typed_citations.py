@@ -158,8 +158,9 @@ def test_render_citations_none_mode_removes_placeholder():
 
 
 def test_render_citations_missing_author_fallback_with_note():
-    """RCA 2026-05-16: author 空時**不** fallback source_domain（避免 example.com /
-    cna.com.tw 偽裝成 author 誤導 user）→ 改顯示「來源不明」明示 metadata 缺。
+    """APA title fallback (2026-06-18): author 空時用文章標題取代作者位置（APA 7th
+    標準），**不** fallback source_domain（避免 cna.com.tw 偽裝成 author 誤導 user）。
+    title="T"（短於 N）→ 整個標題加全形引號 render「(「T」, n.d.)」。
     """
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
     from reasoning.schemas_live import (
@@ -175,17 +176,22 @@ def test_render_citations_missing_author_fallback_with_note():
     rendered = LiveResearchOrchestrator._render_section_citations(
         section, lookup, citation_format="author_year",
     )
-    # 不再偽裝成 author — 顯示「來源不明」明示
-    assert "(來源不明, n.d.)" in rendered.section_content
-    # source_domain 不可被當作 author render（避免 cna.com.tw 誤導為 author）
+    # author 缺 → title 取代（全形引號），year 缺 → n.d.
+    assert "(「T」, n.d.)" in rendered.section_content
+    # 不再退化「來源不明」（title 有，不該落極端兜底）
+    assert "來源不明" not in rendered.section_content
+    # RCA 區分仍守：source_domain 不可被當作 author render（cna.com.tw 偽裝為人名）
     assert "(cna.com.tw" not in rendered.section_content
+    assert "cna.com.tw" not in rendered.section_content
     assert rendered.methodology_note is not None
     # methodology_note 必須 emit 缺 metadata 警告（明示，no silent fail）
     assert "metadata" in rendered.methodology_note or "缺" in rendered.methodology_note
 
 
 def test_render_citations_missing_author_counts_in_methodology():
-    """methodology_note 應 emit 缺 metadata 的 citation 數量（多筆缺 author/year）。"""
+    """methodology_note 應 emit 缺 author 的 citation 數量（多筆缺 author）。
+    缺 author 的兩筆改用 title 取代（全形引號），不再「來源不明」。
+    """
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
     from reasoning.schemas_live import (
         LiveWriterSectionOutput, CitationInline, EvidencePoolEntry,
@@ -208,12 +214,104 @@ def test_render_citations_missing_author_counts_in_methodology():
     rendered = LiveResearchOrchestrator._render_section_citations(
         section, lookup, citation_format="author_year",
     )
-    # 兩筆缺 metadata，一筆 OK
-    assert rendered.section_content.count("(來源不明, n.d.)") == 2
+    # 兩筆缺 author → title 取代（全形引號），一筆有 author OK
+    assert "(「T1」, n.d.)" in rendered.section_content
+    assert "(「T3」, n.d.)" in rendered.section_content
     assert "(王立人, 2022)" in rendered.section_content
-    # methodology_note 應記錄 2 筆缺 metadata
+    # 不再退化「來源不明」（title 有）
+    assert "來源不明" not in rendered.section_content
+    # methodology_note 應記錄 2 筆缺 author
     note = rendered.methodology_note or ""
     assert "2" in note  # count quoted
+
+
+def test_render_citations_long_title_truncated_with_ellipsis():
+    """APA title fallback：title 超過 N 字 → 截前 N 字 + 全形省略號（引號內）。"""
+    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
+    from reasoning.schemas_live import (
+        LiveWriterSectionOutput, CitationInline, EvidencePoolEntry,
+    )
+    # 18 字標題，N=10 → 截前 10 字 + 「…」，整段包全形引號
+    long_title = "臺灣農漁村再生能源發展與社區衝突研究"
+    section = LiveWriterSectionOutput(
+        section_title="前言", section_content="X{cite:1}.",
+        sources_used=[1], citations=[CitationInline(evidence_id=1)],
+    )
+    lookup = {1: EvidencePoolEntry(
+        evidence_id=1, title=long_title, url="u", published_at="2024-03-01",
+    )}
+    rendered = LiveResearchOrchestrator._render_section_citations(
+        section, lookup, citation_format="author_year",
+    )
+    maxlen = LiveResearchOrchestrator._TITLE_FALLBACK_MAXLEN
+    expected = f"(「{long_title[:maxlen]}…」, 2024)"
+    assert expected in rendered.section_content
+    # 省略號在引號內、後接 year
+    assert "…」, 2024)" in rendered.section_content
+    assert "來源不明" not in rendered.section_content
+
+
+def test_render_citations_author_missing_year_from_published_at_no_coupling():
+    """連坐解除：author 空但 published_at 有 → title 取代 + year 走 published_at，
+    不因 author 缺而連坐 n.d.。render「(「標題」, 2024)」。
+    """
+    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
+    from reasoning.schemas_live import (
+        LiveWriterSectionOutput, CitationInline, EvidencePoolEntry,
+    )
+    section = LiveWriterSectionOutput(
+        section_title="前言", section_content="X{cite:1}.",
+        sources_used=[1], citations=[CitationInline(evidence_id=1)],
+    )
+    lookup = {1: EvidencePoolEntry(
+        evidence_id=1, title="丹麥綠能", url="u", published_at="2024-03-01",
+    )}
+    rendered = LiveResearchOrchestrator._render_section_citations(
+        section, lookup, citation_format="author_year",
+    )
+    # year 從 published_at derive（2024），不因 author 缺連坐 n.d.
+    assert "(「丹麥綠能」, 2024)" in rendered.section_content
+    assert "n.d." not in rendered.section_content
+
+
+def test_render_citations_author_missing_title_present_year_missing():
+    """連坐解除：author 空、title 有、year/published_at 全缺 → title 取代 + n.d. 並存。"""
+    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
+    from reasoning.schemas_live import (
+        LiveWriterSectionOutput, CitationInline, EvidencePoolEntry,
+    )
+    section = LiveWriterSectionOutput(
+        section_title="前言", section_content="X{cite:1}.",
+        sources_used=[1], citations=[CitationInline(evidence_id=1)],
+    )
+    lookup = {1: EvidencePoolEntry(evidence_id=1, title="某篇文章", url="u")}
+    rendered = LiveResearchOrchestrator._render_section_citations(
+        section, lookup, citation_format="author_year",
+    )
+    # title 取代 author + n.d. 並存（驗連坐已解除）
+    assert "(「某篇文章」, n.d.)" in rendered.section_content
+    assert "來源不明" not in rendered.section_content
+
+
+def test_render_citations_author_and_title_both_empty_extreme_fallback():
+    """極端兜底：author 空、title 空、year 空 → 仍「(來源不明, n.d.)」（no silent fail）。"""
+    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
+    from reasoning.schemas_live import (
+        LiveWriterSectionOutput, CitationInline, EvidencePoolEntry,
+    )
+    section = LiveWriterSectionOutput(
+        section_title="前言", section_content="X{cite:1}.",
+        sources_used=[1], citations=[CitationInline(evidence_id=1)],
+    )
+    # title 留空（極端，理論上 retrieval 一定有 title）
+    lookup = {1: EvidencePoolEntry(evidence_id=1, title="", url="u")}
+    rendered = LiveResearchOrchestrator._render_section_citations(
+        section, lookup, citation_format="author_year",
+    )
+    assert "(來源不明, n.d.)" in rendered.section_content
+    # methodology_note 仍 emit 警告（明示降級）
+    note = rendered.methodology_note or ""
+    assert "metadata" in note or "缺" in note
 
 
 def test_render_citations_empty_citations_noop():
@@ -334,8 +432,11 @@ def test_render_citations_author_and_year_both_present():
     assert "(陳明, 2021)" in rendered.section_content
 
 
-def test_render_citations_author_present_no_year_no_published_falls_back():
-    """author 有但 year 與 published_at 皆缺 → 仍標「來源不明」(graceful, no silent)。"""
+def test_render_citations_author_present_no_year_renders_author_with_nd():
+    """連坐解除（2026-06-18）：author 有但 year 與 published_at 皆缺 →
+    year 走標準 n.d.，author 照常 render「(王立人, n.d.)」。year 缺不再連坐
+    author 落「來源不明」。author 未缺 → 不計入 missing_metadata_count。
+    """
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
     from reasoning.schemas_live import (
         LiveWriterSectionOutput, CitationInline, EvidencePoolEntry,
@@ -350,10 +451,11 @@ def test_render_citations_author_present_no_year_no_published_falls_back():
     rendered = LiveResearchOrchestrator._render_section_citations(
         section, lookup, citation_format="author_year",
     )
-    assert "(來源不明, n.d.)" in rendered.section_content
-    # methodology_note 必須記錄缺 metadata（no silent fail）
-    assert rendered.methodology_note
-    assert "metadata" in rendered.methodology_note or "缺" in rendered.methodology_note
+    # author 有 → 照常 render；year 缺 → 標準 n.d.（不連坐來源不明）
+    assert "(王立人, n.d.)" in rendered.section_content
+    assert "來源不明" not in rendered.section_content
+    # author 未缺 → 不計入 missing_metadata_count → 無 metadata 缺警告
+    assert not rendered.methodology_note
 
 
 def test_evidence_pool_entry_backward_compat_no_author_key():

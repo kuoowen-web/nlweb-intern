@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import quote
 from core.config import CONFIG
+from core.retry_util import retry_async
 from misc.logger.logging_config_helper import get_configured_logger
 
 logger = get_configured_logger("google_search_client")
@@ -202,10 +203,20 @@ class GoogleSearchClient:
 
             logger.info(f"Google Search API call: '{query}' (num_results={num_results})")
 
-            response = await client.get(self.api_endpoint, params=params)
-            response.raise_for_status()
+            # Short retry on transient faults (429/timeout/5xx) before the call's
+            # cache+fallback degradation kicks in. retry_async re-raises once
+            # exhausted, so the existing fallback path (stale cache / empty) still
+            # applies — we only degrade after retries are spent.
+            async def _request():
+                response = await client.get(self.api_endpoint, params=params)
+                response.raise_for_status()
+                return response.json()
 
-            data = response.json()
+            data = await retry_async(
+                _request,
+                max_retries=2,
+                description="google_cse",
+            )
 
             # Parse results
             results = []

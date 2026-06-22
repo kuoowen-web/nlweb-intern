@@ -98,8 +98,13 @@ class FastTrack:
                 filtered_items = []
 
                 for item in items:
-                    # Handle both 4-tuple and 5-tuple (with vector) formats
-                    if len(item) == 5:
+                    # Handle 4-tuple, 5-tuple (with vector), and 6-tuple
+                    # (with retrieval_scores) formats. Only url/json_str are
+                    # needed for the date filter; the full item is preserved
+                    # below so retrieval_scores (index 5) is NOT dropped.
+                    if len(item) >= 6:
+                        url, json_str = item[0], item[1]
+                    elif len(item) == 5:
                         url, json_str, name, site, vector = item
                     else:
                         url, json_str, name, site = item
@@ -114,12 +119,11 @@ class FastTrack:
                             pub_date = datetime.strptime(date_str, '%Y-%m-%d')
                             pub_date = pub_date.replace(tzinfo=timezone.utc)
 
-                            # Keep only recent articles
+                            # Keep only recent articles. Append the ORIGINAL item
+                            # (do not rebuild) so a 6-tuple's retrieval_scores
+                            # survive the temporal filter.
                             if pub_date >= cutoff_date:
-                                if vector is not None:
-                                    filtered_items.append([url, json_str, name, site, vector])
-                                else:
-                                    filtered_items.append([url, json_str, name, site])
+                                filtered_items.append(item)
                     except Exception as e:
                         # If we can't parse the date, skip this article for temporal queries
                         logger.debug(f"Could not parse date for temporal filtering: {e}")

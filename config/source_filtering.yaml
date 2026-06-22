@@ -1,28 +1,3 @@
-# Source tier filtering configuration
-source_tier_config:
-  strict:
-    tier_thresholds:
-      min_tier: 1
-      max_tier: 2
-    min_tier_1_ratio: 0.6
-    fallback_on_insufficient: true
-    fallback_max_tier: 3
-
-  discovery:
-    tier_thresholds:
-      min_tier: 1
-      max_tier: 4
-    min_tier_1_ratio: 0.3
-    fallback_on_insufficient: false
-
-  monitor:
-    tier_thresholds:
-      min_tier: 1
-      max_tier: 3
-    min_tier_1_ratio: 0.4
-    fallback_on_insufficient: true
-    fallback_max_tier: 4
-
 # Source tier definitions
 tier_definitions:
   1:

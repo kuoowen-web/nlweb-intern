@@ -266,6 +266,7 @@ class RelationType(str, Enum):
     PART_OF = "part_of"
     OWNS = "owns"
     # Associative
+    SUPPORTS = "supports"  # 論證支持關係（prod LLM 自然輸出，補齊避免 KG 整包被 validation 丟棄）
     RELATED_TO = "related_to"
 
 

@@ -38,19 +38,64 @@ def test_methodology_notes_keep_interpolation():
 
 
 def test_warn_marker_prefix_and_dedup_regex_match_old_and_new():
-    m = lr_copy.warn_marker(4, "說明" * 100)
+    m = lr_copy.warn_marker(4, "說明。" * 100)
     assert m.startswith(lr_copy.WARN_MARKER_PREFIX)
     # 字面錨（S4-M W1）：與 CRITIC_REJECTED_PREFIX / REFERENCE_MISSING_SENTINEL /
     # [本章資料不足] 同級防禦 — 解耦後文案被亂改，此處仍會報警
     assert lr_copy.WARN_MARKER_PREFIX == "[查核提醒："
     assert "4 處說法" in m
-    assert len(m) < len(lr_copy.WARN_MARKER_PREFIX) + 150  # explanation 截斷 100 字
+    # 2026-06-19 新契約：critic 查核說明完整輸出、不截斷、不補省略號（移除 100 字上限）。
+    # 收尾仍是閉合括號 ]，不可半句 + 孤立 ]。
+    assert m.endswith("]")
+    assert "…]" not in m  # 不再節略 → 不補省略號
+    assert ("說明。" * 100) in m  # 超長 explanation 完整保留
     # dedup regex 必須同時匹配新 marker 與舊 session 殘留的舊 marker
     assert re.search(lr_copy.WARN_MARKER_DEDUP_RE, m)
     assert re.search(
         lr_copy.WARN_MARKER_DEDUP_RE,
         f"{lr_copy.LEGACY_WARN_MARKER_PREFIX} 2 筆 claim 待驗證 — xxx]",
     )
+
+
+def test_warn_marker_short_explanation_untouched():
+    """短 explanation 原樣保留，不補省略號。"""
+    short = "治理爭議的線索，但尚未明確建立單一責任歸屬。"
+    m = lr_copy.warn_marker(1, short)
+    assert short in m
+    assert "…]" not in m  # 不補省略號
+    assert m.endswith("]")
+
+
+def test_warn_marker_long_explanation_kept_whole_no_orphan_bracket():
+    """2026-06-19 新契約：超長 explanation 完整保留、不截斷、不補省略號，
+    收尾仍是閉合括號 ]（不留半句 + 孤立 ]）。
+
+    critic 查核說明是給使用者看「為何本章有疑慮」的——攔腰砍掉反傷信任，應完整輸出。
+    取代舊的 Bug B 句界截斷契約（_WARN_EXPLANATION_MAX 100 字上限已移除）。
+    """
+    long_expl = ("第一句完整內容。" * 20) + "這是該被完整保留的第二段補述。"
+    m = lr_copy.warn_marker(3, long_expl)
+    assert long_expl in m          # 完整保留，一字不少
+    assert "…]" not in m           # 不節略 → 不補省略號
+    assert m.endswith("]")         # 收尾仍閉合括號
+
+
+def test_warn_marker_sanitizes_inner_brackets_dedup_regex_intact():
+    """AR R1 blocker：explanation 內含 ] 不可破壞 marker（dedup regex [^\\]]* 會提前結束）。
+
+    驗：(1) marker body 無 raw ]（只有結尾 structural ]）；(2) DEDUP_RE 完整匹配整個 marker
+    （match span == 整個 marker，非提前在 body 的 ] 結束）。
+    """
+    m = lr_copy.warn_marker(1, "建議引用 [4] 佐證，另見 [12] 的數據] 說明")
+    # AR R2 should-fix：body 精確切 = prefix 之後到結尾 structural ] 之前
+    body = m[len(lr_copy.WARN_MARKER_PREFIX):-1]
+    assert "]" not in body, f"marker body 殘留 raw ]: {m!r}"
+    assert "[" not in body, f"marker body 殘留 raw [: {m!r}"
+    assert m.endswith("]")
+    # dedup regex 必須完整匹配到整個 marker（不在 body 的 ] 提前結束）
+    match = re.search(lr_copy.WARN_MARKER_DEDUP_RE, m)
+    assert match is not None
+    assert match.group(0) == m, f"dedup regex 提前結束，只匹配到 {match.group(0)!r}"
 
 
 def test_banners_keep_interpolation():
@@ -73,3 +118,56 @@ def test_reference_missing_entry_keeps_sentinel_and_eid():
     t = lr_copy.reference_missing_entry(7)
     assert t.startswith("[7] ")
     assert lr_copy.REFERENCE_MISSING_SENTINEL in t
+
+
+def test_problematic_chapter_line_is_one_based():
+    """Bug G 回歸：章號 1-based（index=3 → 第 4 章）。測 production helper，非拷貝邏輯。"""
+    # 第四段 index=3 → 第 4 章（不是第 3 章）
+    assert lr_copy.problematic_chapter_line(3, "結果與討論", "驗證失敗") == "- 第 4 章「結果與討論」（驗證失敗）"
+    assert lr_copy.problematic_chapter_line(0, "前言", "資料不足") == "- 第 1 章「前言」（資料不足）"
+
+
+def test_problematic_chapter_line_missing_index_no_crash():
+    """缺 index（"?"）退化不 crash、不印「第 None 章」、不觸發 "?"+1 TypeError。"""
+    assert lr_copy.problematic_chapter_line("?", "缺 index 的章", "未完成") == "- 第 ? 章「缺 index 的章」（未完成）"
+
+
+def test_problematic_chapter_line_bool_not_treated_as_int():
+    """AR R1 nit：bool 是 int 子類，type() is int 排除它（避免 True+1=2 印「第 2 章」）。"""
+    # bool 不該被當章號 +1，退化 "?"
+    assert "第 ? 章" in lr_copy.problematic_chapter_line(True, "x", "y")
+
+
+def test_problematic_chapter_line_edge_cases():
+    """AR R2 should-fix：None title / "0" 字串 index / 換行 title 都不破壞 markdown。"""
+    # "0" 是字串非 int → 退化 "?"（不可被當 0+1）
+    assert "第 ? 章" in lr_copy.problematic_chapter_line("0", "x", "y")
+    # None title → "?"，不印「第 N 章「None」」
+    assert "「?」" in lr_copy.problematic_chapter_line(0, None, "y")
+    # title 含換行 → 壓成單行，不破壞 markdown list（- 開頭）
+    line = lr_copy.problematic_chapter_line(0, "標題\n第二行", "y")
+    assert "\n" not in line
+
+
+def test_build_problematic_chapters_md_one_based():
+    """組裝邏輯：section_index=0 → 第 1 章。"""
+    problematic = [
+        {"section_index": 3, "title": "結果與討論", "status": "guard_failed"},
+        {"section_index": 0, "title": "前言", "status": "blocked_no_evidence"},
+    ]
+    reason_map = {"guard_failed": "驗證失敗", "blocked_no_evidence": "資料不足"}
+    md = lr_copy.build_problematic_chapters_md(problematic, reason_map)
+    assert "第 4 章「結果與討論」" in md and "第 1 章「前言」" in md and "第 0 章" not in md
+
+
+def test_chapter_word_overshoot_narration_interpolates():
+    n = lr_copy.chapter_word_overshoot_narration("國內案例文獻", 2500, 3600)
+    # 章名 + 目標 + 實際都要出現，user 才知道是哪章、差多少
+    assert "國內案例文獻" in n
+    assert "2500" in n
+    assert "3600" in n
+    # 語意：這是「比講好的字數長」的中性透明化提示，不是錯誤
+    assert "字" in n
+    # 不可洩漏開發術語（與全檔 AST 掃描同級的字面防禦）
+    for bad in ("LLM", "token", "target_word_count", "overshoot", "guard"):
+        assert bad not in n

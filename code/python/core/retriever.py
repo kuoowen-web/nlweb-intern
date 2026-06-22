@@ -2,7 +2,7 @@
 # Licensed under the MIT License
 
 """
-Unified vector database interface with support for Azure AI Search, Milvus, and Qdrant.
+Unified vector database interface with support for PostgreSQL (pgvector).
 This module provides abstract base classes and concrete implementations for database operations.
 """
 
@@ -72,7 +72,7 @@ def merge_json_array(json_array):
 logger = get_configured_logger("retriever")
 
 # Client caches for reusing instances
-_low_level_client_cache = {}   # For raw DB clients (Qdrant, etc.)
+_low_level_client_cache = {}   # For raw DB clients (PostgreSQL, etc.)
 _vector_client_cache = {}       # For VectorDBClient instances
 _client_cache_lock = asyncio.Lock()
 
@@ -90,22 +90,23 @@ def init():
                 _ensure_package_installed(db_type)
                 
                 # Preload the module
-                if db_type == "qdrant":
-                    from retrieval_providers.qdrant import QdrantVectorClient
-                    _preloaded_modules[db_type] = QdrantVectorClient
-                elif db_type == "postgres":
+                if db_type == "postgres":
                     from retrieval_providers.postgres_client import PgVectorClient
                     _preloaded_modules[db_type] = PgVectorClient
                 else:
-                    logger.warning(f"Unsupported db_type: {db_type} (only qdrant and postgres are supported)")
+                    logger.warning(f"Unsupported db_type: {db_type} (only postgres is supported)")
 
             except Exception as e:
                 logger.warning(f"Failed to preload {db_type} client module: {e}")
 
 # Mapping of database types to their required pip packages
 _db_type_packages = {
-    "qdrant": ["qdrant-client>=1.14.0"],
     "postgres": ["psycopg", "psycopg[binary]>=3.1.12", "psycopg[pool]>=3.2.0", "pgvector>=0.4.0"],
+}
+
+# Map db_type -> uv extra that provides its driver, for fail-loud messaging.
+_db_type_extras = {
+    "postgres": "postgres",
 }
 
 # Cache for installed packages
@@ -135,8 +136,6 @@ def _ensure_package_installed(db_type: str):
                 __import__("azure.core")
             elif package_name == "azure-search-documents":
                 __import__("azure.search.documents")
-            elif package_name == "qdrant-client":
-                __import__("qdrant_client")
             elif package_name == "elasticsearch":
                 __import__("elasticsearch")
             elif package_name == "psycopg":
@@ -148,9 +147,11 @@ def _ensure_package_installed(db_type: str):
             _installed_packages.add(package_name)
             logger.debug(f"Package {package_name} is already installed")
         except ImportError:
+            extra = _db_type_extras.get(db_type, db_type)
             raise ImportError(
-                f"Package '{package_name}' is required for {db_type} backend. "
-                f"Install with: pip install {package}"
+                f"Package '{package_name}' is required for the '{db_type}' "
+                f"retrieval backend but is not installed. Install it with:\n"
+                f"    uv sync --extra {extra}"
             )
 
 
@@ -480,12 +481,6 @@ class VectorDBClient:
             logger.debug(f"  api_key: {bool(config.api_key)} ({config.api_key[:10] + '...' if config.api_key else 'None'})")
             logger.debug(f"  api_endpoint: {bool(config.api_endpoint)} ({config.api_endpoint if config.api_endpoint else 'None'})")
             return bool(config.api_key and config.api_endpoint)
-        elif db_type == "qdrant":
-            # Qdrant can use either local path or remote URL
-            if config.database_path:
-                return True  # Local file-based storage
-            else:
-                return bool(config.api_endpoint)  # Remote server (api_key is optional)
         elif db_type == "elasticsearch":
             # Elasticsearch requires endpoint, API key is optional
             return bool(config.api_endpoint)
@@ -540,9 +535,6 @@ class VectorDBClient:
                 if db_type in _preloaded_modules:
                     client_class = _preloaded_modules[db_type]
                     client = client_class(endpoint_name)
-                elif db_type == "qdrant":
-                    from retrieval_providers.qdrant import QdrantVectorClient
-                    client = QdrantVectorClient(endpoint_name)
                 elif db_type == "postgres":
                     from retrieval_providers.postgres_client import PgVectorClient
                     client = PgVectorClient(endpoint_name)
@@ -741,13 +733,29 @@ class VectorDBClient:
                         name = result.get('title', '')
                         site = result.get('site', '')
                         vector = result.get('vector')
+                        retrieval_scores = result.get('retrieval_scores', {})
                     elif len(result) >= 4:
-                        # Legacy Tuple format: [url, json, name, site] or [url, json, name, site, vector]
+                        # Legacy Tuple format: [url, json, name, site],
+                        # [url, json, name, site, vector] (5-tuple), or the
+                        # AGGREGATOR_KEEP_SCORES 6-tuple
+                        # [url, json, name, site, vector_or_None, retrieval_scores].
                         url = result[0]
                         json_data = result[1]
                         name = result[2]
                         site = result[3]
-                        vector = result[4] if len(result) == 5 else None
+                        # Blocker A: take the trailing retrieval_scores dict FIRST
+                        # (if present), then position the vector. Do NOT use
+                        # `result[4] if len==5` — a 6-tuple would mis-set vector
+                        # to None even though index 4 holds the real vector.
+                        if len(result) >= 6 and isinstance(result[5], dict):
+                            retrieval_scores = result[5]
+                            vector = result[4]
+                        elif len(result) == 5:
+                            retrieval_scores = {}
+                            vector = result[4]
+                        else:
+                            retrieval_scores = {}
+                            vector = None
                     else:
                         continue  # Skip invalid results
 
@@ -760,6 +768,7 @@ class VectorDBClient:
                                 "name": name,
                                 "site": site,
                                 "vector": vector,  # Store vector from first occurrence
+                                "retrieval_scores": dict(retrieval_scores),  # copy; merged across endpoints below
                                 "first_endpoint": endpoint_name
                             }
                         else:
@@ -767,6 +776,18 @@ class VectorDBClient:
                             if json_data:
                                 url_to_data[url]["json_list"].append(json_data)
                             # Keep vector from first occurrence (don't overwrite)
+                            # retrieval_scores: merge per-key with max() rather than
+                            # keeping first-occurrence — first-occurrence would
+                            # silently pick whichever endpoint happened to come
+                            # first. max() means "the strongest relevance any
+                            # endpoint assigned this url", which is semantically
+                            # correct and loses no information. (Currently postgres
+                            # is the only active endpoint so this rarely triggers,
+                            # but the strategy must be explicit to avoid silent
+                            # behaviour if multiple endpoints are enabled later.)
+                            existing_scores = url_to_data[url]["retrieval_scores"]
+                            for k, v in retrieval_scores.items():
+                                existing_scores[k] = max(existing_scores.get(k, 0.0), v)
         
         # Second pass: build final results maintaining order from first endpoint
         # We'll interleave to preserve relevance ordering
@@ -810,16 +831,31 @@ class VectorDBClient:
                                     # Single source - use as is
                                     merged_json_str = json_list[0] if json_list else "{}"
                                 
-                                # Create result with merged JSON
-                                merged_result = [
-                                    data["url"],
-                                    merged_json_str,  # Single merged JSON string
-                                    data["name"],
-                                    data["site"]
-                                ]
-                                # Preserve vector if present
-                                if data.get("vector") is not None:
-                                    merged_result.append(data["vector"])
+                                # Create result with merged JSON.
+                                # AGGREGATOR_KEEP_SCORES on -> fixed 6-tuple
+                                # [url, json, name, site, vector_or_None,
+                                #  retrieval_scores] so downstream XGBoost gets
+                                # non-zero retrieval features. Off -> 4/5-tuple
+                                # exactly as before.
+                                if os.environ.get('AGGREGATOR_KEEP_SCORES', '0') == '1':
+                                    merged_result = [
+                                        data["url"],
+                                        merged_json_str,
+                                        data["name"],
+                                        data["site"],
+                                        data.get("vector"),                 # index 4 (None placeholder)
+                                        data.get("retrieval_scores", {}),   # index 5
+                                    ]
+                                else:
+                                    merged_result = [
+                                        data["url"],
+                                        merged_json_str,  # Single merged JSON string
+                                        data["name"],
+                                        data["site"]
+                                    ]
+                                    # Preserve vector if present
+                                    if data.get("vector") is not None:
+                                        merged_result.append(data["vector"])
                                 final_results.append(merged_result)
                 except StopIteration:
                     endpoints_to_remove.append(endpoint_name)

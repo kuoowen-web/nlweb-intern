@@ -27,7 +27,7 @@ class CriticAgent(BaseReasoningAgent):
     and unified discovery-based requirements (mode-based filtering removed 2026-04).
     """
 
-    def __init__(self, handler, timeout: int = 60):  # Doubled: 30 -> 60 for GPT-5.1
+    def __init__(self, handler, timeout: int = 120):  # 30 -> 60 -> 120: 對齊 base.py:168，消除 subclass < base 矛盾（真實值靠 config critic_timeout=120）
         """
         Initialize Critic Agent.
 
@@ -237,16 +237,26 @@ class CriticAgent(BaseReasoningAgent):
                     contradicted_count=cov_verification.get("contradicted_count", 0)
                 )
 
-                result = CriticReviewOutputEnhancedCoV(
-                    status=new_status,
-                    critique=result.critique,
-                    suggestions=result.suggestions,
-                    mode_compliance=result.mode_compliance,
-                    logical_gaps=result_logical_gaps,
-                    source_issues=result.source_issues,
-                    structured_weaknesses=getattr(result, 'structured_weaknesses', None),
-                    cov_verification=cov_output
-                )
+                # B1 (C2+C6): preserve runtime type + all fields. If result is
+                # already a CoV/Live instance, model_copy keeps its type (incl.
+                # CriticReviewOutputLive.narration_transition) and updates in place.
+                # Otherwise (base/Enhanced, no cov_verification field), upgrade to
+                # CriticReviewOutputEnhancedCoV via model_dump() — carries every
+                # existing field (structured_weaknesses, etc.) without hand-listing,
+                # so future base fields are not silently dropped.
+                if hasattr(result, "cov_verification"):
+                    result = result.model_copy(update={
+                        "status": new_status,
+                        "logical_gaps": result_logical_gaps,
+                        "cov_verification": cov_output,
+                    })
+                else:
+                    result = CriticReviewOutputEnhancedCoV(**{
+                        **result.model_dump(),
+                        "status": new_status,
+                        "logical_gaps": result_logical_gaps,
+                        "cov_verification": cov_output,
+                    })
 
         # Auto-escalate based on critical weaknesses (Phase 2)
         if hasattr(result, 'structured_weaknesses') and result.structured_weaknesses:
@@ -256,17 +266,13 @@ class CriticAgent(BaseReasoningAgent):
 
             if critical_count >= max_critical and result.status != "REJECT":
                 self.logger.warning(f"Auto-escalating to REJECT: {critical_count} critical weaknesses")
-                # Rebuild with REJECT (import here to avoid circular dependency)
-                from reasoning.schemas_enhanced import CriticReviewOutputEnhanced
-                result = CriticReviewOutputEnhanced(
-                    status="REJECT",
-                    critique=result.critique + f"\n\n[自動升級至 REJECT：{critical_count} 個嚴重問題]",
-                    suggestions=result.suggestions,
-                    mode_compliance=result.mode_compliance,
-                    logical_gaps=result.logical_gaps,
-                    source_issues=result.source_issues,
-                    structured_weaknesses=result.structured_weaknesses
-                )
+                # B1: model_copy preserves runtime type + all unchanged fields
+                # (incl. cov_verification when result is already a CoV instance),
+                # instead of re-constructing a narrower type and dropping data.
+                result = result.model_copy(update={
+                    "status": "REJECT",
+                    "critique": result.critique + f"\n\n[自動升級至 REJECT：{critical_count} 個嚴重問題]",
+                })
 
         # RSN-4: Mark verification status when CoV was enabled but failed
         if enable_cov and cov_verification and cov_verification.get("verification_status") == "unverified":

@@ -13,8 +13,7 @@ from typing import Optional, Dict, Any, Literal
 from core.config import CONFIG
 import asyncio
 import threading
-import subprocess
-import sys
+import importlib
 import sentry_sdk
 
 
@@ -33,67 +32,55 @@ def init():
             try:
                 # Use _get_provider which will load and cache the provider
                 _get_provider(llm_type)
-                logger.info(f"Successfully loaded {llm_type} provider")
+                logger.info(f"Successfully loaded preferred {llm_type} provider")
             except Exception as e:
-                logger.warning(f"Failed to load {llm_type} provider: {e}")
+                # F8 = B (CEO ruling): a missing PREFERRED-provider SDK must fail the
+                # service at startup, not silently warn and fall over on first request.
+                # fail-hard is the safety net; the real defense is the deploy checklist
+                # forcing `uv sync --extra <preferred>` (Phase 2/3 hard steps).
+                raise RuntimeError(
+                    f"Preferred LLM provider '{llm_type}' failed to load at startup: {e}. "
+                    f"Its optional package is likely not installed — provision it with "
+                    f"`uv sync --extra <name>` (the extra matching the preferred provider) "
+                    f"and redeploy."
+                ) from e
 
-# Mapping of LLM types to their required pip packages
-_llm_type_packages = {
-    "openai": ["openai>=1.12.0"],
-    "anthropic": ["anthropic>=0.18.1"],
-    "gemini": ["google-cloud-aiplatform>=1.38.0"],
-    "azure_openai": ["openai>=1.12.0"],
-    "llama_azure": ["openai>=1.12.0"],
-    "deepseek_azure": ["openai>=1.12.0"],
-    "inception": ["aiohttp>=3.9.1"],
-    "snowflake": ["httpx>=0.28.1"],
-    "huggingface": ["huggingface_hub>=0.31.0"],
-    "ollama": ["ollama>=0.5.1"],
+# Map of llm_type -> the uv extra that provides its SDK, for fail-loud messaging.
+# Only providers with a real module on disk are listed. `openai` is a CORE
+# dependency (always installed) so it has no extra and never triggers this path.
+_llm_type_extras = {
+    "anthropic": ("anthropic", "anthropic"),   # (import_name, extra_name)
+    "gemini": ("google.genai", "gemini"),       # gemini.py does `from google import genai`
 }
 
-# Cache for installed packages
-_installed_packages = set()
 
-def _ensure_package_installed(llm_type: str):
+def _check_optional_provider_available(llm_type: str):
+    """Fail loud if an optional provider's SDK is not importable.
+
+    Replaces the old runtime `pip install` auto-installer. We never install at
+    runtime — the dependency must be provisioned ahead of time via
+    `uv sync --extra <name>`. Raising here (not silently degrading) satisfies the
+    'no silent fail' rule.
     """
-    Ensure the required packages for an LLM type are installed.
-    
-    Args:
-        llm_type: The type of LLM provider
-    """
-    if llm_type not in _llm_type_packages:
-        return
-    
-    packages = _llm_type_packages[llm_type]
-    for package in packages:
-        # Extract package name without version for caching
-        package_name = package.split(">=")[0].split("==")[0]
-        
-        if package_name in _installed_packages:
-            continue
-            
-        try:
-            # Try to import the package first
-            if package_name == "google-cloud-aiplatform":
-                __import__("vertexai")
-            elif package_name == "huggingface_hub":
-                __import__("huggingface_hub")
-            else:
-                __import__(package_name)
-            _installed_packages.add(package_name)
-            logger.debug(f"Package {package_name} is already installed")
-        except ImportError:
-            # Package not installed, install it
-            logger.info(f"Installing {package} for {llm_type} provider...")
-            try:
-                subprocess.check_call([
-                    sys.executable, "-m", "pip", "install", package, "--quiet"
-                ])
-                _installed_packages.add(package_name)
-                logger.info(f"Successfully installed {package}")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to install {package}: {e}")
-                raise ValueError(f"Failed to install required package {package} for {llm_type}")
+    entry = _llm_type_extras.get(llm_type)
+    if entry is None:
+        return  # core provider (e.g. openai) or unknown type handled downstream
+    import_name, extra_name = entry
+    try:
+        # F7: use importlib.import_module, NOT __import__, for dotted names.
+        # `__import__("google.genai")` returns the top-level `google` package and
+        # can FALSELY succeed when `google` exists as a namespace package but
+        # `genai` is absent — so it would not fail-loud. importlib.import_module
+        # actually imports the `google.genai` submodule and raises ImportError if
+        # genai is missing.
+        importlib.import_module(import_name)
+    except ImportError as e:
+        raise ImportError(
+            f"LLM provider '{llm_type}' requires an optional package that is not "
+            f"installed ({import_name}). Install it with:\n"
+            f"    uv sync --extra {extra_name}\n"
+            f"(original import error: {e})"
+        ) from e
 
 def _get_provider(llm_type: str):
     """
@@ -111,12 +98,15 @@ def _get_provider(llm_type: str):
     # Return cached provider if already loaded
     if llm_type in _loaded_providers:
         return _loaded_providers[llm_type]
-    
-    # Ensure required packages are installed
-    _ensure_package_installed(llm_type)
-    
+
     # Import the appropriate provider module if not already loaded
     try:
+        # Fail loud if an optional provider SDK is missing (no runtime pip install).
+        # MUST be inside this try so the raised ImportError is caught by the existing
+        # `except ImportError` below and converted to ValueError — preserving ask_llm's
+        # error classification (F2: ImportError -> ValueError -> config_error).
+        _check_optional_provider_available(llm_type)
+
         if llm_type == "openai":
             from llm_providers.openai import provider as openai_provider
             _loaded_providers[llm_type] = openai_provider
@@ -126,27 +116,6 @@ def _get_provider(llm_type: str):
         elif llm_type == "gemini":
             from llm_providers.gemini import provider as gemini_provider
             _loaded_providers[llm_type] = gemini_provider
-        elif llm_type == "azure_openai":
-            from llm_providers.azure_oai import provider as azure_openai_provider
-            _loaded_providers[llm_type] = azure_openai_provider
-        elif llm_type == "llama_azure":
-            from llm_providers.azure_llama import provider as llama_provider
-            _loaded_providers[llm_type] = llama_provider
-        elif llm_type == "deepseek_azure":
-            from llm_providers.azure_deepseek import provider as deepseek_provider
-            _loaded_providers[llm_type] = deepseek_provider
-        elif llm_type == "inception":
-            from llm_providers.inception import provider as inception_provider
-            _loaded_providers[llm_type] = inception_provider
-        elif llm_type == "snowflake":
-            from llm_providers.snowflake import provider as snowflake_provider
-            _loaded_providers[llm_type] = snowflake_provider
-        elif llm_type == "huggingface":
-            from llm_providers.huggingface import provider as huggingface_provider
-            _loaded_providers[llm_type] = huggingface_provider
-        elif llm_type == "ollama":
-            from llm_providers.ollama import provider as ollama_provider
-            _loaded_providers[llm_type] = ollama_provider
         else:
             raise ValueError(f"Unknown LLM type: {llm_type}")
             

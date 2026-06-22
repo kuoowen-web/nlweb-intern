@@ -344,7 +344,7 @@ Replace rule-based intent detection with **XGBoost Regressor** for continuous λ
 
 **Architecture**:
 ```
-Retrieval (BM25 + Vector)
+Retrieval (pg_bigm + Vector)
     ↓
 MMR Diversity Re-ranking
     ↓

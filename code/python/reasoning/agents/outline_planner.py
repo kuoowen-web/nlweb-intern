@@ -245,6 +245,23 @@ def _match_evidence_by_keyword(
     return list(sorted(evidence_pool.keys()))
 
 
+def invert_allocation_to_suggested_chapters(per_chapter_planned):
+    """把「章 index → planned_evidence_ids」反轉聚合為「eid → 建議章節 index list」。
+
+    P2 全局 evidence 模型（W1，§0 #21）：一筆 eid 出現在多章 planned list →
+    建議多章（N:M overlap，明確允許）。這是「軟性建議」訊號：消費端（writer）
+    當排序提示，不當白名單。回填動作由 orchestrator outline stage 收尾呼叫
+    （涵蓋 LLM plan_outline + skeleton fallback 兩路匯流點）。
+    """
+    inverted: Dict[int, List[int]] = {}
+    for ch_idx, eids in (per_chapter_planned or {}).items():
+        for eid in (eids or []):
+            inverted.setdefault(eid, [])
+            if ch_idx not in inverted[eid]:
+                inverted[eid].append(ch_idx)
+    return inverted
+
+
 def build_skeleton_outline(
     chapter_source: List[Union[Dict[str, str], ContextMapTopic]],
     context_map: ContextMap,

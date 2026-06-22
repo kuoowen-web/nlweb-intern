@@ -1079,3 +1079,138 @@ class TestScenario7Stage1DialogLoop:
         assert state.current_stage == 2
         assert state.stage_status == "checkpoint"
         orchestrator._run_stage_2.assert_called_once()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scenario 8: Backward Navigation (plan: lr-backward-nav, 2026-06-19)
+# back_one / restart 復用 evidence、不重跑 BAB + forward-after-backward round-trip
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestScenario8BackwardNavigation:
+    """back_one / restart 後 forward continue 不在既有 evidence pool 上重跑 BAB（#3）。"""
+
+    @pytest.fixture
+    def orchestrator(self):
+        # nav 路徑會走 _persist_checkpoint_boundary → _save_state（await）。
+        # 共用 _make_handler 未設 _save_state 為 AsyncMock（既有 fixture 缺口，
+        # 非本 plan 範圍）；本 class 補上以驗真實 nav 行為（不 silent fail）。
+        handler = _make_handler()
+        handler._save_state = AsyncMock()
+        return _make_orchestrator(handler)
+
+    @pytest.mark.asyncio
+    async def test_forward_after_back_one_does_not_rerun_bab(self, orchestrator):
+        # W1：真正要測的是 back_one 退回後、forward continue 重入時不在既有
+        # evidence pool 上重跑 BAB（#3 復用 evidence 的真實保護點）。
+        bab_calls = []
+
+        async def mock_bab_run_loop(**kwargs):
+            bab_calls.append(kwargs)
+            return _make_context_map(version=len(bab_calls))
+
+        state = _state_with_context_map(4, status="checkpoint")
+        state.book_outline_json = '{"old": true}'
+        state.evidence_pool_json = '{"1": {"keep": "me"}}'
+
+        # forward 重入 Stage 3 → 4 由 _run_stage_4 處理。mock echo 傳入 state（保留 pool），
+        # 模擬 Stage 4 不重蒐 evidence、純承接既有 state。
+        async def _echo_stage_4(s):
+            s.current_stage = 4
+            s.stage_status = "checkpoint"
+            return s
+        orchestrator._run_stage_4 = AsyncMock(side_effect=_echo_stage_4)
+
+        with patch("reasoning.live_research.orchestrator.BABLoopEngine") as MockEngine:
+            engine_instance = MagicMock()
+            engine_instance.run_loop = AsyncMock(side_effect=mock_bab_run_loop)
+            engine_instance.initial_context_map = _make_context_map()
+            engine_instance.executed_searches = []
+            MockEngine.return_value = engine_instance
+
+            # 1) back_one：Stage 4 → 3（不跑 BAB，純 reset+emit）
+            state = await orchestrator.continue_from_checkpoint(
+                state, nav_action="back_one"
+            )
+            assert state.current_stage == 3
+            assert state.book_outline_json == ""     # Stage 4 輸出清
+            assert state.evidence_pool_json == '{"1": {"keep": "me"}}'  # pool 退回後仍保留
+            bab_before_forward = len(bab_calls)
+
+            # 2) forward continue：Stage 3 → 前進（重入 multi-turn / run path）
+            state = await orchestrator.continue_from_checkpoint(
+                state, auto_continue=True
+            )
+
+        # 真正的保護：forward 重入不在既有 evidence pool 上重跑 BAB（#3）
+        assert len(bab_calls) == bab_before_forward
+        assert state.evidence_pool_json == '{"1": {"keep": "me"}}'  # pool 保留
+
+    @pytest.mark.asyncio
+    async def test_restart_confirm_reuses_evidence_no_bab(self, orchestrator):
+        bab_calls = []
+
+        async def mock_bab_run_loop(**kwargs):
+            bab_calls.append(kwargs)
+            return _make_context_map(version=len(bab_calls))
+
+        state = _state_with_context_map(5, status="checkpoint")
+        state.pending_restart_confirmation = True     # 第一輪已 emit confirm
+        state.written_sections = [{"section_index": 0, "title": "待清"}]
+        state.evidence_pool_json = '{"1": {"keep": "me"}}'
+
+        with patch("reasoning.live_research.orchestrator.BABLoopEngine") as MockEngine:
+            engine_instance = MagicMock()
+            engine_instance.run_loop = AsyncMock(side_effect=mock_bab_run_loop)
+            engine_instance.initial_context_map = _make_context_map()
+            engine_instance.executed_searches = []
+            MockEngine.return_value = engine_instance
+
+            # 確認 token「確認」→ reset_to_stage(1)，章節清、pool 保留
+            state = await orchestrator.continue_from_checkpoint(
+                state, user_message="確認"
+            )
+
+        assert state.current_stage == 1
+        assert state.written_sections == []            # 章節清（#4）
+        assert state.evidence_pool_json == '{"1": {"keep": "me"}}'  # pool 保留（#3）
+        assert len(bab_calls) == 0                     # restart 本身不重跑 BAB
+
+    @pytest.mark.asyncio
+    async def test_round_trip_back_to_stage3_then_forward_resumes_clean(self, orchestrator):
+        # W2：back_one Stage 4 → 3，再 forward → 重入 Stage 3 handler 應正常前進
+        # （不卡 phantom reframe guard，§B.6 pending_reframe_json 已清）。
+        state = _state_with_context_map(4, status="checkpoint")
+        state.style_features_json = '{"style": "keep"}'   # Stage 3 內容（target=3 保留）
+        state.pending_reframe_json = '{"phantom": true}'  # 退回應清此 routing guard
+
+        state = await orchestrator.continue_from_checkpoint(state, nav_action="back_one")
+        assert state.current_stage == 3
+        assert state.pending_reframe_json == ""           # phantom guard 已清
+        assert state.style_features_json == '{"style": "keep"}'  # Stage 3 內容保留
+
+        # forward continue（Stage 3 → 4）：Stage 3 handler 重入後完成 → _run_stage_4。
+        orchestrator._handle_stage_3_response = AsyncMock(
+            return_value=_state_with_context_map(3, status="in_progress")
+        )
+        orchestrator._run_stage_4 = AsyncMock(
+            return_value=_state_with_context_map(4, status="checkpoint")
+        )
+        state = await orchestrator.continue_from_checkpoint(state, auto_continue=True)
+        # 正常前進到 Stage 4（未卡 phantom reframe loop）
+        assert state.current_stage == 4
+        orchestrator._run_stage_4.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_round_trip_restart_then_stage5_idempotency_reset(self, orchestrator):
+        # W2：restart 確認 → Stage 1，last_completed_section_index 已 -1 →
+        # 重入 _run_stage_5 idempotency guard 應從第一段寫，不跳段。
+        state = _state_with_context_map(5, status="checkpoint")
+        state.pending_restart_confirmation = True
+        state.last_completed_section_index = 2   # 舊值
+        state.written_sections = [
+            {"section_index": 0}, {"section_index": 1}, {"section_index": 2},
+        ]
+        state = await orchestrator.continue_from_checkpoint(state, user_message="確認")
+        assert state.current_stage == 1
+        assert state.last_completed_section_index == -1   # 清為 -1 → 重入 Stage 5 從頭寫
+        assert state.written_sections == []

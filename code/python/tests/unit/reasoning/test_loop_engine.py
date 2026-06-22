@@ -205,11 +205,11 @@ async def test_mini_reasoning_indexes_argument_graph_into_state_evidence_usage(
 
     monkeypatch.setattr(
         "reasoning.agents.analyst.AnalystAgent",
-        lambda handler: FakeAnalyst(),
+        lambda handler, timeout=None: FakeAnalyst(),
     )
     monkeypatch.setattr(
         "reasoning.agents.critic.CriticAgent",
-        lambda handler: FakeCritic(),
+        lambda handler, timeout=None: FakeCritic(),
     )
 
     state = LiveResearchStageState()
@@ -268,8 +268,8 @@ async def test_mini_reasoning_no_state_skips_indexing(monkeypatch):
         async def review(self, **kw):
             m = MagicMock(); m.status = "PASS"; return m
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FA())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: FC())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
 
     engine = BABLoopEngine(
         associator=MagicMock(), handler=MagicMock(), max_iterations=1,
@@ -315,8 +315,8 @@ async def test_mini_reasoning_indexes_with_reject_marker_when_critic_rejects(mon
         async def review(self, **kw):
             return fake_critic_reject
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FA())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: FC())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
 
     state = LiveResearchStageState()
     from reasoning.schemas_live import EvidencePoolEntry
@@ -372,8 +372,8 @@ async def test_mini_reasoning_indexes_with_low_confidence_when_critic_warns(monk
         async def review(self, **kw):
             return fake_critic_warn
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FA())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: FC())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
 
     state = LiveResearchStageState()
     from reasoning.schemas_live import EvidencePoolEntry
@@ -422,8 +422,8 @@ async def test_mini_reasoning_normal_indexing_when_critic_pass(monkeypatch):
         async def review(self, **kw):
             return fake_critic_pass
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FA())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: FC())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
 
     state = LiveResearchStageState()
     pool5 = {5: EvidencePoolEntry(evidence_id=5, title="t5", url="https://example.com/5", source_domain="example.com")}
@@ -471,8 +471,8 @@ async def test_mini_reasoning_critic_unknown_status_defaults_to_pass(monkeypatch
         async def review(self, **kw):
             return fake_critic_unknown
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FA())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: FC())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
 
     state = LiveResearchStageState()
     from reasoning.schemas_live import EvidencePoolEntry
@@ -525,8 +525,8 @@ def _make_engine_with_pool(monkeypatch, pool_eids, analyst_eids, critic_status_v
         async def review(self, **kw):
             return mock_critic
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FA())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: FC())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
 
     pool = {
         eid: EvidencePoolEntry(
@@ -1379,8 +1379,8 @@ async def test_run_mini_reasoning_indexes_kg_on_pass_critic(monkeypatch):
         async def review(self, **kw):
             return fake_critic_pass
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FA())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: FC())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
 
     state = LiveResearchStageState()
     pool1 = {1: EvidencePoolEntry(
@@ -1402,6 +1402,159 @@ async def test_run_mini_reasoning_indexes_kg_on_pass_critic(monkeypatch):
     assert state.knowledge_graph is not None
     assert len(state.knowledge_graph.entities) == 1
     assert state.knowledge_graph.entities[0].name == "Cayenne"
+
+
+# ── O5a-(2): KG merge 失敗降級旁白（per-run 一次） ──────────────────────────────
+async def _assemble_kg_engine(monkeypatch):
+    """照抄 test_run_mini_reasoning_indexes_kg_on_pass_critic 的組裝：
+    pass-critic + 非空 KG，使流程走進 Track D _merge_knowledge_graph。回 (engine, cm)。
+    含 AnalystAgent / CriticAgent 的 monkeypatch.setattr（防打真 LLM）。
+    """
+    from reasoning.live_research.stage_state import LiveResearchStageState
+    from reasoning.schemas_enhanced import (
+        ArgumentNode,
+        Entity,
+        EntityType,
+        KnowledgeGraph,
+        LogicType,
+    )
+    from reasoning.schemas_live import ContextMap, EvidencePoolEntry
+
+    fake_kg = KnowledgeGraph(
+        entities=[
+            Entity(
+                name="Cayenne",
+                entity_type=EntityType.ORGANIZATION,
+                evidence_ids=[1],
+            ),
+        ],
+        relationships=[],
+    )
+    fake_analyst = MagicMock()
+    fake_analyst.draft = "draft text"
+    fake_analyst.argument_graph = [
+        ArgumentNode(
+            claim="c", evidence_ids=[1],
+            reasoning_type=LogicType.INDUCTION, confidence="high",
+        ),
+    ]
+    fake_analyst.knowledge_graph = fake_kg
+    # 沒有 gap_resolutions（避免觸發 gap routing）
+    fake_analyst.gap_resolutions = None
+
+    fake_critic_pass = MagicMock(); fake_critic_pass.status = "PASS"
+
+    class FA:
+        async def research(self, **kw):
+            return fake_analyst
+
+    class FC:
+        async def review(self, **kw):
+            return fake_critic_pass
+
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
+
+    state = LiveResearchStageState()
+    pool1 = {1: EvidencePoolEntry(
+        evidence_id=1, title="t1", url="https://example.com/1",
+        source_domain="example.com",
+    )}
+    engine = BABLoopEngine(
+        associator=MagicMock(), handler=MagicMock(), max_iterations=1,
+        seed_evidence_pool=pool1,
+    )
+    engine.state = state
+    engine._current_iteration = 1
+    engine._current_topic_id = "topic-1"
+
+    cm = ContextMap(research_question="q", version=0, topics=[], relations=[])
+    return engine, cm
+
+
+@pytest.mark.asyncio
+async def test_kg_merge_failure_emits_narration_call_path(monkeypatch):
+    """O5a-(2) call-path：KG merge except（[Track D]）觸發時，narration 真的被 emit。
+
+    只測文案常數不夠（常數與 except 接線斷了測試仍綠）；
+    這裡讓 _merge_knowledge_graph raise，驗 _run_mini_reasoning 路徑會 narrate。
+    """
+    engine, cm = await _assemble_kg_engine(monkeypatch)  # 含 AnalystAgent/CriticAgent setattr
+    engine._reset_per_run_dedup_flags()  # 確保 flag 初始化（直呼 method 不經 run_loop）
+
+    captured = []
+    async def fake_emit(text):
+        captured.append(text)
+    engine._emit_narration = fake_emit
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("KG merge down")
+    engine._merge_knowledge_graph = boom
+
+    # 不可 raise（non-fatal）：_run_mini_reasoning 正常 return
+    await engine._run_mini_reasoning(cm, "[1] x\n")
+
+    assert captured, "KG merge except 觸發時必須 emit narration"
+    assert "知識圖譜" in captured[0] or "圖譜" in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_kg_merge_failure_narration_deduped_per_run(monkeypatch):
+    """O5a-(2) per-run dedup：KG merge 持續失敗時，同一 run 內旁白只播一次。
+
+    防 429 貫穿 run 每輪轟炸（原 o5a Task 4 缺此防護，本窄 plan 補上）。
+    """
+    engine, cm = await _assemble_kg_engine(monkeypatch)
+    engine._reset_per_run_dedup_flags()
+
+    captured = []
+    async def fake_emit(text):
+        captured.append(text)
+    engine._emit_narration = fake_emit
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("KG merge down")
+    engine._merge_knowledge_graph = boom
+
+    # 同一 run 連續兩輪 mini-reasoning，KG merge 都失敗
+    await engine._run_mini_reasoning(cm, "[1] x\n")
+    await engine._run_mini_reasoning(cm, "[1] y\n")
+
+    assert len(captured) == 1, f"per-run 應只播一次，實得 {len(captured)} 次"
+
+
+@pytest.mark.asyncio
+async def test_kg_merge_dedup_flag_is_reset_by_per_run_reset(monkeypatch):
+    """O5a-(2) reset-wiring：_kg_merge_degraded_narrated 必須由 _reset_per_run_dedup_flags
+    重置（非僅 __init__）。否則 engine 跨 run 重用時，第二次 run 的 KG 降級旁白被永久靜音。
+
+    這條鎖死本窄 plan 的全部重點：flag 進 reset path（不是只進 __init__）。
+    """
+    engine, cm = await _assemble_kg_engine(monkeypatch)
+    engine._reset_per_run_dedup_flags()
+
+    captured = []
+    async def fake_emit(text):
+        captured.append(text)
+    engine._emit_narration = fake_emit
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("KG merge down")
+    engine._merge_knowledge_graph = boom
+
+    # 第一次 run：emit 一次後 flag=True
+    await engine._run_mini_reasoning(cm, "[1] x\n")
+    assert len(captured) == 1
+    assert engine._kg_merge_degraded_narrated is True
+
+    # 模擬「新一輪 run 開始」——run_loop 入口會呼叫 _reset_per_run_dedup_flags
+    engine._reset_per_run_dedup_flags()
+    assert engine._kg_merge_degraded_narrated is False, \
+        "flag 未被 _reset_per_run_dedup_flags 重置 — 它沒進 reset path（只放 __init__）"
+
+    # 第二次 run：reset 後必須能再 emit 一次
+    await engine._run_mini_reasoning(cm, "[1] y\n")
+    assert len(captured) == 2, "reset 後第二次 run 的 KG 降級旁白被永久靜音（reset wiring 斷了）"
 
 
 @pytest.mark.asyncio
@@ -1448,8 +1601,8 @@ async def test_run_mini_reasoning_skips_kg_merge_on_reject_critic(monkeypatch):
         async def review(self, **kw):
             return fake_critic_reject
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FA())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: FC())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
 
     state = LiveResearchStageState()
     pool1 = {1: EvidencePoolEntry(
@@ -1528,8 +1681,8 @@ async def test_run_mini_reasoning_kg_cross_iteration_dedup(monkeypatch):
         async def review(self, **kw):
             return fake_critic_pass
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FA())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: FC())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FA())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: FC())
 
     state = LiveResearchStageState()
     pool = {
@@ -2025,8 +2178,8 @@ def _make_engine_with_failing_analyst(monkeypatch):
         async def review(self, **kw):
             raise AssertionError("Critic 不應被呼叫（Analyst 已先 raise）")
 
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: FailingAnalyst())
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: BenignCritic())
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: FailingAnalyst())
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: BenignCritic())
 
     handler = MagicMock()
     handler.message_sender = MagicMock()
@@ -2087,3 +2240,71 @@ async def test_mini_reasoning_degradation_narration_deduped_per_run(monkeypatch)
     narrations = _o5b_narrations(handler)
     assert len(narrations) == 1, \
         f"降級旁白應 per-run 只 emit 一次（防轟炸），實際 {len(narrations)} 次：{narrations}"
+
+
+def test_analyst_research_kwargs_builder():
+    """Task 15 (behavior-preserving refactor): 兩處 analyst.research(...) kwargs
+    完全相同，抽 _build_analyst_research_kwargs 共用。本測試鎖定 builder 產出的
+    kwargs 與兩 call site 原本傳的一致。"""
+    from reasoning.live_research.loop_engine import BABLoopEngine
+    eng = BABLoopEngine.__new__(BABLoopEngine)
+
+    class H:
+        enable_web_search = True
+
+    eng.handler = H()
+    kw = eng._build_analyst_research_kwargs(
+        research_question="Q", enriched_context="CTX", cm_summary="SUM")
+    assert kw["query"] == "Q"
+    assert kw["formatted_context"] == "CTX"
+    assert kw["mode"] == "discovery"
+    assert kw["enable_live_research"] is True
+    assert kw["context_map_summary"] == "SUM"
+    assert kw["enable_kg"] is True
+    assert kw["enable_web_search"] is True
+
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_narrate_once_emits_only_first_time(monkeypatch):
+    from reasoning.live_research.loop_engine import BABLoopEngine
+    eng = BABLoopEngine.__new__(BABLoopEngine)
+    emitted = []
+    async def fake_emit(text): emitted.append(text)
+    eng._emit_narration = fake_emit
+    # 旗標屬 per-run dedup 旗標族；裸 instance 預設視為未發過（getattr default False）
+    await eng._narrate_once("_test_flag_narrated", "降級訊息")
+    await eng._narrate_once("_test_flag_narrated", "降級訊息")  # 第二次不應再 emit
+    assert emitted == ["降級訊息"]
+
+
+def test_reset_per_run_dedup_flags_covers_narrate_once_flags():
+    """_narrate_once 每個 call-site 實際傳入的 flag 名都必須由 _reset_per_run_dedup_flags
+    重置（per-run 語意，防 engine 池化重用時第二次 run 被永久靜音 — F2）。"""
+    import ast
+    import inspect
+    from reasoning.live_research.loop_engine import BABLoopEngine
+
+    loop_src = inspect.getsource(BABLoopEngine)
+    reset_src = inspect.getsource(BABLoopEngine._reset_per_run_dedup_flags)
+
+    tree = ast.parse(loop_src)
+    narrate_once_flags = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_narrate_once"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)):
+            narrate_once_flags.add(node.args[0].value)
+
+    assert narrate_once_flags, "未從 source 枚舉到任何 _narrate_once call-site flag 名"
+
+    for flag in sorted(narrate_once_flags):
+        assert flag in reset_src, (
+            f"{flag} 是 _narrate_once 的 call-site flag，但未在 _reset_per_run_dedup_flags "
+            f"登記 → engine 池化重用時第二次 run 該降級旁白被永久靜音（F2 silent fail）"
+        )

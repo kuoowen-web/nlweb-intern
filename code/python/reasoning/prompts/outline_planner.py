@@ -209,15 +209,16 @@ def build_outline_planner_prompt(
 2. **role 紀律**：第一個章節 `role="intro"`、最後一個章節 `role="conclusion"`、其餘 `role="body"`。
    - **`chapter_index` 從 0 開始（0-based）**：第一個章節 `chapter_index=0`、第二個 `chapter_index=1`、依序遞增；最後一個章節 `chapter_index = 章節總數 - 1`。
    - 因此 `role="intro"` 的章節**必為** `chapter_index=0`，`role="conclusion"` 的章節必為最後一個 index。請勿用 1-based 編號。
-3. **evidence_ids 白名單**：`planned_evidence_ids` 內每個 ID **必須**屬於 1 ~ {valid_ids_sorted[-1] if valid_ids_sorted else 0} 範圍且在白名單聯集內（共 {len(valid_ids_sorted)} 個 ID）。不可發明 ID。
-3.5. **body 章 evidence 紀律（Track A 新增 2026-05-28）**：
-   - 非 `intro` / `conclusion` 的章節（`role="body"`）**planned_evidence_ids 不可為空**。
-   - 依該章 brief 語意配對上方 Evidence Pool 子集 — evidence 是 user 真實資料來源，
-     必須在章節間合理分配。
-   - 不要把全部 evidence 都塞第 0 章；前言用少量 framing evidence，body 用 topic-relevant。
-   - 若 evidence_pool 不足以支撐某章，**寧可 planned_evidence_ids 列空** 並在
-     overall_arc 或 redundancy_warnings 中明示「該章 evidence 稀疏」（writer 端
-     會走「資料不足」narration）— 不要硬塞無關 evidence。
+3. **evidence_ids 有效範圍**：`planned_evidence_ids` 內每個 ID **必須**屬於 1 ~ {valid_ids_sorted[-1] if valid_ids_sorted else 0} 範圍且在 evidence_pool 全集內（共 {len(valid_ids_sorted)} 個 ID）。不可發明 ID。
+   - **`planned_evidence_ids` 是「該章優先建議引用」的軟性提示，不是排他歸屬**：writer 讀全 evidence pool，此 list 只影響 writer 視圖的排序優先序。
+   - **允許同一 ID 出現在多章**：同一筆 evidence 可同時支撐多章（reader 視角自然 overlap），不必把 evidence 在章節間切成 disjoint 子集。
+3.5. **body 章 evidence 紀律（Track A 新增 2026-05-28；P2 W1 SF3 調整）**：
+   - 非 `intro` / `conclusion` 的章節（`role="body"`）**planned_evidence_ids 不可為空**（每章至少給優先建議）。
+   - 依該章 brief 語意配對上方 Evidence Pool — evidence 是 user 真實資料來源，
+     優先把該章最相關的 evidence 列入該章 planned（重疊可接受）。
+   - 前言用少量 framing evidence，body 用 topic-relevant；不必擔心同一筆被多章引用。
+   - 若某章 brief 與所有 evidence 都低度相關，**仍至少列最接近的優先建議**（writer
+     讀全 pool 不會因此斷料）— 不要硬塞完全無關 evidence 充數。
 4. **target_word_count**：合理分配，加總對應格式要求。若無格式要求，預設每章 800-1500 字。
 5. **transition_hint**：第 1 章可留空字串；其餘章必填，承接上章重點、引出本章焦點。
 6. **redundancy_warnings**：如發現第 N、第 M 章可能涵蓋相同議題，列警告，例如「第2、第3章都會碰到 X，請 writer 注意分工」。

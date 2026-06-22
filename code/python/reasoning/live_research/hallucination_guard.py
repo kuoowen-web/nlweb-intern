@@ -259,7 +259,7 @@ async def _extract_entities_for_grounding(
         resp = await ask_llm(
             prompt, schema, level=level,
             query_params=getattr(handler, "query_params", {}),
-            max_length=2048, timeout=15,
+            max_length=2048, timeout=30,  # 2026-06-19 15→30：冷門外國 entity low model 判讀慢，給夠時間（穩定的慢非偶發抖動，調長優於 retry）
         )
     except Exception as e:
         # 非 LLM 的意外錯誤（如 prompt building）— ask_llm 失敗本身回 LLMError sentinel
@@ -343,7 +343,7 @@ async def _semantic_grounding_check(
         resp = await ask_llm(
             prompt, schema, level=level,
             query_params=getattr(handler, "query_params", {}),
-            max_length=2048, timeout=15,
+            max_length=2048, timeout=30,  # 2026-06-19 15→30：冷門外國 entity low model 語意判讀慢，給夠時間（穩定的慢非偶發抖動，調長優於 retry）
         )
     except Exception as e:
         # R1 fail-closed：LLM exception（含爆 low-model context window）→ 不吞、不回 []。

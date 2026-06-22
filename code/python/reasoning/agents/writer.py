@@ -144,6 +144,7 @@ class WriterAgent(BaseReasoningAgent):
         context_map_summary: Optional[str] = None,
         citation_format: Optional[str] = None,
         evidence_lookup: Optional[Dict[int, 'EvidencePoolEntry']] = None,  # noqa: F821
+        writer_evidence_view: Optional[str] = None,   # P2 W7：全 pool grounding 視圖（W5 組）
         is_chapter_override: bool = False,
         book_outline: Optional['BookOutline'] = None,  # noqa: F821
         current_chapter_index: int = 0,
@@ -197,6 +198,7 @@ class WriterAgent(BaseReasoningAgent):
             context_map_summary=context_map_summary,
             citation_format=citation_format,
             evidence_lookup=evidence_lookup,
+            writer_evidence_view=writer_evidence_view,   # P2 W7：透傳全 pool 視圖
             is_chapter_override=is_chapter_override,
             book_outline=book_outline,
             current_chapter_index=current_chapter_index,

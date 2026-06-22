@@ -26,12 +26,14 @@ BLOCKED_NO_EVIDENCE_PREFIX = "[本章資料不足]"  # test 契約 sentinel（3 
 BLOCKED_NO_EVIDENCE_ENTRY = (
     BLOCKED_NO_EVIDENCE_PREFIX + " 系統找不到足夠的相關新聞資料來撰寫本章，"
     "已略過自動撰寫以避免產生無依據的內容。"
+    "若希望補強這一章，可以回覆我「再去找更多資料」，我會回頭重新蒐集。"
 )
 
 BLOCKED_NO_EVIDENCE_POST_RENDER = (
     BLOCKED_NO_EVIDENCE_PREFIX + " 系統雖然找到了一些相關資料，但無法從中"
     "整理出足以佐證本章論述的具體內容，已略過自動撰寫，"
     "以避免產生無依據的內容。"
+    "若希望補強這一章，可以回覆我「再去找更多資料」，我會回頭重新蒐集。"
 )
 
 CRITIC_REJECTED_PREFIX = "[本章內容未通過查核]"
@@ -44,7 +46,8 @@ def critic_rejected_content(issue_count: int, claim_texts: Sequence[str]) -> str
         f"{CRITIC_REJECTED_PREFIX} 系統逐句查核時發現本章有 "
         f"{issue_count} 處說法無法以現有資料佐證"
         f"（例如：{examples}），為避免錯誤資訊擴散，未保留本章內容。"
-        f"建議：重寫這一章，或調整研究問題讓系統蒐集到更多相關資料後再試。"
+        f"建議：若覺得是資料本身不夠，可以直接回覆我「再去找更多資料」，"
+        f"我會回頭重新蒐集後再重寫；或告訴我直接用現有資料重寫這一章。"
     )
 
 
@@ -67,6 +70,24 @@ GROUNDING_UNAVAILABLE_NARRATION = (
     "但這一章的信心標示已調為「較低」。之後的章節若遇到同樣狀況，"
     "會直接在該章標示，不再重複提醒。"
 )
+
+# --- 章節字數超出規劃時的 user-facing 透明化旁白（a 軟提示，不觸發重寫） ---
+# 設計：每個超標章各發一則（章名 + 規劃字數 + 實際字數），逐章發資訊才完整；
+# 不 per-run dedup（每章超多少不同，是各自獨立、對 user 有意義的事實）。
+# 純白話、零開發術語（AST jargon guard 掃描全檔字串常數）。
+# 語意：中性透明化（「這章比規劃的長」），不是錯誤、沒有降級、內容照常保留。
+
+
+def chapter_word_overshoot_narration(
+    chapter_title: str, target: int, actual: int
+) -> str:
+    """字數超標旁白。target=規劃字數，actual=實際字數（皆已剝除引用標記）。"""
+    return (
+        f"提醒：「{chapter_title}」這一章規劃約 {target} 字，"
+        f"實際寫成約 {actual} 字，比規劃的長一些。"
+        f"內容照常保留，提供給你參考，方便你之後自行斟酌刪修。"
+    )
+
 
 # guard 區段其他環節故障（非查核系統本身失敗）的即時旁白。
 # 事實對齊（o5c plan 2026-06-10 根因修正）：查核系統失敗已由上一條
@@ -104,6 +125,73 @@ GROUNDING_EXTRACTION_FAILED_NARRATION = (
     "內容保留不動。建議閱讀時對其中的具體名稱、數字多留意。"
 )
 
+# 初始格式抽取 LLM 故障旁白（AR round 1 B3 — no-silent-fail）。
+# 抽取失敗時退回現行 LLM 自由發揮（方向安全），但「故障≠user 需求被接受」——
+# user 須知其格式需求這次沒被結構化解析。與既有降級旁白慣例一致
+# （見 GROUNDING_EXTRACTION_FAILED_NARRATION:102），由 _maybe_extract_initial_format
+# except 路徑 _emit_narration 發出。語意保真：沒美化成「已照你的格式」。
+INITIAL_FORMAT_EXTRACTION_FAILED_NARRATION = (
+    "提醒：我這次沒能完整解析你提到的格式需求（章節、字數或引用方式等），"
+    "會先照一般方式安排研究結構。如果有特定格式要求，等一下確認研究結構時"
+    "再直接告訴我就好。"
+)
+
+
+# 引用格式 enum → user-facing 中文（無內部術語）
+_CITATION_STYLE_LABEL = {
+    "author_year": "作者—年份（如 APA）格式",
+    "numeric": "數字編號格式",
+    "footnote": "腳註格式",
+    "none": "不附引用",
+}
+
+# special element type → user-facing 中文
+_SPECIAL_ELEMENT_LABEL = {
+    "table": "表格",
+    "list": "清單",
+    "chart": "圖表",
+    "diagram": "流程圖",
+    "code_block": "程式碼區塊",
+}
+
+
+def initial_format_confirmation_line(
+    chapter_names: Sequence[str],
+    total_word_count,
+    citation_style,
+    special_elements: Sequence[dict],
+) -> str:
+    """組裝 Stage 1 初始格式抽取的確認句（併入研究結構提案 proposal）。
+
+    只列實際抽到的維度。所有 caller 已確認至少一項非空（has_meaningful_spec）。
+    純字串組裝，禁開發術語（test_lr_user_facing_strings_have_no_dev_jargon 掃描）。
+    """
+    parts: List[str] = []
+    if chapter_names:
+        names = "、".join(chapter_names)
+        parts.append(f"{len(chapter_names)} 章（{names}）")
+    if total_word_count:
+        parts.append(f"全文約 {total_word_count} 字")
+    if citation_style and citation_style in _CITATION_STYLE_LABEL:
+        parts.append(f"引用採{_CITATION_STYLE_LABEL[citation_style]}")
+    for elem in special_elements or []:
+        if not isinstance(elem, dict):
+            continue
+        label = _SPECIAL_ELEMENT_LABEL.get(elem.get("type", ""), "")
+        if not label:
+            continue
+        target = (elem.get("target_chapter") or "").strip()
+        if target:
+            parts.append(f"在「{target}」加入{label}")
+        else:
+            parts.append(f"加入{label}")
+
+    body = "；".join(parts)
+    return (
+        f"\n\n---\n\n我會照你指定的格式來寫：{body}。這樣對嗎？"
+        f"如果要調整，直接告訴我就好。"
+    )
+
 # 發布審查遇到「本章零 evidence」時的 deterministic 短路標註（Task 2）。
 # 語意保真：是「沒有可供審查比對的資料來源」，不是「審查通過」。進 LLM 審零 evidence
 # 無意義（純燒錢且判決不可預測），故短路不打 critic。
@@ -136,11 +224,32 @@ LEGACY_WARN_MARKER_PREFIX = "[F1 critic WARN:"  # 舊 session 持久化殘留，
 WARN_MARKER_DEDUP_RE = r"\[(?:F1 critic WARN:|查核提醒：)[^\]]*\]"
 
 
+def _sanitize_warn_explanation(text: str) -> str:
+    """移除 explanation 內會破壞 marker 結構的方括號（AR R1 blocker）。
+
+    WARN_MARKER_DEDUP_RE 的 [^\\]]* 遇到 body 內的 raw ] 會提前結束 match。
+    對稱全形替換保留可讀性（[ ] → （ ）），不直接刪以免語意斷裂。
+    """
+    if not text:
+        return ""
+    return text.replace("]", "）").replace("[", "（")
+
+
 def warn_marker(issue_count: int, explanation: str) -> str:
-    """F1 WARN marker（append 進 methodology_note；explanation 截 100 字沿用既有上限）。"""
+    """F1 WARN marker（append 進 methodology_note）。
+
+    sanitize explanation 內的 [ ] 防破壞 dedup regex（AR R1 blocker）。
+
+    2026-06-19：移除 100 字截斷（_WARN_EXPLANATION_MAX）。截斷原是 Bug B
+    修「孤立括號半句」時隨手帶進的副產物，非設計需求——critic 查核說明是給
+    使用者看「為何本章有疑慮」的，攔腰砍掉反傷信任，應完整輸出。
+    sanitize 仍保留（dedup regex 靠 ] 當邊界，留 raw ] 會破壞 marker 結構）。
+    """
+    sanitized = _sanitize_warn_explanation(explanation or "")
     return (
         f"{WARN_MARKER_PREFIX}本章有 {issue_count} "
-        f"處說法待進一步確認 — {explanation[:100]}]"
+        f"處說法待進一步確認 — {sanitized}"
+        f"（內容已保留；若希望這些待確認處更有依據，可回覆「再去找更多資料」讓我補搜）]"
     )
 
 
@@ -166,6 +275,72 @@ MINI_REASONING_REVISE_DEGRADED_NARRATION = (
 SEARCH_REQUIRED_DEGRADED_NARRATION = (
     "這一輪分析時發現某些面向的站內資料不夠，嘗試補查時沒有找到更多相關資料，"
     "本段會以現有資料為基礎繼續，研究照常往下進行。"
+)
+
+
+# O5a 路徑(2)：KG（知識圖譜）merge 失敗時的 user-facing 降級旁白。
+# per-run 只播一次（dedup flag 在 loop_engine._reset_per_run_dedup_flags）。
+KG_MERGE_DEGRADED_NARRATION = (
+    "提醒：這一輪的新資料未能併入知識圖譜，"
+    "圖譜可能少了這部分內容，但文字研究仍會照常進行。"
+)
+
+
+# Stage 5 退回補搜（plan: lr-stage5-backward-recollect）。user-facing 文案，
+# 不暴露 BAB / analyst / loop / engine 等內部術語。
+
+# user 主動要求補搜 → confirm checkpoint（informed consent，清章節不可逆）。
+RECOLLECT_CONSENT_PROMPT = (
+    "了解，這部分需要再去找更多資料。要這麼做的話，我會回頭重新蒐集、"
+    "重新整理並改寫，**目前已經寫好的章節會被重新撰寫取代**。\n"
+    "如果想保留現在的內容，請先自行複製一份。\n"
+    "確認要重新蒐集資料、重寫報告嗎？（回覆「確認」開始，或告訴我其他想法）"
+)
+
+# 系統判斷資料不足、自主退回補搜 → narration 告知（不停下等確認）。
+RECOLLECT_NARRATION = (
+    "我發現這部分的資料還不夠完整，正在回頭重新蒐集更多相關資料，"
+    "再依新資料重新整理、改寫，目前的草稿會跟著更新。這會花一點時間。"
+)
+
+# 同一次研究補搜已達上限 → block + 明確告知（非 silent）。
+RECOLLECT_CAPPED_NARRATION = (
+    "這次研究已經重新蒐集過兩輪資料，仍然不夠充分。"
+    "通常這代表目前可用的資料本身有限，再補也難有突破。"
+    "建議調整研究問題的方向，或開一個新的研究重新規劃。"
+)
+
+# user 在 consent round 明確取消補搜 → 回常規 Stage 5 checkpoint（J，Codex #9：
+# 從 orchestrator 硬編抽進 lr_copy 集中管理）。
+RECOLLECT_CANCELLED_NARRATION = (
+    "好的，那就先不重新蒐集，維持現在已經寫好的內容。"
+)
+
+
+# --- Backward Navigation（plan: lr-backward-nav, CEO 拍板 2026-06-19）---
+# user-facing 文案，禁開發術語（test_lr_user_facing_strings_have_no_dev_jargon 掃描：
+# 禁 BAB / grounding / evidence / LLM / Analyst / query / entity 等）。
+
+# #2 退回上一階段通用通知（不打 LLM；接既有 showLRCheckpoint render path）。
+# {stage_label} 由 orchestrator 帶入該 stage 的中文名稱（如「文筆設定」）。
+NAV_BACK_NOTICE = (
+    "好的，已經回到上一個階段。先前在這之後做的設定與草稿會重新整理，"
+    "你可以在這裡重新調整，再繼續往下進行。"
+)
+
+# #3 Full restart（回 Stage 1）提醒：沿用已蒐集資料重新規劃；換差很多的新題目建議開新 session。
+NAV_RESTART_NOTICE = (
+    "好的，回到最開始重新規劃。這次會沿用先前已經整理好的資料，不重新蒐集，"
+    "你可以重新確認或調整研究的主題與架構。\n"
+    "如果你想換一個方向差很多的全新題目、不再需要先前的資料，"
+    "建議直接開一個新的研究，會更乾淨俐落。"
+)
+
+# #4 清空已寫章節前的確認提示（複用 pending_recollect_confirmation 兩段式 confirm）。
+NAV_RESTART_CONFIRM_PROMPT = (
+    "重新規劃會清空目前已經寫好的章節（先前蒐集的資料會保留）。\n"
+    "如果想保留現在的章節內容，請先自行複製一份。\n"
+    "確定要重新規劃嗎？（回覆「確認」開始，或告訴我其他想法）"
 )
 
 
@@ -230,6 +405,36 @@ def problematic_chapters_header(n: int, problems_md: str) -> str:
         f"建議重新研究，或調整研究問題後再跑一次。\n\n"
         f"---\n"
     )
+
+
+def problematic_chapter_line(section_index, title: str, reason_zh: str) -> str:
+    """組單行「- 第 N 章「標題」（原因）」。章號 1-based（Bug G）。
+
+    section_index 為 0-based int → +1；缺值 / 非 int（如 "?"）→ 退化 "?" 不 crash
+    （AR R1 nit：用 type(x) is int 而非 isinstance，排除 bool 被當 int +1）。
+    AR R2 should-fix：title 可能 None / 含換行 → normalize 成單行，否則破壞 markdown list。
+    """
+    ch = section_index + 1 if type(section_index) is int else "?"
+    safe_title = " ".join(str(title or "?").split())  # None/換行 → 單行
+    return f"- 第 {ch} 章「{safe_title}」（{reason_zh}）"
+
+
+# AR R3/R4：把整個 problematic 組裝迴圈抽成 helper（不只單行）。
+# reason_map 由 caller 傳入（= orchestrator 的 _PROBLEMATIC_REASON_ZH）—— AR R4 Codex:
+# 不要在 lr_copy 重複定義 reason map，留 orchestrator 單一來源傳入，避免 drift。
+def build_problematic_chapters_md(problematic: list, reason_map: dict) -> str:
+    """組 problematic chapters 的 markdown 區塊（被 _run_stage_6 呼叫）。
+
+    AR R3：整段組裝抽出來，test 直接測這個 = 測到 production path（非只測單行 helper）。
+    reason_map 由 caller 傳（= orchestrator 的 _PROBLEMATIC_REASON_ZH），避免重複定義。
+    """
+    lines = []
+    for s in problematic:
+        reason_zh = reason_map.get(s.get("status", "?"), "未完成")
+        lines.append(
+            problematic_chapter_line(s.get("section_index"), s.get("title"), reason_zh)
+        )
+    return "\n".join(lines)
 
 
 # --- References 缺項 ---

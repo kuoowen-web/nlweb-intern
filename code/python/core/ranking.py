@@ -123,6 +123,13 @@ class Ranking:
                 site = item.get('site', '')
                 retrieval_scores = item.get('retrieval_scores', {})
                 vector = item.get('vector')
+            elif len(item) >= 6:
+                # 6-tuple: [url, json_str, name, site, vector_or_None, retrieval_scores]
+                # This is the core read point that feeds non-zero retrieval
+                # features (index 14-18) to the XGBoost shadow ranker.
+                url, json_str, name, site, vector, retrieval_scores = (
+                    item[0], item[1], item[2], item[3], item[4], item[5]
+                )
             elif len(item) == 5:
                 url, json_str, name, site, vector = item
                 retrieval_scores = {}  # Legacy format doesn't have retrieval scores
@@ -328,11 +335,13 @@ class Ranking:
         if (self.handler.site == "all" or self.handler.site == "nlws"):
             sites_in_embeddings = {}
             for item in top_embeddings:
-                # Handle both Dict (new format) and Tuple (legacy) formats
+                # Handle Dict (new format) and Tuple (legacy 4/5/6) formats.
+                # Only `site` (index 3) is needed; use index access so a 6-tuple
+                # (retrieval_scores at index 5) does not hit a hard 4-unpack.
                 if isinstance(item, dict):
                     site = item.get('site', '')
-                elif len(item) == 5:
-                    url, json_str, name, site, vector = item
+                elif len(item) >= 4:
+                    site = item[3]
                 else:
                     url, json_str, name, site = item
                 sites_in_embeddings[site] = sites_in_embeddings.get(site, 0) + 1
@@ -367,10 +376,13 @@ class Ranking:
                 vector = item.get('vector')
                 if vector is not None:
                     self.url_to_vector[url] = vector
-            # Handle Tuple format (legacy)
-            elif len(item) == 5:  # [url, json_str, name, site, vector]
-                url, _, _, _, vector = item
-                self.url_to_vector[url] = vector
+            # Handle Tuple format (legacy 5-tuple or 6-tuple with scores).
+            # Use len >= 5 so the 6-tuple's vector (index 4) is not silently
+            # dropped (which would starve MMR of vectors).
+            elif len(item) >= 5:  # [url, json_str, name, site, vector(, retrieval_scores)]
+                vector = item[4]
+                if vector is not None:
+                    self.url_to_vector[item[0]] = vector
 
         if self.url_to_vector:
             logger.info(f"Vectors available for {len(self.url_to_vector)} items (MMR-ready)")

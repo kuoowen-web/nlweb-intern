@@ -6,6 +6,7 @@ CEO 拍板 OQ-1：**合併** — 刪舊 `_parse_stage_4_intent`，新
 """
 import pytest
 from pydantic import ValidationError
+from unittest.mock import AsyncMock, MagicMock, patch  # plan: durable boundary persist needs AsyncMock in scope
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -244,6 +245,7 @@ async def test_classify_stage_4_response_dry_run_unclear():
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
     from reasoning.live_research.stage_state import LiveResearchStageState
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     orch = LiveResearchOrchestrator(handler=handler)
     orch.dry_run = True
@@ -270,6 +272,7 @@ async def test_dispatch_confirm_format_advances_without_reparse():
     )
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -311,6 +314,7 @@ async def test_dispatch_add_special_element_no_loop():
     )
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -360,6 +364,7 @@ async def test_dispatch_add_special_element_empty_payload_reemits_checkpoint():
     )
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -393,6 +398,7 @@ async def test_dispatch_auto_continue_advances():
     from reasoning.schemas_live import Stage4Response, Stage4ResponseAction
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -420,6 +426,7 @@ async def test_dispatch_unclear_stays_at_checkpoint():
     from reasoning.schemas_live import Stage4Response, Stage4ResponseAction
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -456,6 +463,7 @@ async def test_dispatch_adjust_format_advances_and_records():
     )
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -487,6 +495,7 @@ async def test_dispatch_adjust_format_writes_target_word_count():
     )
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -523,6 +532,7 @@ async def test_dispatch_adjust_format_no_word_count_leaves_user_voice_default():
     )
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -554,6 +564,7 @@ async def test_classify_stage_4_response_llm_exception_uses_system_unavailable()
     from reasoning.live_research.stage_state import LiveResearchStageState
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     orch = LiveResearchOrchestrator(handler=handler)
     orch.dry_run = False
@@ -578,6 +589,7 @@ async def test_classify_stage_4_response_empty_uses_system_unavailable():
     from reasoning.live_research.stage_state import LiveResearchStageState
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     orch = LiveResearchOrchestrator(handler=handler)
     orch.dry_run = False
@@ -602,6 +614,7 @@ async def test_classify_stage_4_response_validation_fail_uses_system_unavailable
     from reasoning.live_research.stage_state import LiveResearchStageState
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     orch = LiveResearchOrchestrator(handler=handler)
     orch.dry_run = False
@@ -644,6 +657,7 @@ async def test_dispatch_auto_continue_branch_via_arg():
     from reasoning.live_research.stage_state import LiveResearchStageState
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -664,6 +678,7 @@ async def test_dispatch_confirm_reframe_without_pending_reemits_checkpoint():
     from reasoning.schemas_live import Stage4Response, Stage4ResponseAction
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)
@@ -698,6 +713,7 @@ async def test_dispatch_cancel_reframe_without_pending_reemits_checkpoint():
     from reasoning.schemas_live import Stage4Response, Stage4ResponseAction
 
     handler = MagicMock()
+    handler._save_state = AsyncMock()  # plan: durable boundary persist awaits this
     handler.query_params = {}
     handler.message_sender = MagicMock()
     orch = LiveResearchOrchestrator(handler=handler)

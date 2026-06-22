@@ -1,0 +1,92 @@
+[project]
+name = "nlweb"
+version = "0.1.0"
+description = "Taiwan Dubao — NLWeb natural-language news search system."
+requires-python = "==3.11.*"
+
+# Core dependencies — always installed (parity with the uncommented lines of
+# code/python/requirements.txt as of 2026-06-22).
+dependencies = [
+    # Core (requirements.txt L10-31)
+    "azure-search-documents>=11.4.0",
+    "azure-identity>=1.15.0",
+    "chardet>=5.2.0",
+    "charset-normalizer>=3.0.0",
+    "jsonschema>=4.19.1",
+    "mcp>=1.0.0",
+    "marshmallow<4.0.0",
+    "packaging<24,>=16.8",
+    "protobuf<5,>=3.20",
+    "matplotlib>=3.8.0",
+    "python-dotenv>=1.0.0",
+    "sentry-sdk>=2.0.0",
+    "aiohttp>=3.9.1",
+    "aiofiles>=24.1.0",
+    "pyyaml>=6.0.1",
+    "feedparser>=6.0.1",
+    "httpx>=0.28.1",
+    "seaborn>=0.13.0",
+    "openai>=1.12.0",
+    "PyJWT>=2.8.0",
+    "bcrypt>=4.0.0",
+    "resend>=2.0.0",
+    # Web scraping (requirements.txt L34-36)
+    "beautifulsoup4>=4.12.0",
+    "trafilatura>=1.6.0",
+    "htmldate>=1.5.0",
+    # Retrieval backend (PostgreSQL pgvector — Qdrant 已廢除)
+    "psycopg[binary]>=3.1.12",
+    "psycopg[pool]>=3.2.0",
+    "pgvector>=0.4.0",
+    "alembic>=1.13.0",
+    # HNSW (requirements.txt L106)
+    "chroma-hnswlib>=0.7.0",
+    # ML / data (requirements.txt L109-114)
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "scikit-learn>=1.3.0",
+    "xgboost>=2.0.0",
+    "scipy>=1.11.0",
+    "rich>=13.7.0",
+    # Tier-6 API clients + misc (requirements.txt L117-135)
+    "wikipedia>=1.4.0",
+    "pytz>=2024.1",
+    "yfinance>=0.2.0",
+    "instructor>=1.4.0",
+    "sentence-transformers>=2.2.0",
+    "jieba>=0.42.1",
+    "pypdf>=3.0.0",
+    "python-docx>=1.0.0",
+    "tiktoken>=0.5.0",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.18.1"]
+gemini    = ["google-genai>=0.7.1"]
+postgres  = ["psycopg[binary]>=3.1.12", "psycopg[pool]>=3.2.0", "pgvector>=0.4.0"]
+all       = ["anthropic>=0.18.1", "google-genai>=0.7.1"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.0.0",
+    "pytest-order>=1.3.0",
+    "pytest-timeout>=2.3.1",
+    "testcontainers>=4.0.0",  # dev-only PG container test; .postgres ships in base pkg in v4 (no [postgresql] extra exists)
+    "beautifulsoup4>=4.12.3",
+    # F3: smoke_test.py's run_ruff_check() (verified tools/smoke_test.py L86-117) does
+    # `shutil.which("ruff")` and SILENTLY SKIPS static analysis (returns True) if ruff
+    # is absent. ruff is in no requirements file today (it only happens to be on the
+    # global PATH). Declaring it in the dev group ensures the smoke gate's F821 check
+    # actually runs inside uv's clean .venv — otherwise half the gate silently no-ops
+    # (violates the "no silent fail" rule).
+    "ruff>=0.5.0",
+]
+
+[tool.uv]
+# F5: this repo is an APPLICATION layout, not an installable/publishable package
+# (no build backend, code runs from source). Tell uv NOT to build+install the
+# project itself during `uv sync` — otherwise a clean-room `uv sync` tries to
+# build "nlweb" as a package and can fail or behave nondeterministically.
+package = false
+# Keep resolution deterministic on the strict 3.11 target.

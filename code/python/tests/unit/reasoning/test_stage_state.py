@@ -128,6 +128,49 @@ class TestVP7PerSectionCheckpointFields:
 
 
 # ============================================================================
+# 路 3 (P-回顧): final_report_markdown — Stage 6 後端組好的整份 full_report
+# markdown 字串落 DB，回顧時前端直接讀、不重組。
+# ============================================================================
+
+
+class TestFinalReportMarkdownField:
+    """路 3：Stage 6 整份報告 markdown 字串持久化。"""
+
+    def test_final_report_markdown_roundtrip(self):
+        """final_report_markdown 經 to_dict → from_dict 完整保留（含中文/換行/KG fence）。"""
+        report = (
+            "# 台灣綠能政策研究\n\n## 第一章\n內容[1]。\n\n"
+            "## 參考文獻\n[1] 來源 — example.com https://example.com\n\n"
+            "---\n\n## 知識圖譜 (Knowledge Graph)\n\n```json\n{\n  \"entities\": []\n}\n```\n"
+        )
+        s = LiveResearchStageState(current_stage=6, final_report_markdown=report)
+        restored = LiveResearchStageState.from_dict(s.to_dict())
+        assert restored.final_report_markdown == report
+
+    def test_final_report_markdown_default_empty(self):
+        """新建 state 預設 final_report_markdown == ''（未跑到 Stage 6）。"""
+        s = LiveResearchStageState()
+        assert s.final_report_markdown == ""
+
+    def test_final_report_markdown_backward_compat_old_session(self):
+        """欄位上線前的舊 session（dict 無 final_report_markdown key）→ from_dict fallback ''。"""
+        old_dict = {"current_stage": 6, "stage_status": "completed"}
+        s = LiveResearchStageState.from_dict(old_dict)
+        assert s.final_report_markdown == ""
+
+    def test_final_report_markdown_bare_backslash_roundtrip(self):
+        """Minor (plan §致命陷阱5): 裸反斜線 / unicode / JSON 內容字元落 DB round-trip 不被轉義破壞。"""
+        report = (
+            "# 報告\n\n含裸反斜線 C:\\Users\\test 與 \\n 字面 與 正則 \\d+ 與 \\t。\n\n"
+            "```json\n{\"path\": \"C:\\\\Users\", \"regex\": \"\\\\w+\"}\n```\n"
+            "Unicode：中文 與 emoji。\n"
+        )
+        s = LiveResearchStageState(current_stage=6, final_report_markdown=report)
+        restored = LiveResearchStageState.from_dict(s.to_dict())
+        assert restored.final_report_markdown == report
+
+
+# ============================================================================
 # Track A (LR DR-parity sprint 2026-05-28) — grounding schema additions
 # ============================================================================
 
@@ -443,3 +486,60 @@ class TestTrackFStateFields:
     def test_consistency_drift_log_backward_compat_missing_field(self):
         s = LiveResearchStageState.from_dict({})
         assert s.consistency_drift_log == []
+
+
+# ============================================================================
+# LR SSE reconnect/resume (2026-06-15) — offline 防呆燒錢上限 schema fields
+# ============================================================================
+
+
+class TestOfflineCapFields:
+    """斷線不取消 plan：離線上限計數進 DB state（CEO 拍板）。
+
+    Fields: offline_since, offline_capped, offline_cap_reason,
+    offline_checkpoint_advances. 必須 round-trip + 舊 row fallback default
+    （舊 session 絕不被誤判 capped）。
+    """
+
+    def test_offline_fields_default_values(self):
+        s = LiveResearchStageState()
+        assert s.offline_since is None
+        assert s.offline_capped is False
+        assert s.offline_cap_reason == ""
+        assert s.offline_checkpoint_advances == 0
+
+    def test_offline_fields_roundtrip(self):
+        s = LiveResearchStageState(
+            current_stage=5,
+            offline_since=1718400000.0,
+            offline_capped=True,
+            offline_cap_reason="next_checkpoint",
+            offline_checkpoint_advances=1,
+        )
+        restored = LiveResearchStageState.from_dict(s.to_dict())
+        assert restored.offline_since == 1718400000.0
+        assert restored.offline_capped is True
+        assert restored.offline_cap_reason == "next_checkpoint"
+        assert restored.offline_checkpoint_advances == 1
+
+    def test_offline_fields_backward_compat_old_rows(self):
+        """舊 DB row 無 offline 欄位 → fallback default，絕不誤判 capped。"""
+        old_row = {
+            "current_stage": 5,
+            "stage_status": "checkpoint",
+            # NOTE: no offline_* keys
+        }
+        s = LiveResearchStageState.from_dict(old_row)
+        assert s.offline_since is None
+        assert s.offline_capped is False
+        assert s.offline_cap_reason == ""
+        assert s.offline_checkpoint_advances == 0
+
+    def test_offline_to_dict_json_serializable(self):
+        s = LiveResearchStageState(
+            offline_since=1718400000.0,
+            offline_capped=True,
+            offline_cap_reason="wall_seconds",
+            offline_checkpoint_advances=2,
+        )
+        json.dumps(s.to_dict())  # must not raise

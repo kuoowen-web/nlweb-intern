@@ -99,7 +99,8 @@ class SessionService:
                              session_history: list = None,
                              chat_history: list = None,
                              accumulated_articles: list = None,
-                             research_report: dict = None) -> Dict:
+                             research_report: dict = None,
+                             lr_dialog_snapshot: list = None) -> Dict:
         """Create a new search session."""
         session_id = str(uuid.uuid4())
         now = self._now()
@@ -107,8 +108,9 @@ class SessionService:
         await self.db.execute(
             "INSERT INTO search_sessions "
             "(id, user_id, org_id, title, conversation_history, session_history, "
-            "chat_history, accumulated_articles, research_report, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "chat_history, accumulated_articles, research_report, lr_dialog_snapshot, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id, user_id, org_id, title,
                 json.dumps(conversation_history or []),
@@ -116,6 +118,7 @@ class SessionService:
                 json.dumps(chat_history or []),
                 json.dumps(accumulated_articles or []),
                 json.dumps(research_report) if research_report else None,
+                json.dumps(lr_dialog_snapshot or []),
                 now, now
             )
         )
@@ -156,7 +159,8 @@ class SessionService:
             'title', 'conversation_history', 'session_history', 'chat_history',
             'accumulated_articles', 'pinned_messages', 'pinned_news_cards',
             'research_report', 'user_feedback', 'admin_note', 'visibility',
-            'team_comments', 'is_archived', 'live_research_state'
+            'team_comments', 'is_archived', 'live_research_state',
+            'lr_dialog_snapshot'
         }
 
         set_clauses = []
@@ -655,7 +659,7 @@ class SessionService:
         jsonb_fields = [
             'conversation_history', 'session_history', 'chat_history',
             'accumulated_articles', 'pinned_messages', 'pinned_news_cards',
-            'research_report', 'team_comments'
+            'research_report', 'team_comments', 'lr_dialog_snapshot'
         ]
         result = dict(row)
         for field in jsonb_fields:

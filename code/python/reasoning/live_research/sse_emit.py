@@ -45,6 +45,18 @@ async def emit_sse(handler: Any, payload: Dict[str, Any]) -> bool:
     """
     msg_type = payload.get("message_type", "<unknown>")
 
+    # 離線早退（plan: lr-sse-reconnect-resume, 2026-06-15）：client 斷線後 emit 直接 drop，
+    # **不**進 message_sender / fallback。放最前面是關鍵：否則離線後每條 emit 仍各打一條
+    # WARN，Stage 5 大量 narration 把 log 打爆。重連 render 完全走 state-based restore
+    # （不做 event 緩衝/replay）。
+    alive_evt = getattr(handler, "connection_alive_event", None)
+    if alive_evt is not None and not alive_evt.is_set():
+        logger.debug(
+            f"[LIVE RESEARCH] client offline; dropping SSE "
+            f"{msg_type!r} (state persisted separately)"
+        )
+        return False
+
     sender = getattr(handler, "message_sender", None)
     if sender is not None:
         try:

@@ -490,6 +490,7 @@ check_*.py
 analyze_*.py
 !code/python/core/query_analysis/analyze_query.py
 retry_*.py
+!code/python/core/retry_util.py
 upload_*.py
 !code/python/webserver/middleware/upload_rate_limit.py
 truncate_*.py

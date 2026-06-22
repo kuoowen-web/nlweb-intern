@@ -514,7 +514,7 @@ async def test_contract_writer_section_live_mode(mock_handler, minimal_context_m
 async def test_contract_intent_parsing_style_confirmation(mock_handler):
     """
     Real LLM call: _parse_style_confirmation_intent with "confirm" user message.
-    → Intent dict with valid 'action' field (confirm/adjust/redo)
+    → Intent dict with valid 'action' field (confirm/adjust)
     """
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
     from reasoning.schemas_live import StyleAnalysisOutput, StyleFeature
@@ -564,8 +564,8 @@ async def test_contract_intent_parsing_style_confirmation(mock_handler):
 
     assert isinstance(result, dict), f"Expected dict or None, got {type(result)}"
     assert "action" in result, f"Expected 'action' key in result, got keys: {list(result.keys())}"
-    assert result["action"] in ("confirm", "adjust", "redo"), \
-        f"Expected action in (confirm, adjust, redo), got: {result['action']}"
+    assert result["action"] in ("confirm", "adjust"), \
+        f"Expected action in (confirm, adjust), got: {result['action']}"
 
     # For a clear "confirm" message, action should be "confirm"
     # (LLM contract: natural language must correctly interpret this as confirmation)

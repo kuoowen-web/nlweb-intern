@@ -152,9 +152,11 @@ The site's description is: {site_description}
         # Create tasks for all sites
         tasks = []
         for item in self.items:
-            # Handle both 4-tuple and 5-tuple (with vector) formats
-            if len(item) == 5:
-                url, json_str, name, site, vector = item
+            # Handle 4-tuple, 5-tuple (with vector), and 6-tuple
+            # (with retrieval_scores). rankItem only needs the first four
+            # fields; index 4/5 are ignored on this code path.
+            if len(item) >= 5:
+                url, json_str, name, site = item[0], item[1], item[2], item[3]
             else:
                 url, json_str, name, site = item
             tasks.append(asyncio.create_task(self.rankItem(url, json_str, name, site)))

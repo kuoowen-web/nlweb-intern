@@ -61,23 +61,18 @@ def _make_minimal_context_map():
 # ============================================================================
 
 @pytest.mark.asyncio
-async def test_i1_post_render_gate_fires_for_state_none_with_nonempty_citations():
-    """I-1 fix: state=None + is_chapter_override + book_outline 非 None + body chapter
-    + analyst_citations 非空（不會被入口 gate 攔）→ 沒 render path → relevant_findings 空
-    → **post-render gate 也應該 fire 回 BlockedSection**（不依賴 rendered_via_state）。
+async def test_i1_post_render_gate_fires_for_state_none_when_pool_view_empty():
+    """I-1 + P2 W10：state=None + book_outline 非 None + body chapter，且 pool entry
+    無 title/snippet（writer_evidence_view 渲不出東西）+ 無 narrative → post-render gate
+    仍 fire 回 BlockedSection（不依賴 rendered_via_state）。
 
-    當前行為（fix 前）：post-render gate `if rendered_via_state and ... and not findings`
-    要求 rendered_via_state=True，state=None 路徑直接漏過 → writer 被 invoke with
-    空 findings + non-empty cite whitelist → C-1 設計目標破口。
-
-    Fix 後：post-render gate 改為 `if book_outline is not None and not intro/conclusion
-    and not findings.strip()` — 不依賴 rendered_via_state, 但仍保留
-    book_outline=None 的純 legacy path 不 fire (避免破壞 union-to-first 既有 test)。
+    P2 W10 調整（C-1 根治）：post-render gate 改判「全 pool grounding view + narrative
+    都實質空」才擋。state=None 下 evidence_usage 空 → narrative 空；pool entry 無
+    title/snippet → view 也空 → 兩者都空 → 擋。（pool 有實質料時改不擋，見下一 test。）
     """
     orch = _make_orchestrator(dry_run=False)
     cm = _make_minimal_context_map()
 
-    # book_outline: 4 章 body chapter at idx=1，planned_evidence_ids=[1, 2] (非空)
     book_outline = BookOutline(
         chapters=[
             ChapterPlan(chapter_index=0, title="前言", brief="x",
@@ -91,25 +86,20 @@ async def test_i1_post_render_gate_fires_for_state_none_with_nonempty_citations(
         redundancy_warnings=[],
     )
 
+    # pool entry 無 title/snippet → render_grounding_evidence_view 跳過 → view 空
     pool = {
-        1: EvidencePoolEntry(evidence_id=1, title="E1", url="https://e1.com"),
-        2: EvidencePoolEntry(evidence_id=2, title="E2", url="https://e2.com"),
+        1: EvidencePoolEntry(evidence_id=1, title="", url="", snippet=""),
+        2: EvidencePoolEntry(evidence_id=2, title="", url="", snippet=""),
     }
 
-    # state=None 觸發 legacy path
-    # is_chapter_override=True (topic 為 dict)
     chapter_dict = {"name": "案例", "outline": "body content"}
-
-    # spy WriterAgent.compose_section — fix 後不應該被呼叫
     writer_called = {"called": False}
 
     async def fake_compose(**kw):
         writer_called["called"] = True
         return LiveWriterSectionOutput(
-            section_title="案例",
-            section_content="不應該到這裡",
-            sources_used=[],
-            confidence_level="Medium",
+            section_title="案例", section_content="不應該到這裡",
+            sources_used=[], confidence_level="Medium",
         )
 
     with patch("reasoning.agents.writer.WriterAgent") as MockWriterCls, \
@@ -119,27 +109,65 @@ async def test_i1_post_render_gate_fires_for_state_none_with_nonempty_citations(
         MockWriterCls.return_value = mock_writer_inst
 
         result, _was_corrected = await orch._write_section(
-            context_map=cm,
-            topic=chapter_dict,
-            style_features=None,
-            format_specs=None,
-            evidence_pool=pool,
-            chapter_index=1,
-            all_evidence_ids=[1, 2],
-            book_outline=book_outline,
-            current_chapter_index=1,
-            state=None,  # KEY: state=None → legacy path
+            context_map=cm, topic=chapter_dict, style_features=None,
+            format_specs=None, evidence_pool=pool, chapter_index=1,
+            all_evidence_ids=[1, 2], book_outline=book_outline,
+            current_chapter_index=1, state=None,  # state=None legacy path
         )
 
-    # Fix 後預期：post-render gate fire → 回 BlockedSection，writer 不被叫
     assert result.status == "blocked_no_evidence", (
-        f"I-1 FAIL: state=None + book_outline 有 legacy path 沒走 post-render gate, "
-        f"got status={result.status!r}"
+        f"post-render gate 應在 view+narrative 都空時 fire, got {result.status!r}"
     )
-    assert writer_called["called"] is False, (
-        "I-1 FAIL: writer.compose_section 不該被呼叫 (post-render gate 應該攔下)"
-    )
+    assert writer_called["called"] is False
     assert "[本章資料不足]" in result.section_content
+
+
+@pytest.mark.asyncio
+async def test_i1_state_none_pool_with_snippet_calls_writer():
+    """P2 W10（R1）：state=None 但 pool entry 有 title/snippet → writer_evidence_view
+    非空 → writer 仍被呼叫（用 pool 視圖寫），不擋。全局模型下 raw pool 有料即可寫。"""
+    orch = _make_orchestrator(dry_run=False)
+    cm = _make_minimal_context_map()
+    book_outline = BookOutline(
+        chapters=[
+            ChapterPlan(chapter_index=0, title="前言", brief="x",
+                        planned_evidence_ids=[], role="intro"),
+            ChapterPlan(chapter_index=1, title="案例", brief="body",
+                        planned_evidence_ids=[1, 2], role="body"),
+            ChapterPlan(chapter_index=2, title="結論", brief="z",
+                        planned_evidence_ids=[], role="conclusion"),
+        ],
+        overall_arc="test", redundancy_warnings=[],
+    )
+    pool = {
+        1: EvidencePoolEntry(evidence_id=1, title="E1", url="u", snippet="s1"),
+        2: EvidencePoolEntry(evidence_id=2, title="E2", url="u", snippet="s2"),
+    }
+    chapter_dict = {"name": "案例", "outline": "body content"}
+    writer_called = {"called": False}
+
+    async def fake_compose(**kw):
+        writer_called["called"] = True
+        return LiveWriterSectionOutput(
+            section_title="案例", section_content="content",
+            sources_used=[1], confidence_level="Medium",
+        )
+
+    with patch("reasoning.agents.writer.WriterAgent") as MockWriterCls, \
+         patch.object(orch, "_emit_narration", new=AsyncMock()):
+        mock_writer_inst = MagicMock()
+        mock_writer_inst.compose_section = AsyncMock(side_effect=fake_compose)
+        MockWriterCls.return_value = mock_writer_inst
+
+        result, _ = await orch._write_section(
+            context_map=cm, topic=chapter_dict, style_features=None,
+            format_specs=None, evidence_pool=pool, chapter_index=1,
+            all_evidence_ids=[1, 2], book_outline=book_outline,
+            current_chapter_index=1, state=None,
+        )
+
+    assert writer_called["called"] is True   # pool 有 snippet → writer 被呼叫
+    assert result.status != "blocked_no_evidence"
 
 
 @pytest.mark.asyncio

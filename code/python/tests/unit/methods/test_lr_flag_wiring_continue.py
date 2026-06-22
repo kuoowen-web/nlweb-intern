@@ -126,3 +126,49 @@ async def test_continue_route_body_flags_reach_handler(monkeypatch):
 
     assert captured.get('enable_web_search') is True
     assert captured.get('enable_gap_enrichment') is True
+
+
+@pytest.mark.asyncio
+async def test_nav_action_threads_to_orchestrator(monkeypatch):
+    """plan: lr-backward-nav — route 把 body 的 nav_action 透傳到
+    handler.continueResearch(nav_action=...)。防 regression：(1) api.py 漏抽
+    nav_action (2) 漏傳給 continueResearch。沿既有 _CaptureHandler route-level pattern。"""
+    import methods.live_research as lr_mod
+    import webserver.routes.api as api_mod  # noqa: F401
+    from core.config import CONFIG
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setenv('GUARDRAIL_DR_ENABLED', 'false')
+    features = CONFIG.reasoning_params.setdefault('features', {})
+    monkeypatch.setitem(features, 'live_research', True)
+
+    captured_kwargs = {}
+
+    class _CaptureHandler:
+        connection_alive_event = MagicMock()
+        _lr_research_task = None
+
+        def __init__(self, query_params, http_handler):
+            pass
+
+        async def continueResearch(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return None
+
+    monkeypatch.setattr(lr_mod, 'LiveResearchHandler', _CaptureHandler)
+
+    body = {
+        'session_id': 'frontend-sid',
+        'lr_session_id': 'uuid-x',
+        'user_message': '',
+        'auto_continue': False,
+        'enable_web_search': True,
+        'enable_gap_enrichment': True,
+        'nav_action': 'back_one',
+    }
+    request = make_mocked_request('POST', '/api/live_research/continue')
+    monkeypatch.setattr(request, 'json', AsyncMock(return_value=body), raising=False)
+
+    await api_mod.live_research_continue_handler(request)
+
+    assert captured_kwargs.get('nav_action') == 'back_one'

@@ -32,6 +32,7 @@ G. vector is a list of floats (compatible with mmr.py cosine_similarity)
 import sys
 import os
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch, MagicMock
 import asyncio
 
@@ -45,6 +46,29 @@ def make_client():
     """Create a PgVectorClient without triggering __init__ (no DB needed)."""
     client = object.__new__(PgVectorClient)
     return client
+
+
+@contextmanager
+def aggregator_keep_scores(value):
+    """Pin AGGREGATOR_KEEP_SCORES to a known state, restoring the prior value.
+
+    Restoring (not popping) is required so these tests are deterministic whether
+    the whole suite runs with the flag globally on or off, under any test order.
+    Legacy 4/5-tuple contract tests pin it OFF (None); the 6-tuple contract test
+    pins it ON ('1').
+    """
+    prev = os.environ.get('AGGREGATOR_KEEP_SCORES')
+    if value is None:
+        os.environ.pop('AGGREGATOR_KEEP_SCORES', None)
+    else:
+        os.environ['AGGREGATOR_KEEP_SCORES'] = value
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop('AGGREGATOR_KEEP_SCORES', None)
+        else:
+            os.environ['AGGREGATOR_KEEP_SCORES'] = prev
 
 
 # ---------------------------------------------------------------------------
@@ -145,16 +169,22 @@ class TestSearchReturnsVectorWhenRequested(unittest.TestCase):
 
         client._execute_with_retry = fake_execute_with_retry
 
+        # Own a dedicated event loop instead of asyncio.get_event_loop(): under
+        # the full suite a prior pytest-asyncio test leaves the main thread with
+        # no current loop, so get_event_loop() raises RuntimeError on Python 3.11.
+        loop = asyncio.new_event_loop()
         try:
-            result = asyncio.get_event_loop().run_until_complete(
-                client.search(
-                    "test query",
-                    site=[],
-                    num_results=10,
-                    include_vectors=include_vectors,
+            with aggregator_keep_scores(None):  # legacy 4/5-tuple contract
+                result = loop.run_until_complete(
+                    client.search(
+                        "test query",
+                        site=[],
+                        num_results=10,
+                        include_vectors=include_vectors,
+                    )
                 )
-            )
         finally:
+            loop.close()
             pg_mod.get_embedding = original_get_embedding
 
         return result
@@ -223,12 +253,16 @@ class TestSearchBackwardCompatNoVector(unittest.TestCase):
 
         client._execute_with_retry = fake_execute_with_retry
 
+        # Dedicated event loop — immune to pytest-asyncio main-thread loop pollution.
+        loop = asyncio.new_event_loop()
         try:
-            result = asyncio.get_event_loop().run_until_complete(
-                client.search("test query", site=[], num_results=10)
-                # No include_vectors kwarg
-            )
+            with aggregator_keep_scores(None):  # legacy 4-tuple contract
+                result = loop.run_until_complete(
+                    client.search("test query", site=[], num_results=10)
+                    # No include_vectors kwarg
+                )
         finally:
+            loop.close()
             pg_mod.get_embedding = original_get_embedding
 
         return result
@@ -269,9 +303,11 @@ class TestRankingUrlToVectorFrom5Tuple(unittest.TestCase):
                 vector = item.get('vector')
                 if vector is not None:
                     url_to_vector[url] = vector
-            elif len(item) == 5:
-                url, _, _, _, vector = item
-                url_to_vector[url] = vector
+            # len >= 5 so a 6-tuple's vector (index 4) is not silently dropped.
+            elif len(item) >= 5:
+                vector = item[4]
+                if vector is not None:
+                    url_to_vector[item[0]] = vector
         return url_to_vector
 
     def test_5tuple_populates_url_to_vector(self):
@@ -307,6 +343,22 @@ class TestRankingUrlToVectorFrom5Tuple(unittest.TestCase):
         url_to_vector = self._extract_url_to_vector(items)
         self.assertIn("http://example.com/3", url_to_vector)
         self.assertEqual(url_to_vector["http://example.com/3"], vector)
+
+    def test_6tuple_populates_url_to_vector_from_index_4(self):
+        """6-tuple [url, json, name, site, vector, scores]: vector at index 4."""
+        vector = [0.8, 0.9]
+        items = [["http://example.com/6", "schema", "title", "source", vector,
+                  {'vector_score': 0.9}]]
+        url_to_vector = self._extract_url_to_vector(items)
+        self.assertIn("http://example.com/6", url_to_vector)
+        self.assertEqual(url_to_vector["http://example.com/6"], vector)
+
+    def test_6tuple_with_none_vector_does_not_populate(self):
+        """6-tuple with None vector (no MMR vector) must not populate."""
+        items = [["http://example.com/6", "schema", "title", "source", None,
+                  {'vector_score': 0.9}]]
+        url_to_vector = self._extract_url_to_vector(items)
+        self.assertEqual(url_to_vector, {})
 
 
 # ---------------------------------------------------------------------------
@@ -480,11 +532,15 @@ class TestSearchSQLIncludesEmbeddingWhenVectorsRequested(unittest.TestCase):
 
         client._execute_with_retry = fake_execute_with_retry
 
+        # Dedicated event loop — immune to pytest-asyncio main-thread loop pollution.
+        loop = asyncio.new_event_loop()
         try:
-            results = asyncio.get_event_loop().run_until_complete(
-                client.search("query", site=[], include_vectors=True)
-            )
+            with aggregator_keep_scores(None):  # legacy 5-tuple contract
+                results = loop.run_until_complete(
+                    client.search("query", site=[], include_vectors=True)
+                )
         finally:
+            loop.close()
             pg_mod.get_embedding = original_get_embedding
 
         self.assertEqual(len(results), 1)
@@ -521,15 +577,94 @@ class TestSearchSQLIncludesEmbeddingWhenVectorsRequested(unittest.TestCase):
 
         client._execute_with_retry = fake_execute_with_retry
 
+        # Dedicated event loop — immune to pytest-asyncio main-thread loop pollution.
+        loop = asyncio.new_event_loop()
         try:
-            results = asyncio.get_event_loop().run_until_complete(
-                client.search("query", site=[], num_results=10)
-            )
+            with aggregator_keep_scores(None):  # legacy 4-tuple contract
+                results = loop.run_until_complete(
+                    client.search("query", site=[], num_results=10)
+                )
         finally:
+            loop.close()
             pg_mod.get_embedding = original_get_embedding
 
         self.assertEqual(len(results), 1)
         self.assertEqual(len(results[0]), 4, "Expected 4-tuple when include_vectors not requested")
+
+
+# ---------------------------------------------------------------------------
+# I. search() returns 6-tuple with retrieval_scores when AGGREGATOR_KEEP_SCORES=1
+#    (Option 2 / S7: flag on changes the contract to a fixed 6-tuple)
+# ---------------------------------------------------------------------------
+
+class TestSearchSixTupleWithScores(unittest.TestCase):
+    """With AGGREGATOR_KEEP_SCORES=1, search() emits a fixed 6-tuple
+    [url, schema_str, title, source, vector_or_None, retrieval_scores]."""
+
+    def _run_search_flag_on(self, include_vectors, vector_value=None):
+        client = make_client()
+        client._build_filters = MagicMock(return_value=([], []))
+
+        import retrieval_providers.postgres_client as pg_mod
+        original_get_embedding = pg_mod.get_embedding
+
+        async def fake_get_embedding(query, query_params=None):
+            return [0.0] * 4
+
+        pg_mod.get_embedding = fake_get_embedding
+
+        raw = {
+            'url': 'http://example.com/scores',
+            'schema_str': '{}',
+            'title': 'T',
+            'source': 'S',
+            'author': '',
+            'date_published': '',
+            'vector_score': 0.85,
+            'text_score': 0.42,
+        }
+        if include_vectors and vector_value is not None:
+            raw['vector'] = vector_value
+        raw_results = [raw]
+
+        async def fake_execute_with_retry(fn, **kw):
+            return raw_results
+
+        client._execute_with_retry = fake_execute_with_retry
+
+        loop = asyncio.new_event_loop()
+        try:
+            with aggregator_keep_scores('1'):  # 6-tuple contract
+                return loop.run_until_complete(
+                    client.search("q", site=[], num_results=10,
+                                  include_vectors=include_vectors)
+                )
+        finally:
+            loop.close()
+            pg_mod.get_embedding = original_get_embedding
+
+    def test_six_tuple_length_with_vector(self):
+        results = self._run_search_flag_on(include_vectors=True,
+                                           vector_value=[0.1, 0.2, 0.3])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results[0]), 6,
+                         f"Expected 6-tuple with flag on, got {len(results[0])}")
+        self.assertEqual(results[0][4], [0.1, 0.2, 0.3])  # vector at index 4
+        self.assertIsInstance(results[0][5], dict)        # scores at index 5
+
+    def test_six_tuple_length_without_vector_uses_none_placeholder(self):
+        results = self._run_search_flag_on(include_vectors=False)
+        self.assertEqual(len(results[0]), 6,
+                         "Fixed 6-tuple must keep len 6 even without a vector")
+        self.assertIsNone(results[0][4])                  # None placeholder
+        self.assertIsInstance(results[0][5], dict)
+
+    def test_six_tuple_scores_map_postgres_fields(self):
+        results = self._run_search_flag_on(include_vectors=False)
+        scores = results[0][5]
+        self.assertEqual(scores['vector_score'], 0.85)
+        self.assertEqual(scores['bm25_score'], 0.42)       # text_score -> bm25
+        self.assertEqual(scores['final_retrieval_score'], 0.85)  # max(0.85, 0.42)
 
 
 if __name__ == '__main__':

@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from core.retriever import search as retriever_search  # Track E (sprint 2026-05-28): module-level for monkeypatch testability
 from misc.logger.logging_config_helper import get_configured_logger
 from reasoning.agents.associator import AssociatorAgent
+from reasoning.live_research import lr_copy
 from reasoning.live_research.sse_emit import emit_sse
 from reasoning.schemas_live import (
     ContextMap,
@@ -334,11 +335,7 @@ class BABLoopEngine:
                     # round-3（Gemini critical）：consistency check 每輪（for iteration in
                     # range(max_iterations)）都跑，持久失敗會每輪 emit → 高頻迴圈訊息轟炸。
                     # per-run 只提示一次（flag 在 run_loop 入口初始化，見 Step 3b）。
-                    if not self._consistency_degraded_narrated:
-                        await self._emit_narration(
-                            "（一致性監控暫時無法使用，研究仍會繼續，但這一輪沒有做方向一致性檢查。）"
-                        )
-                        self._consistency_degraded_narrated = True
+                    await self._narrate_once("_consistency_degraded_narrated", "（一致性監控暫時無法使用，研究仍會繼續，但這一輪沒有做方向一致性檢查。）")
                 if self.consistency_review.recommended_action == "pause_confirm":
                     self.paused_by_consistency = True
                     logger.info("[BAB LOOP] Paused by Consistency Monitor")
@@ -803,12 +800,8 @@ class BABLoopEngine:
         得知「補強查證已達本輪上限」。per-run dedup（_gap_routing_cap_narrated）
         防同一輪多個 gap 撞 cap 時重複轟炸旁白。
         """
-        if not self._gap_routing_cap_narrated:
-            await self._emit_narration(
-                "這一輪的外部補強查證已達上限 — 為控制查證次數與時間，"
-                "剩餘的外部資料補強（維基／網路）先略過，研究照常繼續。"
-            )
-            self._gap_routing_cap_narrated = True
+        await self._narrate_once("_gap_routing_cap_narrated", "這一輪的外部補強查證已達上限 — 為控制查證次數與時間，"
+            "剩餘的外部資料補強（維基／網路）先略過，研究照常繼續。")
 
     def _add_llm_knowledge_evidence(self, gap) -> None:
         """LLM_KNOWLEDGE gap → 建 virtual doc 進 evidence_pool (Track C C4).
@@ -1114,6 +1107,23 @@ class BABLoopEngine:
         """
         return bool(formatted_results) and formatted_results != "（未找到相關結果）"
 
+    def _build_analyst_research_kwargs(self, research_question, enriched_context, cm_summary):
+        """Task 15 (behavior-preserving): 兩處 analyst.research(...) kwargs 完全相同，
+        抽共用 builder 防 drift。value-expression 與兩 call site 逐欄一致：
+        query=context_map.research_question / formatted_context=enriched_context /
+        mode="discovery" / enable_live_research=True / context_map_summary=cm_summary /
+        enable_web_search=getattr(self.handler, "enable_web_search", False) / enable_kg=True。
+        """
+        return {
+            "query": research_question,
+            "formatted_context": enriched_context,
+            "mode": "discovery",
+            "enable_live_research": True,
+            "context_map_summary": cm_summary,
+            "enable_web_search": getattr(self.handler, "enable_web_search", False),
+            "enable_kg": True,
+        }
+
     async def _run_mini_reasoning(self, context_map, formatted_results):
         """
         Mini-Reasoning：對新 evidence 跑 Analyst + Critic。
@@ -1174,19 +1184,16 @@ class BABLoopEngine:
             # 讓 Analyst prompt _build_mandatory_precheck 段在
             # enable_web_search=True AND CONFIG.gap_knowledge_enrichment=True
             # 同時成立時 inject → Analyst 才會主動標 gap_resolutions。
+            # Track D D1 (sprint 2026-05-28): enable_kg=True 啟用 KG 生成。
+            # D-CEO-Q6 LOCKED 預設 ON — LR 永遠跑 KG (LR 是重度研究模式)。
+            # Analyst.research(enable_kg=True) → 走 AnalystResearchOutputLive
+            # schema (inherit AnalystResearchOutputEnhancedKG, 含 knowledge_graph
+            # field) + 注入 KG instruction prompt block → LLM 輸出 knowledge_graph。
+            # Task 15: kwargs 與 Task2 re-run site 共用 _build_analyst_research_kwargs。
             analyst_output = await analyst.research(
-                query=context_map.research_question,
-                formatted_context=enriched_context,
-                mode="discovery",
-                enable_live_research=True,
-                context_map_summary=cm_summary,
-                enable_web_search=getattr(self.handler, "enable_web_search", False),
-                # Track D D1 (sprint 2026-05-28): 啟用 KG 生成。
-                # D-CEO-Q6 LOCKED 預設 ON — LR 永遠跑 KG (LR 是重度研究模式)。
-                # Analyst.research(enable_kg=True) → 走 AnalystResearchOutputLive
-                # schema (inherit AnalystResearchOutputEnhancedKG, 含 knowledge_graph
-                # field) + 注入 KG instruction prompt block → LLM 輸出 knowledge_graph。
-                enable_kg=True,
+                **self._build_analyst_research_kwargs(
+                    context_map.research_question, enriched_context, cm_summary
+                )
             )
             logger.info("[BAB LOOP] Mini-reasoning: Analyst pass complete")
 
@@ -1198,86 +1205,9 @@ class BABLoopEngine:
             # 寫入 self.evidence_pool（:540）→ BAB 結束後 serialize 進 state.evidence_pool_json
             # （orchestrator :938/1668）→ outline planner deserialize 全 pool 做 planned_evidence_ids
             # 分配（orchestrator :3471）→ render_grounded_narrative 餵 writer findings = writer 可引用。
-            if (
-                analyst_output is not None
-                and str(getattr(analyst_output, "status", "")).upper() == "SEARCH_REQUIRED"
-                and getattr(analyst_output, "new_queries", None)
-            ):
-                # M-10（AR CX SF#5 / Q5）：consumer 層硬限 — 去重 + 過濾空字串 + cap 3 條
-                # （即使 Analyst prompt 要求 1-3，runtime 仍須兜底防 LLM 吐超量 / 空 query）。
-                _seen = set()
-                _capped_queries = []
-                for q in analyst_output.new_queries:
-                    # AR R2 Codex nit：先 strip 再去重（否則 " query" 與 "query" 被當不同條）
-                    qn = (q or "").strip()
-                    if qn and qn not in _seen:
-                        _seen.add(qn)
-                        _capped_queries.append(qn)
-                    if len(_capped_queries) >= 3:
-                        break
-                if not _capped_queries:
-                    logger.info("[BAB LOOP] Task2 SEARCH_REQUIRED but new_queries empty after dedup; skipping")
-                else:
-                    logger.info(
-                        f"[BAB LOOP] Task2 SEARCH_REQUIRED: Analyst requested "
-                        f"{len(_capped_queries)} secondary queries (capped from {len(analyst_output.new_queries)})"
-                    )
-                    # 把 capped queries 包成 _execute_search 吃的 seed-like 物件（讀 .query / .source_strategy）
-                    from types import SimpleNamespace
-                    secondary_seeds = [
-                        SimpleNamespace(query=q, source_strategy="internal")
-                        for q in _capped_queries
-                    ]
-                    # 註：secondary_formatted, _ = ... 丟棄回傳 source_map 是**安全的** —
-                    # _execute_search 已 side-effect 寫 self.evidence_pool（:540）。不需手動 merge source_map。
-                    try:
-                        secondary_formatted, _ = await self._execute_search(secondary_seeds)
-                    except Exception as e:
-                        logger.warning(
-                            f"[BAB LOOP] Task2 secondary search failed (non-fatal): {e}",
-                            exc_info=True,
-                        )
-                        secondary_formatted = "（未找到相關結果）"
-                    if secondary_formatted and secondary_formatted != "（未找到相關結果）":
-                        # 補到 evidence → 重組 context 重跑 Analyst 一次（上限 1 次）
-                        enriched_context = (
-                            f"{enriched_context}\n\n--- 補充資料 ---\n\n{secondary_formatted}"
-                        )
-                        analyst_output = await analyst.research(
-                            query=context_map.research_question,
-                            formatted_context=enriched_context,
-                            mode="discovery",
-                            enable_live_research=True,
-                            context_map_summary=cm_summary,
-                            enable_web_search=getattr(self.handler, "enable_web_search", False),
-                            enable_kg=True,
-                        )
-                        logger.info("[BAB LOOP] Task2: Analyst re-run after secondary search complete")
-                        # AR R2 Codex should-fix：第二次仍非 DRAFT_READY 或 draft 空 → 不可 silent no-op。
-                        # 補搜有結果但 Analyst 重跑後仍判資料不足 / 沒寫出 draft（→ critic 不跑、該批
-                        # 推論落空），須 forensic log + user-facing 降級旁白（不可 silent fail）。
-                        _rerun_status = str(getattr(analyst_output, "status", "")).upper()
-                        _rerun_draft_len = len(getattr(analyst_output, "draft", None) or "")
-                        if _rerun_status != "DRAFT_READY" or _rerun_draft_len == 0:
-                            logger.warning(
-                                f"[BAB LOOP] Task2: secondary search re-run still inconclusive "
-                                f"(status={_rerun_status!r}, draft_len={_rerun_draft_len}, "
-                                f"queries={_capped_queries}); continuing with existing evidence"
-                            )
-                            if not getattr(self, "_search_required_degraded_narrated", False):
-                                from reasoning.live_research import lr_copy
-                                await self._emit_narration(
-                                    lr_copy.SEARCH_REQUIRED_DEGRADED_NARRATION
-                                )
-                                self._search_required_degraded_narrated = True
-                    else:
-                        # 無結果 → 降級旁白（不可 silent fail），用原 analyst_output（draft 空 → critic 不跑）
-                        if not getattr(self, "_search_required_degraded_narrated", False):
-                            from reasoning.live_research import lr_copy
-                            await self._emit_narration(
-                                lr_copy.SEARCH_REQUIRED_DEGRADED_NARRATION
-                            )
-                            self._search_required_degraded_narrated = True
+            analyst_output, enriched_context = await self._handle_search_required_supplementary(
+                analyst_output, enriched_context, context_map, cm_summary, analyst
+            )
 
             # Critic pass (if analyst produced a non-empty draft) — Track A Task 6:
             # Critic status (CriticReviewOutput.status: Literal["PASS","WARN","REJECT"])
@@ -1320,18 +1250,15 @@ class BABLoopEngine:
                         review=critic_output,
                         formatted_context=enriched_context,
                         query=context_map.research_question,
+                        enable_live_research=True,  # B9/C1: match LR research() schema (keep KG type)
+                        enable_kg=True,             # B9/C1: match LR research() schema (keep KG type)
                     )
                 except Exception as e:
                     # revise 這一步失敗 → 降級旁白（不可 silent fail），退回原 REJECT 入庫路徑。
                     logger.warning(
                         f"[BAB LOOP] Task1 revise failed (non-fatal): {e}", exc_info=True
                     )
-                    if not getattr(self, "_revise_degraded_narrated", False):
-                        from reasoning.live_research import lr_copy
-                        await self._emit_narration(
-                            lr_copy.MINI_REASONING_REVISE_DEGRADED_NARRATION
-                        )
-                        self._revise_degraded_narrated = True
+                    await self._narrate_once("_revise_degraded_narrated", lr_copy.MINI_REASONING_REVISE_DEGRADED_NARRATION)
                     break  # 退回原 analyst_output 的 REJECT 入庫
                 # revised 沒 draft → 無法 re-review，退回原路徑
                 if not getattr(revised, "draft", None):
@@ -1355,12 +1282,7 @@ class BABLoopEngine:
                     logger.warning(
                         f"[BAB LOOP] Task1 re-review failed (non-fatal): {e}", exc_info=True
                     )
-                    if not getattr(self, "_revise_degraded_narrated", False):
-                        from reasoning.live_research import lr_copy
-                        await self._emit_narration(
-                            lr_copy.MINI_REASONING_REVISE_DEGRADED_NARRATION
-                        )
-                        self._revise_degraded_narrated = True
+                    await self._narrate_once("_revise_degraded_narrated", lr_copy.MINI_REASONING_REVISE_DEGRADED_NARRATION)
                     break  # 退回原 analyst_output / 原 critic_status 的 REJECT 入庫
                 new_status = str(getattr(re_review, "status", "PASS")).upper()
                 if new_status not in ("PASS", "WARN", "REJECT"):
@@ -1374,128 +1296,9 @@ class BABLoopEngine:
                 critic_status = new_status
                 # PASS/WARN 達成 → 退出迴圈；仍 REJECT 且未達上限 → 迴圈續（此處 MAX_REVISE=1 即停）
 
-            # Track A Task 1 + Task 6: index Analyst argument_graph 進
-            # state.evidence_usage (Gemini Critical 拍板: REJECT 也入庫保留 forensic trail,
-            # Task 3 render 層 filter)。
-            if (
-                self.state is not None
-                and analyst_output
-                and hasattr(analyst_output, 'argument_graph')
-                and analyst_output.argument_graph
-            ):
-                from reasoning.schemas_live import GroundedClaim
-                for node in analyst_output.argument_graph:
-                    rtype = getattr(node, 'reasoning_type', 'induction')
-                    # LogicType enum → str
-                    rtype_str = rtype.value if hasattr(rtype, 'value') else str(rtype)
-                    raw_conf = str(getattr(node, 'confidence', 'medium'))
-                    # WARN / REJECT 兩種情況都把 confidence 視為 low
-                    # (REJECT 降級或保留視 metadata 用途; critic_status 為主鍵)
-                    eff_conf = (
-                        "low" if critic_status in ("WARN", "REJECT") else raw_conf
-                    )
-                    eff_critic_status = critic_status  # PASS / WARN / REJECT
-                    for eid in (getattr(node, 'evidence_ids', None) or []):
-                        # T1 Fix 2: C-4 invariant #3 — eid 必須在 evidence_pool 中
-                        # 若 Analyst 幻覺出不存在的 eid，skip 並 warning（不 raise）
-                        if eid not in self.evidence_pool:
-                            logger.warning(
-                                f"[BAB invariant #3] Analyst hallucinated eid={eid} not in evidence_pool "
-                                f"(topic={self._current_topic_id}, status={critic_status}); skipping indexing"
-                            )
-                            continue
-                        gc = GroundedClaim(
-                            claim=node.claim,
-                            reasoning_type=rtype_str,
-                            confidence=eff_conf,
-                            source_topic=self._current_topic_id or "global",
-                            source_iteration=self._current_iteration,
-                            critic_status=eff_critic_status,
-                            # T1 Fix 1: 正式欄位取代 dict key inject，確保 model_validate round-trip 不 drop
-                            from_warned_critic_review=(critic_status == "WARN"),
-                        )
-                        entry = gc.model_dump()
-                        self.state.evidence_usage.setdefault(eid, []).append(entry)
-                logger.info(
-                    f"[BAB LOOP] Indexed argument_graph (critic={critic_status}): "
-                    f"{len(analyst_output.argument_graph)} nodes, "
-                    f"total eids={len(self.state.evidence_usage)}"
-                )
-                # Gemini C-1: REJECT batch 同步 append rejected_claims_log
-                # (metadata trace — oncall 可直接撈某次 reject batch)
-                if critic_status == "REJECT":
-                    if not hasattr(self.state, "rejected_claims_log") or \
-                            self.state.rejected_claims_log is None:
-                        self.state.rejected_claims_log = []
-                    self.state.rejected_claims_log.append({
-                        "topic_id": self._current_topic_id or "global",
-                        "iteration": self._current_iteration,
-                        "claim_count": len(analyst_output.argument_graph),
-                        "evidence_ids": sorted({
-                            eid for n in analyst_output.argument_graph
-                            for eid in (getattr(n, 'evidence_ids', None) or [])
-                        }),
-                        "reason": "critic_status_reject",
-                    })
-                    logger.warning(
-                        f"[BAB LOOP] Critic REJECT — claims indexed with "
-                        f"critic_status='REJECT' (forensic trail); will be "
-                        f"filtered by render_grounded_narrative"
-                    )
+            self._index_argument_graph(analyst_output, critic_status)
 
-            # Track D D1 (sprint 2026-05-28): merge analyst KG into state.knowledge_graph
-            # D-AMB-4 LOCKED: Critic REJECT → 跳過 KG merge (KG 不入庫；跟 Track A T6
-            # evidence_usage REJECT 入庫 forensic trail 紀律刻意不同 — KG 是 LLM 生成
-            # structured data, REJECT 表示推斷整段不可信, 入庫只是噪音)
-            # fix-up round 1 I-5: critic_status 變數由 Track A T6 上方 block 設定
-            # (default "PASS" + normalize uppercase) — 不可改名 / refactor 必須同步 Track D
-            # N-5: empty new_kg → _merge_knowledge_graph 內部 fast return (no-op)
-            if (
-                self.state is not None
-                and critic_status != "REJECT"
-                and analyst_output
-                and hasattr(analyst_output, 'knowledge_graph')
-                and analyst_output.knowledge_graph
-                and (
-                    analyst_output.knowledge_graph.entities
-                    or analyst_output.knowledge_graph.relationships
-                )
-            ):
-                try:
-                    new_kg = analyst_output.knowledge_graph
-                    merged = self._merge_knowledge_graph(
-                        self.state.knowledge_graph,
-                        new_kg,
-                    )
-                    self.state.knowledge_graph = merged
-                    logger.info(
-                        f"[BAB LOOP][Track D] KG merged: "
-                        f"+{len(new_kg.entities)} entities, "
-                        f"+{len(new_kg.relationships)} relationships; "
-                        f"state total: {len(merged.entities)} entities, "
-                        f"{len(merged.relationships)} relationships"
-                    )
-                    # Stop-and-Report #2 (plan v6 §9): 大 KG warning
-                    if len(merged.entities) > 100:
-                        logger.warning(
-                            f"[BAB LOOP][Track D] state.knowledge_graph.entities "
-                            f"count exceeded 100 ({len(merged.entities)}); KG render "
-                            f"layout may break (kg-spec §11). Consider review Analyst "
-                            f"KG instruction tightness."
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"[BAB LOOP][Track D] KG merge failed (non-fatal): {e}"
-                    )
-                    # O5a-(2): 降級必有 user-facing 訊息（CLAUDE.md 不可 silent fail）。
-                    # _run_mini_reasoning 每輪由 run_loop 呼叫；KG merge 持續性失敗
-                    #（如 429 貫穿 run）會每輪觸發 → per-run 只提示一次防轟炸
-                    #（照同檔 _mini_reasoning_degraded_narrated / _gap_routing_degraded_narrated
-                    # 先例）。log 每輪照記，只有 user-facing 旁白 dedup。
-                    if not self._kg_merge_degraded_narrated:
-                        from reasoning.live_research import lr_copy
-                        await self._emit_narration(lr_copy.KG_MERGE_DEGRADED_NARRATION)
-                        self._kg_merge_degraded_narrated = True
+            await self._merge_kg_from_analyst(analyst_output, critic_status)
         except Exception as e:
             # s3-3 review（in-house N2 + Gemini）：對齊 Track C except，補 stack trace
             #（非 LLM 類程式錯誤如 GroundedClaim 建構失敗，無 trace 極難 debug）。
@@ -1509,12 +1312,8 @@ class BABLoopEngine:
             # s3-3（三家收斂）：per-run 只提示一次，防持續性失敗（429 貫穿 run）
             # 每輪轟炸——照同檔 consistency 先例（_consistency_degraded_narrated）。
             # log 每輪照記，只有 user-facing 旁白 dedup。
-            if not self._mini_reasoning_degraded_narrated:
-                await self._emit_narration(
-                    "這一輪的深入分析遇到狀況、已先略過，"
-                    "稍後若有章節顯示資料不足，可能與此有關。我會繼續往下進行。"
-                )
-                self._mini_reasoning_degraded_narrated = True
+            await self._narrate_once("_mini_reasoning_degraded_narrated", "這一輪的深入分析遇到狀況、已先略過，"
+                "稍後若有章節顯示資料不足，可能與此有關。我會繼續往下進行。")
             # s5-4: 本體失敗 → run_loop 不 emit bab_phase3 completed（耦合判定 1）。
             mini_ok = False
 
@@ -1537,6 +1336,209 @@ class BABLoopEngine:
         # 分析本體已成功，completed 語意保真）。
         return mini_ok
 
+    def _index_argument_graph(self, analyst_output, critic_status) -> None:
+        """Index Analyst argument_graph into state.evidence_usage (Track A T1+T6).
+        REJECT 也入庫保留 forensic trail（Task 3 render 層 filter）。
+        in-place 寫 self.state.evidence_usage / rejected_claims_log；不回傳。
+        critic_status 與 analyst_output 由 caller 顯式傳入（跨 block mutable local）。"""
+        if (
+            self.state is not None
+            and analyst_output
+            and hasattr(analyst_output, 'argument_graph')
+            and analyst_output.argument_graph
+        ):
+            from reasoning.schemas_live import GroundedClaim
+            for node in analyst_output.argument_graph:
+                rtype = getattr(node, 'reasoning_type', 'induction')
+                # LogicType enum → str
+                rtype_str = rtype.value if hasattr(rtype, 'value') else str(rtype)
+                raw_conf = str(getattr(node, 'confidence', 'medium'))
+                # WARN / REJECT 兩種情況都把 confidence 視為 low
+                # (REJECT 降級或保留視 metadata 用途; critic_status 為主鍵)
+                eff_conf = (
+                    "low" if critic_status in ("WARN", "REJECT") else raw_conf
+                )
+                eff_critic_status = critic_status  # PASS / WARN / REJECT
+                for eid in (getattr(node, 'evidence_ids', None) or []):
+                    # T1 Fix 2: C-4 invariant #3 — eid 必須在 evidence_pool 中
+                    # 若 Analyst 幻覺出不存在的 eid，skip 並 warning（不 raise）
+                    if eid not in self.evidence_pool:
+                        logger.warning(
+                            f"[BAB invariant #3] Analyst hallucinated eid={eid} not in evidence_pool "
+                            f"(topic={self._current_topic_id}, status={critic_status}); skipping indexing"
+                        )
+                        continue
+                    gc = GroundedClaim(
+                        claim=node.claim,
+                        reasoning_type=rtype_str,
+                        confidence=eff_conf,
+                        source_topic=self._current_topic_id or "global",
+                        source_iteration=self._current_iteration,
+                        critic_status=eff_critic_status,
+                        # T1 Fix 1: 正式欄位取代 dict key inject，確保 model_validate round-trip 不 drop
+                        from_warned_critic_review=(critic_status == "WARN"),
+                    )
+                    entry = gc.model_dump()
+                    self.state.evidence_usage.setdefault(eid, []).append(entry)
+            logger.info(
+                f"[BAB LOOP] Indexed argument_graph (critic={critic_status}): "
+                f"{len(analyst_output.argument_graph)} nodes, "
+                f"total eids={len(self.state.evidence_usage)}"
+            )
+            # Gemini C-1: REJECT batch 同步 append rejected_claims_log
+            # (metadata trace — oncall 可直接撈某次 reject batch)
+            if critic_status == "REJECT":
+                if not hasattr(self.state, "rejected_claims_log") or \
+                        self.state.rejected_claims_log is None:
+                    self.state.rejected_claims_log = []
+                self.state.rejected_claims_log.append({
+                    "topic_id": self._current_topic_id or "global",
+                    "iteration": self._current_iteration,
+                    "claim_count": len(analyst_output.argument_graph),
+                    "evidence_ids": sorted({
+                        eid for n in analyst_output.argument_graph
+                        for eid in (getattr(n, 'evidence_ids', None) or [])
+                    }),
+                    "reason": "critic_status_reject",
+                })
+                logger.warning(
+                    f"[BAB LOOP] Critic REJECT — claims indexed with "
+                    f"critic_status='REJECT' (forensic trail); will be "
+                    f"filtered by render_grounded_narrative"
+                )
+
+    async def _merge_kg_from_analyst(self, analyst_output, critic_status) -> None:
+        """Merge analyst KG into self.state.knowledge_graph (Track D D1).
+        Critic REJECT → 跳過（KG 不入庫）。KG merge 失敗為 non-fatal：log + per-run
+        降級旁白（不可 silent fail）原樣保留在內。analyst_output / critic_status 由
+        caller 顯式傳入（跨 block mutable local）。"""
+        # Track D D1 (sprint 2026-05-28): merge analyst KG into state.knowledge_graph
+        # D-AMB-4 LOCKED: Critic REJECT → 跳過 KG merge (KG 不入庫；跟 Track A T6
+        # evidence_usage REJECT 入庫 forensic trail 紀律刻意不同 — KG 是 LLM 生成
+        # structured data, REJECT 表示推斷整段不可信, 入庫只是噪音)
+        # fix-up round 1 I-5: critic_status 變數由 Track A T6 上方 block 設定
+        # (default "PASS" + normalize uppercase) — 不可改名 / refactor 必須同步 Track D
+        # N-5: empty new_kg → _merge_knowledge_graph 內部 fast return (no-op)
+        if (
+            self.state is not None
+            and critic_status != "REJECT"
+            and analyst_output
+            and hasattr(analyst_output, 'knowledge_graph')
+            and analyst_output.knowledge_graph
+            and (
+                analyst_output.knowledge_graph.entities
+                or analyst_output.knowledge_graph.relationships
+            )
+        ):
+            try:
+                new_kg = analyst_output.knowledge_graph
+                merged = self._merge_knowledge_graph(
+                    self.state.knowledge_graph,
+                    new_kg,
+                )
+                self.state.knowledge_graph = merged
+                logger.info(
+                    f"[BAB LOOP][Track D] KG merged: "
+                    f"+{len(new_kg.entities)} entities, "
+                    f"+{len(new_kg.relationships)} relationships; "
+                    f"state total: {len(merged.entities)} entities, "
+                    f"{len(merged.relationships)} relationships"
+                )
+                # Stop-and-Report #2 (plan v6 §9): 大 KG warning
+                if len(merged.entities) > 100:
+                    logger.warning(
+                        f"[BAB LOOP][Track D] state.knowledge_graph.entities "
+                        f"count exceeded 100 ({len(merged.entities)}); KG render "
+                        f"layout may break (kg-spec §11). Consider review Analyst "
+                        f"KG instruction tightness."
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[BAB LOOP][Track D] KG merge failed (non-fatal): {e}"
+                )
+                # O5a-(2): 降級必有 user-facing 訊息（CLAUDE.md 不可 silent fail）。
+                # _run_mini_reasoning 每輪由 run_loop 呼叫；KG merge 持續性失敗
+                #（如 429 貫穿 run）會每輪觸發 → per-run 只提示一次防轟炸
+                #（照同檔 _mini_reasoning_degraded_narrated / _gap_routing_degraded_narrated
+                # 先例）。log 每輪照記，只有 user-facing 旁白 dedup。
+                await self._narrate_once("_kg_merge_degraded_narrated", lr_copy.KG_MERGE_DEGRADED_NARRATION)
+
+    async def _handle_search_required_supplementary(
+        self, analyst_output, enriched_context, context_map, cm_summary, analyst
+    ):
+        """Analyst status=SEARCH_REQUIRED → 補搜站內 evidence → 重跑 Analyst 一次（上限 1）。
+        補搜後 enriched_context (append) 與 analyst_output (replace) 被更新，**顯式回傳**
+        (analyst_output, enriched_context) 給 caller 續用（跨 block mutable local，不可靠閉包）。
+        補搜失敗 / 無結果的降級旁白（不可 silent fail）原樣保留在內。"""
+        if (
+            analyst_output is not None
+            and str(getattr(analyst_output, "status", "")).upper() == "SEARCH_REQUIRED"
+            and getattr(analyst_output, "new_queries", None)
+        ):
+            # M-10（AR CX SF#5 / Q5）：consumer 層硬限 — 去重 + 過濾空字串 + cap 3 條
+            # （即使 Analyst prompt 要求 1-3，runtime 仍須兜底防 LLM 吐超量 / 空 query）。
+            _seen = set()
+            _capped_queries = []
+            for q in analyst_output.new_queries:
+                # AR R2 Codex nit：先 strip 再去重（否則 " query" 與 "query" 被當不同條）
+                qn = (q or "").strip()
+                if qn and qn not in _seen:
+                    _seen.add(qn)
+                    _capped_queries.append(qn)
+                if len(_capped_queries) >= 3:
+                    break
+            if not _capped_queries:
+                logger.info("[BAB LOOP] Task2 SEARCH_REQUIRED but new_queries empty after dedup; skipping")
+            else:
+                logger.info(
+                    f"[BAB LOOP] Task2 SEARCH_REQUIRED: Analyst requested "
+                    f"{len(_capped_queries)} secondary queries (capped from {len(analyst_output.new_queries)})"
+                )
+                # 把 capped queries 包成 _execute_search 吃的 seed-like 物件（讀 .query / .source_strategy）
+                from types import SimpleNamespace
+                secondary_seeds = [
+                    SimpleNamespace(query=q, source_strategy="internal")
+                    for q in _capped_queries
+                ]
+                # 註：secondary_formatted, _ = ... 丟棄回傳 source_map 是**安全的** —
+                # _execute_search 已 side-effect 寫 self.evidence_pool（:540）。不需手動 merge source_map。
+                try:
+                    secondary_formatted, _ = await self._execute_search(secondary_seeds)
+                except Exception as e:
+                    logger.warning(
+                        f"[BAB LOOP] Task2 secondary search failed (non-fatal): {e}",
+                        exc_info=True,
+                    )
+                    secondary_formatted = "（未找到相關結果）"
+                if secondary_formatted and secondary_formatted != "（未找到相關結果）":
+                    # 補到 evidence → 重組 context 重跑 Analyst 一次（上限 1 次）
+                    enriched_context = (
+                        f"{enriched_context}\n\n--- 補充資料 ---\n\n{secondary_formatted}"
+                    )
+                    # Task 15: 與首次 Analyst pass 共用 builder（kwargs 完全相同）。
+                    analyst_output = await analyst.research(
+                        **self._build_analyst_research_kwargs(
+                            context_map.research_question, enriched_context, cm_summary
+                        )
+                    )
+                    logger.info("[BAB LOOP] Task2: Analyst re-run after secondary search complete")
+                    # AR R2 Codex should-fix：第二次仍非 DRAFT_READY 或 draft 空 → 不可 silent no-op。
+                    # 補搜有結果但 Analyst 重跑後仍判資料不足 / 沒寫出 draft（→ critic 不跑、該批
+                    # 推論落空），須 forensic log + user-facing 降級旁白（不可 silent fail）。
+                    _rerun_status = str(getattr(analyst_output, "status", "")).upper()
+                    _rerun_draft_len = len(getattr(analyst_output, "draft", None) or "")
+                    if _rerun_status != "DRAFT_READY" or _rerun_draft_len == 0:
+                        logger.warning(
+                            f"[BAB LOOP] Task2: secondary search re-run still inconclusive "
+                            f"(status={_rerun_status!r}, draft_len={_rerun_draft_len}, "
+                            f"queries={_capped_queries}); continuing with existing evidence"
+                        )
+                        await self._narrate_once("_search_required_degraded_narrated", lr_copy.SEARCH_REQUIRED_DEGRADED_NARRATION)
+                else:
+                    # 無結果 → 降級旁白（不可 silent fail），用原 analyst_output（draft 空 → critic 不跑）
+                    await self._narrate_once("_search_required_degraded_narrated", lr_copy.SEARCH_REQUIRED_DEGRADED_NARRATION)
+        return analyst_output, enriched_context
+
     async def _run_gap_routing_phase(self, analyst_output) -> None:
         """Track C C4：post-mini-reasoning gap routing，獨立 except + 降級 narration。
 
@@ -1558,13 +1560,9 @@ class BABLoopEngine:
                 f"[BAB LOOP][Track C] gap routing failed (non-fatal): {e}",
                 exc_info=True,
             )
-            if not self._gap_routing_degraded_narrated:
-                await self._emit_narration(
-                    "這一輪的補強查證沒能完成 — 用外部資料（維基／網路／"
-                    "背景知識）補上資料缺口時出了狀況，這部分先略過，"
-                    "研究照常繼續。"
-                )
-                self._gap_routing_degraded_narrated = True
+            await self._narrate_once("_gap_routing_degraded_narrated", "這一輪的補強查證沒能完成 — 用外部資料（維基／網路／"
+                "背景知識）補上資料缺口時出了狀況，這部分先略過，"
+                "研究照常繼續。")
 
     async def _run_consistency_check(
         self, current_map: ContextMap, initial_map: ContextMap
@@ -1641,6 +1639,17 @@ class BABLoopEngine:
             "message_type": "live_research_narration",
             "text": text,
         })
+
+    async def _narrate_once(self, flag_name, narration_text):
+        """per-run 只發一次的降級旁白：用 flag_name 去重。
+        降級訊息必須明確發出（不可 silent fail），但同一 run 不重複洗版。
+        flag_name 屬 per-run dedup 旗標族（_reset_per_run_dedup_flags 在 run_loop
+        入口重置 → engine 池化重用時第二次 run 不會被永久靜音，見 F2）。
+        新增旗標時務必同步登記進 _reset_per_run_dedup_flags。"""
+        if getattr(self, flag_name, False):
+            return
+        setattr(self, flag_name, True)
+        await self._emit_narration(narration_text)
 
     async def _emit_phase(self, phase_name: str, status: str):
         """推送 phase 進度事件到前端。"""

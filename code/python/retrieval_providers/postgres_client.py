@@ -418,6 +418,7 @@ class PgVectorClient(RetrievalClientBase):
         return clauses, params
 
     def _build_schema_json(self, row):
+        chunk = row.get("chunk_text", "") or ""
         schema = {
             "@type": "NewsArticle",
             "headline": row["title"],
@@ -425,6 +426,10 @@ class PgVectorClient(RetrievalClientBase):
             "datePublished": row["date_published"].isoformat() if row.get("date_published") else None,
             "articleBody": row.get("chunk_text", ""),
             "source": row["source"],
+            # 新增：卡片摘要顯示（前端 schema.description fallback 鏈期待此 key）
+            "description": chunk,
+            # 新增：text fragment verbatim quote（前端 buildCitationHref 的 src.quote）
+            "matched_text": chunk.strip(),
         }
         if row.get("author"):
             schema["author"] = {"@type": "Person", "name": row["author"]}
@@ -686,11 +691,36 @@ class PgVectorClient(RetrievalClientBase):
             # Convert back to list-of-lists format expected by downstream code.
             # When include_vectors=True, emit 5-tuples so ranking.py can extract
             # vectors for MMR: [url, schema_str, title, source, vector]
+            #
+            # AGGREGATOR_KEEP_SCORES flag (default '0' = off): when on, emit a
+            # fixed 6-tuple [url, schema_str, title, source, vector_or_None,
+            # retrieval_scores] so the XGBoost shadow ranker's retrieval features
+            # (index 14-18) are no longer all-zero. Flag off = 4/5-tuple exactly
+            # as before (no behavioural change to prod).
+            keep_scores = os.environ.get('AGGREGATOR_KEEP_SCORES', '0') == '1'
             results = []
             for item in raw_results:
                 row = [item['url'], item['schema_str'], item['title'], item['source']]
-                if include_vectors and 'vector' in item and item['vector'] is not None:
-                    row.append(item['vector'])
+                if keep_scores:
+                    # Fixed 6-tuple: vector at index 4 (None placeholder when
+                    # absent — NOT omitted), retrieval_scores at index 5.
+                    if include_vectors and item.get('vector') is not None:
+                        row.append(item['vector'])
+                    else:
+                        row.append(None)
+                    vector_score = item.get('vector_score', 0.0)
+                    text_score = item.get('text_score', 0.0)
+                    row.append({
+                        'vector_score':          vector_score,
+                        'bm25_score':            text_score,   # text_score is the bm25 component
+                        'keyword_boost':         0.0,          # postgres has no such component (yet)
+                        'temporal_boost':        0.0,          # postgres has no such component (yet)
+                        'final_retrieval_score': max(vector_score, text_score),
+                    })
+                else:
+                    # Legacy behaviour (flag off): 4- or 5-tuple, unchanged.
+                    if include_vectors and 'vector' in item and item['vector'] is not None:
+                        row.append(item['vector'])
                 results.append(row)
             return results
         except Exception as e:

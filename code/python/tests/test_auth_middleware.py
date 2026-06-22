@@ -1,12 +1,12 @@
-﻿"""
-Tests for webserver/middleware/auth.py ??auth_middleware behavior.
+"""
+Tests for webserver/middleware/auth.py — auth_middleware behavior.
 
 Tests public vs protected endpoints, JWT validation, soft auth,
 and missing JWT_SECRET handling.
 
 Uses aiohttp.test_utils.TestClient + TestServer (no pytest-aiohttp dependency).
 
-Note: NLWEB_DEV_AUTH_BYPASS removed 2026-05-19 (spec v0.憭?禮5.4); the per-test
+Note: NLWEB_DEV_AUTH_BYPASS removed 2026-05-19 (spec v0.大 §5.4); the per-test
 monkeypatch.delenv('NLWEB_DEV_AUTH_BYPASS', ...) calls are now defensive no-ops
 (harmless; protect against stray env vars from operator shells).
 """
@@ -31,7 +31,7 @@ JWT_SECRET = 'test-middleware-secret-9876'
 JWT_ALGORITHM = 'HS256'
 
 
-# ?? Helpers ??????????????????????????????????????????????????????
+# ── Helpers ──────────────────────────────────────────────────────
 
 
 def _make_jwt(claims: dict, secret: str = JWT_SECRET, expired: bool = False) -> str:
@@ -81,7 +81,7 @@ def _build_app() -> web.Application:
     return app
 
 
-# ?? Public Endpoint Tests ???????????????????????????????????????
+# ── Public Endpoint Tests ───────────────────────────────────────
 
 
 class TestPublicEndpoints:
@@ -142,14 +142,14 @@ class TestSoftAuth:
             assert data['user'] is None
 
 
-# ?? Protected Endpoint Tests ?????????????????????????????????????
+# ── Protected Endpoint Tests ─────────────────────────────────────
 
 
 class TestProtectedEndpoints:
 
     @pytest.mark.asyncio
     async def test_ask_no_auth_returns_401(self, monkeypatch):
-        """/ask is no longer public ??unauthenticated requests must get 401."""
+        """/ask is no longer public — unauthenticated requests must get 401."""
         monkeypatch.setenv('JWT_SECRET', JWT_SECRET)
         monkeypatch.delenv('NLWEB_DEV_AUTH_BYPASS', raising=False)
         async with TestClient(TestServer(_build_app())) as client:
@@ -241,14 +241,14 @@ class TestProtectedEndpoints:
             assert data['type'] == 'invalid_token'
 
 
-# ?? Dev Auth Bypass: DELETED 2026-05-19 ??????????????????????????
+# ── Dev Auth Bypass: DELETED 2026-05-19 ──────────────────────────
 # Removed `TestDevAuthBypass` class entirely (was 5 test methods).
 # Rationale: NLWEB_DEV_AUTH_BYPASS deleted from middleware/auth.py per
-# spec v0.憭?禮5.4 ??E2E must use real admin login (admin@example.com / YOUR_ADMIN_PASSWORD).
+# spec v0.大 §5.4 — E2E must use real admin login (admin@twdubao.com / test1234!).
 # No bypass branch left in middleware to test.
 
 
-# ?? JWT_SECRET Not Set Tests ????????????????????????????????????
+# ── JWT_SECRET Not Set Tests ────────────────────────────────────
 
 
 class TestJWTSecretNotSet:
@@ -274,7 +274,7 @@ class TestJWTSecretNotSet:
             assert resp.status == 200
 
 
-# ?? Auth Token from Cookie Tests ?????????????????????????????????
+# ── Auth Token from Cookie Tests ─────────────────────────────────
 
 
 class TestCookieAuth:
@@ -294,7 +294,7 @@ class TestCookieAuth:
             assert data['user']['id'] == 'cookie-user'
 
 
-# ?? Query Param Auth Tests ??????????????????????????????????????
+# ── Query Param Auth Tests ──────────────────────────────────────
 
 
 class TestQueryParamAuth:
@@ -312,7 +312,7 @@ class TestQueryParamAuth:
             assert data['user']['id'] == 'query-user'
 
 
-# ?? Admin Resend Activation Handler Tests ???????????????????????
+# ── Admin Resend Activation Handler Tests ───────────────────────
 
 
 class TestAdminResendActivationHandler:
@@ -337,7 +337,7 @@ class TestAdminResendActivationHandler:
 
     @pytest.mark.asyncio
     async def test_unauthenticated_returns_401(self, monkeypatch):
-        """Unauthenticated request ??401"""
+        """Unauthenticated request → 401"""
         monkeypatch.setenv('JWT_SECRET', JWT_SECRET)
         monkeypatch.delenv('NLWEB_DEV_AUTH_BYPASS', raising=False)
 
@@ -355,7 +355,7 @@ class TestAdminResendActivationHandler:
 
     @pytest.mark.asyncio
     async def test_missing_user_id_returns_400(self, monkeypatch):
-        """Missing user_id body ??400"""
+        """Missing user_id body → 400"""
         monkeypatch.setenv('JWT_SECRET', JWT_SECRET)
         monkeypatch.delenv('NLWEB_DEV_AUTH_BYPASS', raising=False)
 
@@ -377,7 +377,7 @@ class TestAdminResendActivationHandler:
 
     @pytest.mark.asyncio
     async def test_permission_error_returns_403(self, monkeypatch):
-        """PermissionError from service ??403"""
+        """PermissionError from service → 403"""
         monkeypatch.setenv('JWT_SECRET', JWT_SECRET)
         monkeypatch.delenv('NLWEB_DEV_AUTH_BYPASS', raising=False)
 
@@ -397,7 +397,7 @@ class TestAdminResendActivationHandler:
 
     @pytest.mark.asyncio
     async def test_lookup_error_returns_404(self, monkeypatch):
-        """LookupError from service (user not found) ??404"""
+        """LookupError from service (user not found) → 404"""
         monkeypatch.setenv('JWT_SECRET', JWT_SECRET)
         monkeypatch.delenv('NLWEB_DEV_AUTH_BYPASS', raising=False)
 
@@ -417,7 +417,7 @@ class TestAdminResendActivationHandler:
 
     @pytest.mark.asyncio
     async def test_value_error_returns_400(self, monkeypatch):
-        """ValueError from service (already activated/deactivated) ??400"""
+        """ValueError from service (already activated/deactivated) → 400"""
         monkeypatch.setenv('JWT_SECRET', JWT_SECRET)
         monkeypatch.delenv('NLWEB_DEV_AUTH_BYPASS', raising=False)
 
@@ -437,7 +437,7 @@ class TestAdminResendActivationHandler:
 
     @pytest.mark.asyncio
     async def test_success_returns_200(self, monkeypatch):
-        """Success ??200 with success=True"""
+        """Success → 200 with success=True"""
         monkeypatch.setenv('JWT_SECRET', JWT_SECRET)
         monkeypatch.delenv('NLWEB_DEV_AUTH_BYPASS', raising=False)
 

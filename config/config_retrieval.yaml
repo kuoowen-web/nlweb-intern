@@ -18,7 +18,7 @@ mmr_params:
   lambda: 0.7             # Trade-off between relevance and diversity (0.0-1.0)
                           # Higher λ = more relevance, lower λ = more diversity
   threshold: 3            # Only apply MMR if we have more than this many results
-  include_vectors: true   # Retrieve document vectors from Qdrant for MMR calculation
+  include_vectors: true   # Retrieve document vectors from PostgreSQL for MMR calculation
 
 # XGBoost ML ranking parameters (Phase A - Week 3-4)
 xgboost_params:
@@ -149,28 +149,6 @@ endpoints:
     index_name: articles
     # Specify the database type
     db_type: postgres
-
-  # Option 1: Local file-based Qdrant storage
-  qdrant_local:
-    enabled: false
-    # Use local file-based storage with a specific path
-    database_path: "../data/db"
-    # Set the collection name to use
-    index_name: nlweb_collection
-    # Specify the database type
-    db_type: qdrant
-    
-  # Option 2: Remote Qdrant server (disabled — migrated to PostgreSQL)
-  qdrant_url:
-    enabled: false
-    # Connect to a Qdrant server at a specific URL
-    api_endpoint_env: QDRANT_URL
-    # Optional API key for authentication
-    api_key_env: QDRANT_API_KEY
-    # Set the collection name to use
-    index_name: nlweb_collection
-    # Specify the database type
-    db_type: qdrant
 
   # Shopify MCP endpoint for product search across Shopify stores
   shopify:

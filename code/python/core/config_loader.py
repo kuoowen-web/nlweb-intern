@@ -98,20 +98,6 @@ class ConfigLoader:
         rules = config.get("mode_compliance_rules", {})
         return rules.get(mode, rules.get("discovery", {}))
 
-    def get_source_tier_config(self, mode: str) -> Dict[str, Any]:
-        """
-        Get source tier filtering config for a mode.
-
-        Args:
-            mode: Research mode
-
-        Returns:
-            Tier configuration for the mode
-        """
-        config = self.load("source_filtering")
-        tier_config = config.get("source_tier_config", {})
-        return tier_config.get(mode, tier_config.get("discovery", {}))
-
     def get_tier_definitions(self) -> Dict[int, Dict[str, Any]]:
         """Get source tier definitions."""
         config = self.load("source_filtering")
@@ -163,8 +149,3 @@ def get_mode_patterns() -> Dict[str, Any]:
 def get_critic_rules(mode: str) -> Dict[str, Any]:
     """Get critic rules for mode."""
     return config_loader.get_critic_rules(mode)
-
-
-def get_source_tier_config(mode: str) -> Dict[str, Any]:
-    """Get source tier config for mode."""
-    return config_loader.get_source_tier_config(mode)

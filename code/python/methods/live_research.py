@@ -54,10 +54,15 @@ class LiveResearchHandler(DeepResearchHandler):
         self.org_id = query_params.get("org_id", "")
         # lr_session_id: server-generated UUID for state persistence (separate from frontend session_id)
         self.lr_session_id: Optional[str] = None
-        # UX-4: Stage 5 writer cancellation support.
-        # When LR orchestrator is running, _lr_research_task holds the named asyncio.Task
-        # so a disconnect callback (routes/api.py::_on_lr_disconnect) can `.cancel()` it.
+        # _lr_research_task holds the named asyncio.Task while the LR orchestrator runs.
+        # 斷線不取消（plan: lr-sse-reconnect-resume, 2026-06-15 CEO 拍板）：client 斷線
+        # **不** cancel 此 task；named task 仍保留供「使用者明確 stop」或防呆上限觸發的
+        # 內部 cancel（disconnect 本身不 cancel，見 routes/api.py::_lr_mark_client_disconnected）。
         self._lr_research_task: Optional[asyncio.Task] = None
+        # 斷線標記：首次偵測 client 離線的 server epoch 時戳（給 orchestrator 防呆上限起點）。
+        # 只是「本次 request 內」傳 offline 起點給 orchestrator 的橋；真正跨 instance 防燒錢
+        # 累積上限狀態進 state.offline_since / offline_capped（stage_state.py），非此 instance attr。
+        self._client_offline_since: Optional[float] = None
         # 匿名 / fallback session 偵測：_create_lr_session 成功建 DB session（或 dry_run
         # in-memory store 有效）才設 True。False 時 runQuery 會 emit user-facing 警告（不可 silent fail）。
         self._lr_session_persisted: bool = False
@@ -195,10 +200,11 @@ class LiveResearchHandler(DeepResearchHandler):
             # Create orchestrator
             orchestrator = LiveResearchOrchestrator(handler=self, dry_run=self._is_dry_run())
 
-            # UX-4: Wrap orchestrator call in named asyncio.Task so disconnect
-            # callback can `.cancel()` it. HTTP connection stays open (we still
-            # await the task), but the task can be cancelled from
-            # routes/api.py::_on_lr_disconnect (Task 1.2).
+            # Wrap orchestrator call in named asyncio.Task. HTTP connection stays open
+            # (we still await the task). 斷線**不**取消（plan: lr-sse-reconnect-resume,
+            # 2026-06-15 CEO 拍板）：disconnect 只標離線，orchestrator.start() 把 Stage 1
+            # 跑到第一個 checkpoint 才停存檔。named task 仍可被「使用者明確 stop」或防呆上限
+            # 內部 cancel，但 disconnect 本身不 cancel（routes/api.py::_lr_mark_client_disconnected）。
             self._lr_research_task = asyncio.create_task(
                 orchestrator.start(
                     query=self.query,
@@ -230,16 +236,21 @@ class LiveResearchHandler(DeepResearchHandler):
             return self.return_value
 
         except asyncio.CancelledError:
-            # Cancellation is expected on client disconnect; propagate so the
-            # ConnectionResetError/CancelledError handler in routes/api.py finalizes
-            # the SSE response. Do not log as error.
+            # Cancellation 不再來自 client disconnect（plan: lr-sse-reconnect-resume —
+            # disconnect 只標離線、不 cancel）。仍可能來自「使用者明確 stop」或防呆上限觸發
+            # 的內部 cancel — 屬正當降級路徑：propagate 讓 routes/api.py 的
+            # CancelledError handler 收尾 SSE response。Do not log as error.
             raise
         except Exception as e:
             logger.error(f"[LIVE RESEARCH] Error: {e}", exc_info=True)
             raise
 
-    async def continueResearch(self, user_message: str = "", auto_continue: bool = False):
-        """Continue from checkpoint — processes user response and advances stage."""
+    async def continueResearch(self, user_message: str = "", auto_continue: bool = False, nav_action: str = ""):
+        """Continue from checkpoint — processes user response and advances stage.
+
+        nav_action: backward navigation 動作（""=正常前進 / "back_one" / "restart"，
+        plan: lr-backward-nav）。透傳給 orchestrator.continue_from_checkpoint。
+        """
         # Use server-generated UUID passed back from frontend for state lookup
         self.lr_session_id = self.query_params.get("lr_session_id", "") or self.lr_session_id
         logger.info(
@@ -348,14 +359,19 @@ class LiveResearchHandler(DeepResearchHandler):
             # Create orchestrator and continue
             orchestrator = LiveResearchOrchestrator(handler=self, dry_run=self._is_dry_run())
 
-            # UX-4: Wrap in named task for cancellation (Stage 5 writer can be
-            # in-flight here when user calls continueResearch from a Stage 4 → 5
-            # advance; disconnect during writer must cancel the task).
+            # Wrap in named task. 斷線**不**取消（plan: lr-sse-reconnect-resume, 2026-06-15
+            # CEO 拍板）：Stage 5 writer 在此可能 in-flight（從 Stage 4 → 5 advance），但
+            # client 斷線只標離線、writer 跑完當前 section 到 per-section checkpoint 才停
+            # （per-section persist + idempotent resume，next_i = last_completed_section_index + 1
+            # 防 double-write）。named task 仍保留供「使用者明確 stop」或防呆上限觸發的內部 cancel；
+            # disconnect 本身不 cancel（舊 UX-4 cancel 用途是 SSE 收尾 abort，per-section
+            # checkpoint 已是中斷點 — VP-7/693ac217e；移除 disconnect cancel 不 regress）。
             self._lr_research_task = asyncio.create_task(
                 orchestrator.continue_from_checkpoint(
                     state=state,
                     user_message=user_message,
                     auto_continue=auto_continue,
+                    nav_action=nav_action,
                 ),
                 name=f"lr_continueResearch_{self.lr_session_id or 'unknown'}",
             )

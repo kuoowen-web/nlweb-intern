@@ -181,7 +181,8 @@ def test_cap_skips_missing_pool_entries():
 async def test_chapter0_large_evidence_capped_stratified_in_writer_and_critic(monkeypatch):
     """chapter 0 raw union（book_outline=None，無 planned）拿 119 筆 → writer 的
     analyst_citations 被 cap 到 <=80，且 stratified 抽樣**橫跨時間軸**（含尾段 id，
-    非頭部截斷）；evidence_lookup 同步只含 capped IDs（critic 同源不爆窗）。"""
+    非頭部截斷）。P2 W3 後 evidence_lookup = 全 pool（與 Critic 對齊），不再是 capped
+    子集；cap 只決定 analyst_citations 優先 tier。"""
     from unittest.mock import patch, MagicMock
     from reasoning.live_research.orchestrator import (
         LiveResearchOrchestrator, MAX_EVIDENCE_ITEMS,
@@ -241,8 +242,11 @@ async def test_chapter0_large_evidence_capped_stratified_in_writer_and_critic(mo
     assert max(cap_list) > 60, (
         f"應 stratified 抽到尾段 id（頭部截斷會讓 max<=40），實得 max={max(cap_list)}"
     )
-    # evidence_lookup（writer 看的真實來源）也同步只含 capped IDs（→ critic chapter_evidence_text 同源受限）
-    assert set(captured["evidence_lookup"].keys()) <= set(cap_list)
+    # P2 全局 evidence 模型（W3）：evidence_lookup 改 = 全 pool（與 Critic 對齊），
+    # 不再是 capped IDs 子集。cap 只決定 analyst_citations（優先 tier），不切割 writer
+    # 可見集。故 evidence_lookup = 全 119 筆 pool ⊇ cap_list。
+    assert set(captured["evidence_lookup"].keys()) == set(range(1, 120))
+    assert set(cap_list) <= set(captured["evidence_lookup"].keys())
 
 
 @pytest.mark.asyncio

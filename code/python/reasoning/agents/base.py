@@ -182,6 +182,13 @@ class BaseReasoningAgent:
         self.timeout = timeout
         self.max_retries = max_retries
         self.logger = get_configured_logger(f"reasoning.{agent_name}")
+        # 防禦：config timeout 若被誤設 ≤10，inner_timeout(=timeout-10) 會變負/零，
+        # asyncio.wait_for 立即 timeout 形成 silent fail。明確 warn（不 raise，降級可跑）。
+        if timeout <= 10:
+            self.logger.warning(
+                f"{agent_name} timeout={timeout}s <= 10s — inner_timeout 將退回 80% "
+                f"({int(timeout * 0.8)}s)；請檢查 config 是否誤設過小的 timeout。"
+            )
 
     async def ask(
         self,

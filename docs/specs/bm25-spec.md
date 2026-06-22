@@ -1,10 +1,19 @@
 # BM25 Implementation Documentation
 
+> **⚠️ 已過時警示（2026-06-15）**：本 spec 描述的 BM25 實作**已不在現行 ranking 路徑**。
+>
+> - **儲存層遷移**：系統已於 2026-02 從 Qdrant 遷移至 PostgreSQL（pgvector + pg_bigm）。本文件描述的整合點 `retrieval_providers/qdrant.py` 已非主路徑。
+> - **全文匹配職責移轉**：原本由 `core/bm25.py` 在 ranking 階段做的關鍵字匹配，現由 **pg_bigm** 在 retrieval 層以原生 N-gram（bigram）索引處理。pg_bigm 與 pgvector 走**雙路獨立 retrieval + 聯集去重**的「真 hybrid」，取代本文件描述的「先 vector search 再用 Python BM25 re-rank 同一批結果」的偽 hybrid。
+> - **`core/bm25.py` 現況**：檔案仍存在於 repo（亦有 `legacy/core/bm25.py` 副本），但已不在現行推論路徑上被呼叫。分析時請以 `retrieval_providers/postgres_client.py` 為準。
+> - **保留理由**：BM25 公式、Intent Detection（動態 α/β）的設計意圖、tokenization 策略仍有學習與考古價值，故**不刪除**本文件，僅標註過時。`bm25_score` 欄位名稱在 analytics DB 中仍存在（pg_bigm similarity 寫入此欄；`text_search_score` rename 列為 P3 未執行），勿據此誤判 Python BM25 仍在跑。
+>
+> 現行檢索/排序的權威描述見 `docs/reference/systemmap.md`（M2 Retrieval / M3 Ranking 章節）。
+
 **Algorithm Type:** Text Retrieval Ranking
-**Status:** Implemented (Ready for Testing)
-**Implementation File:** `code/python/core/bm25.py`
-**Integration Point:** `code/python/retrieval_providers/qdrant.py`
-**Configuration File:** `config/config_retrieval.yaml`
+**Status:** ~~Implemented (Ready for Testing)~~ → **已棄用（職責由 pg_bigm 取代，2026-02 起）**
+**Implementation File:** ~~`code/python/core/bm25.py`~~ → 不在現行路徑；現行全文匹配見 `retrieval_providers/postgres_client.py`（pg_bigm）
+**Integration Point:** ~~`code/python/retrieval_providers/qdrant.py`~~ → Qdrant 已退役（2026-02 遷移至 PostgreSQL）
+**Configuration File:** `config/config_retrieval.yaml`（`bm25_params` 區段已失效）
 **Test File:** `code/python/testing/test_bm25.py`
 
 ---

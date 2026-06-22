@@ -30,6 +30,29 @@ logger = logging.getLogger(__name__)
 _mock_lr_sessions: dict = {}
 
 
+def _lr_mark_client_disconnected(handler) -> None:
+    """LR client 斷線處理（plan: lr-sse-reconnect-resume, 2026-06-15 CEO 拍板）。
+
+    治本：研究在 server 上跑，client 斷線**不取消** task。只標記離線，讓 orchestrator
+    把當前 stage 跑完到下個 checkpoint 才停存檔。防呆燒錢上限由 orchestrator 依
+    state.offline_since enforce（不 silent fail）。
+
+    start handler + continue handler 的 `_on_lr_disconnect` 兩處共用此 helper
+    （單一 source of truth，避免兩處行為漂移）。
+    """
+    handler.connection_alive_event.clear()
+    # 記首次離線時戳（給 orchestrator wall-clock 上限 + 跨 checkpoint 計數起點）。
+    # 已離線過就不覆寫（重連未到 checkpoint 仍離線時保留原始 offline_since）。
+    if getattr(handler, "_client_offline_since", None) is None:
+        handler._client_offline_since = time_mod.time()
+    logger.info(
+        "[LIVE RESEARCH] Client disconnected — NOT cancelling task; "
+        "will run current stage to next checkpoint then persist "
+        f"(lr_session={getattr(handler, 'lr_session_id', None)})"
+    )
+    # 不再呼叫 handler._lr_research_task.cancel()
+
+
 def setup_api_routes(app: web.Application):
     """Setup core API routes"""
     # Query endpoints
@@ -1245,13 +1268,10 @@ async def live_research_start_handler(request: web.Request) -> web.Response:
 
     handler = LiveResearchHandler(query_params, wrapper)
 
-    # UX-4: disconnect → clear alive event + cancel in-flight LR task so
-    # Stage 5 writer loop aborts instead of burning tokens. Mirrors DR
-    # `_on_dr_disconnect` (line 221) pattern.
+    # 斷線不取消（plan: lr-sse-reconnect-resume, 2026-06-15 CEO 拍板）：disconnect 只標離線，
+    # 讓 orchestrator 把當前 stage 跑完到下個 checkpoint 才停存檔（共用 helper，與 continue handler 一致）。
     def _on_lr_disconnect():
-        handler.connection_alive_event.clear()
-        if handler._lr_research_task is not None:
-            handler._lr_research_task.cancel()
+        _lr_mark_client_disconnected(handler)
 
     wrapper.set_on_disconnect(_on_lr_disconnect)
 
@@ -1305,6 +1325,7 @@ async def live_research_continue_handler(request: web.Request) -> web.Response:
 
     user_message = body.get("user_message", "")
     auto_continue = body.get("auto_continue", False)
+    nav_action = body.get("nav_action", "")   # ""|"back_one"|"restart"（plan: lr-backward-nav）
 
     query_params = dict(request.query)
     query_params.update(body)
@@ -1452,11 +1473,9 @@ async def live_research_continue_handler(request: web.Request) -> web.Response:
 
     handler = LiveResearchHandler(query_params, wrapper)
 
-    # UX-4: same disconnect path as start handler — cancel in-flight LR task.
+    # 斷線不取消（plan: lr-sse-reconnect-resume）：與 start handler 共用 helper，continue 路徑同樣不 cancel。
     def _on_lr_disconnect():
-        handler.connection_alive_event.clear()
-        if handler._lr_research_task is not None:
-            handler._lr_research_task.cancel()
+        _lr_mark_client_disconnected(handler)
 
     wrapper.set_on_disconnect(_on_lr_disconnect)
 
@@ -1464,6 +1483,7 @@ async def live_research_continue_handler(request: web.Request) -> web.Response:
         await handler.continueResearch(
             user_message=user_message,
             auto_continue=auto_continue,
+            nav_action=nav_action,
         )
     except asyncio.CancelledError:
         logger.info("Live Research continue: task cancelled (disconnect)")

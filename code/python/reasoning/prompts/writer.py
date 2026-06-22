@@ -6,9 +6,14 @@ Contains all prompt building logic for the Writer Agent.
 
 from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from core.prompts import generate_boundary_token, wrap_content_with_boundary
+# P2 W6：runtime import 全 pool budget 常數（evidence_block char cap 用，§3.1 I3）。
+from reasoning.schemas_live import GROUNDING_VIEW_CHAR_BUDGET
 
 if TYPE_CHECKING:
-    from reasoning.schemas_live import EvidencePoolEntry, StyleAnalysisOutput
+    from reasoning.schemas_live import (
+        EvidencePoolEntry,
+        StyleAnalysisOutput,
+    )
 
 
 class WriterPromptBuilder:
@@ -355,6 +360,7 @@ class WriterPromptBuilder:
         context_map_summary: Optional[str] = None,
         citation_format: Optional[str] = None,
         evidence_lookup: Optional[Dict[int, 'EvidencePoolEntry']] = None,  # noqa: F821
+        writer_evidence_view: Optional[str] = None,   # P2 W7：全 pool grounding 視圖（W5 組）
         is_chapter_override: bool = False,
         book_outline: Optional['BookOutline'] = None,  # noqa: F821
         current_chapter_index: int = 0,
@@ -614,7 +620,7 @@ class WriterPromptBuilder:
 - 你只寫目前這章，**不要**侵蝕其他章的內容。
 - 本章 role 是「{current_role_str}」 — intro 鋪陳問題、body 深入論證、conclusion 收尾並引用前文重點。
 - 上方章節列表中**方括號數字**屬於章節 title/brief 內文，**不是** evidence ID；不可作為引用。{
-    chr(10) + f"- **本章目標字數：約 {current_word_target} 字**（請貼近此字數撰寫，"
+    chr(10) + f"- **本章目標字數：約 {current_word_target} 字**（請務必盡量貼近此字數撰寫，"
     f"容許 ±15%；不要為了湊字數空洞論述，也不要明顯過短）。" if current_word_target > 0 else ""
 }
 """
@@ -631,7 +637,15 @@ class WriterPromptBuilder:
 **紀律**：本章開頭可承接前章，**不要**重複前章已說過的論點。
 """
 
-        max_citation_id = max(analyst_citations) if analyst_citations else 0
+        # P2 W6（§0 #17）：引用範圍 = 全 evidence pool（evidence_lookup），非只
+        # analyst_citations。max_citation_id / 可用筆數從 evidence_lookup 取（全 pool 上界）；
+        # 退回 analyst_citations 僅為 evidence_lookup 缺時的 backward-compat。
+        if evidence_lookup:
+            max_citation_id = max(evidence_lookup.keys())
+            available_citation_count = len(evidence_lookup)
+        else:
+            max_citation_id = max(analyst_citations) if analyst_citations else 0
+            available_citation_count = len(analyst_citations or [])
 
         # Track E (sprint 2026-05-28) E5: Temporal BINDING block
         # 移植自 DR prompts/analyst.py:50-69 time_binding_constraint，
@@ -681,13 +695,17 @@ class WriterPromptBuilder:
         # (不增加 stage / 不破壞 SSE narration 流暢度);
         # 「禁止硬塞 [N]」採 prompt 層 + guard 層雙重防禦。
         # Gemini Imp-1: low confidence findings → 保留/推測語氣 enforced。
-        if not analyst_citations or not (relevant_findings or "").strip():
+        # P2 W6（§0 #22 / C1）：全局模型下 analyst_citations 空 ≠ 沒料。降級判定改用
+        # 「全 pool（evidence_lookup）與 grounding（relevant_findings）都實質空」其一即降級
+        # （§7.3：prompt 層 OR 較嚴）。否則 W3 把全 pool 餵進來，此處仍因 analyst_citations
+        # 空而叫 writer 寫普遍概述 = C-1 誤判換地方復活。evidence_lookup None/空 都算全 pool 空。
+        if not evidence_lookup or not (relevant_findings or "").strip():
             grounding_discipline_block = """
 ---
 
 ## Grounding 紀律（本章資料不足）
 
-本章 evidence whitelist 為空，或本章對應的 grounded findings 為空。
+本章 evidence pool 為空，或本章對應的 grounded findings 為空。
 - 開頭必須明寫「**[本章資料不足]**：以下為基於普遍知識的概述」。
 - 整章以 narration 體撰寫，**不可**出現具體案例 / 地名 / 風場名 / 機構名 / 法規條號 / 統計數據。
 - 絕對禁止自由發揮虛構案例（任何具體 entity 必須來自 evidence；evidence 不足 → 不寫該 entity）。
@@ -863,29 +881,66 @@ class WriterPromptBuilder:
                     "- 若需要綜合性陳述，從上述前章內容與實體中挑選展開，不可冒出新案例。\n"
                 )
 
-        # 白名單 ID 對應真實來源（Task 7：解決 phantom citation —— Writer 看到真實 evidence）
+        # P2 W6（§0 #17）：可用來源 = 全 evidence pool（evidence_lookup.keys），
+        # 不再只迭代 sorted(analyst_citations)。★ 標 analyst_citations 為本章優先建議
+        # （軟引導），writer 仍看得到全 pool 真實來源。最致命殘留：只放開 prompt 措辭
+        # 不改 evidence_block 迭代來源 = 半套。
+        # §3.1（I3）：evidence_block 是第三層渲染，加 char budget 防全 pool 爆窗。
         evidence_block = ""
         if evidence_lookup:
-            ev_lines = ["", "---", "", "### 白名單 ID 對應的真實來源", ""]
-            for eid in sorted(analyst_citations):
+            ev_lines = ["", "---", "", "### 可用來源（全 evidence pool；標★者為本章優先建議）", ""]
+            _priority = set(analyst_citations or [])
+            EVIDENCE_BLOCK_CHAR_BUDGET = GROUNDING_VIEW_CHAR_BUDGET  # 12000 起點，獨立可 tune
+            # 排序：★（analyst_citations 優先）先，其餘升冪 → 被截的是相關度最低的 raw pool
+            _ordered = sorted(
+                evidence_lookup.keys(),
+                key=lambda e: (0 if e in _priority else 1, e),
+            )
+            _used_chars = 0
+            _truncated = False
+            for eid in _ordered:                              # ← 改：全 pool，非 sorted(analyst_citations)
                 entry = evidence_lookup.get(eid)
                 if entry is None:
                     continue
+                star = "★ " if eid in _priority else ""
                 title = getattr(entry, "title", "") or "未知標題"
                 url = getattr(entry, "url", "") or "無 URL"
                 source_domain = getattr(entry, "source_domain", "") or "未知來源"
                 snippet = (getattr(entry, "snippet", "") or "")[:200]
-                ev_lines.append(
-                    f"- [{eid}] **{title}**（{source_domain}）\n"
+                _line = (
+                    f"- {star}[{eid}] **{title}**（{source_domain}）\n"
                     f"  - URL: {url}\n"
                     f"  - 摘要：{snippet}"
+                )
+                if _used_chars + len(_line) > EVIDENCE_BLOCK_CHAR_BUDGET:
+                    _truncated = True
+                    break
+                ev_lines.append(_line)
+                _used_chars += len(_line)
+            if _truncated:
+                # 不可 silent fail：明示截斷，引導 LLM 看 grounding 視圖補。
+                ev_lines.append(
+                    "- [來源清單已達字數上限，其餘來源見上方「全 pool grounding 視圖」]"
                 )
             ev_lines.append("")
             ev_lines.append(
                 "引用 [N] 時，請確保段落內容**真的基於該來源摘要**支持的事實。"
-                "不要為了塞編號而引用無關事實。如果某個白名單 ID 不適合，留下不用即可。"
+                "★標記者為本章優先建議引用（優先採用），但你可引用上方任一全 pool 來源。"
+                "不要為了塞編號而引用無關事實。如果某個來源不適合，留下不用即可。"
             )
             evidence_block = "\n".join(ev_lines) + "\n"
+
+        # P2 W7：全 pool grounding 視圖（W5 組，已按本章相關度排序）。
+        # 非空才注入；None → 不注入（向後相容）。提供 writer 完整 raw snippet context。
+        writer_view_block = ""
+        if writer_evidence_view and writer_evidence_view.strip():
+            writer_view_block = (
+                "\n---\n\n"
+                "## 全 pool grounding 視圖（已按本章相關度排序）\n\n"
+                "下方為全 evidence pool 的排序視圖（含完整 snippet）。你可從中引用任一 ID；"
+                "排在前面的是與本章最相關的來源。\n\n"
+                f"{writer_evidence_view}\n"
+            )
 
         return f"""你是**分段報告撰寫專家**。你負責撰寫研究報告的一個章節。
 
@@ -906,13 +961,14 @@ class WriterPromptBuilder:
 
 ---
 
-## 引用白名單
+## 引用範圍（全 evidence pool）
 
-**重要**：你只能使用以下 Analyst 驗證過的引用 ID，嚴禁無中生有：
+**重要**：你可引用以下全 evidence pool 範圍內的任何 ID，但**嚴禁發明 pool 之外的 ID**：
 
-- 白名單共 **{len(analyst_citations)} 個** ID，最大 ID = **{max_citation_id}**
-- 引用範圍：**1 ~ {max_citation_id}** 之間（不可超過、不可發明）
-- 你的引用必須是白名單的子集（可少不可多）
+- 可用來源共 **{available_citation_count} 個** ID（= 上方「可用來源」清單），最大 ID = **{max_citation_id}**
+- 引用範圍：**1 ~ {max_citation_id}** 之間的 evidence pool ID（不可超過、不可發明 pool 外 ID）
+- 上方「可用來源」中標 ★ 者為**本章優先建議引用**（優先採用），但你**可引用全 pool 任一來源**
+- 你的引用必須在 evidence pool 範圍內（防 phantom citation），不必侷限於 ★ 建議
 
 ## 引用紀律（CRITICAL — 禁止段末 dump 來源清單）
 
@@ -921,8 +977,8 @@ class WriterPromptBuilder:
 - ✅ 引用 [N] **必須 inline 嵌入論述句中**（句末或緊跟事實後），不可獨立成段。
 - ✅ 正確：「再生能源占比達 32.5%[1]，超越預期目標[2]。」
 - ❌ 錯誤：「...政策成效顯著。\n\n來源：[N1] [N2] [N3] ...」（段末整串清單 dump）
-- ❌ 錯誤：使用白名單之外的 ID
-{evidence_block}{binding_block}{grounding_discipline_block}{calibration_block}{style_block}{format_block}{special_elements_block}{revision_block}{ungrounded_revision_block}{prior_entities_block}{context_block}{kg_block}{outline_block}{prev_summary_block}
+- ❌ 錯誤：使用 evidence pool 之外（發明）的 ID
+{evidence_block}{writer_view_block}{binding_block}{grounding_discipline_block}{calibration_block}{style_block}{format_block}{special_elements_block}{revision_block}{ungrounded_revision_block}{prior_entities_block}{context_block}{kg_block}{outline_block}{prev_summary_block}
 ---
 
 ## 輸出格式（LiveWriterSectionOutput JSON）

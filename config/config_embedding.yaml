@@ -1,4 +1,11 @@
 preferred_provider: openrouter
+# Cross-provider fallback for the embedding entry point (core/embedding.py).
+# Prod incident: OpenRouter qwen3-embedding-4b is a single provider with no
+# fallback; on engine_overloaded (HTTP 429) the retry/backoff exhausted and PG
+# retrieval collapsed. DeepInfra serves the SAME model (qwen3-embedding-4b,
+# truncated to 1024 dims) so it is vector-space compatible.
+# Set to null to disable fallback (preserves original single-provider behavior).
+fallback_provider: deepinfra
 providers:
   azure_openai:
     api_key_env: AZURE_OPENAI_API_KEY
@@ -36,13 +43,15 @@ providers:
     api_version_env: "2024-10-01"
     model: snowflake-arctic-embed-m-v1.5
 
-  huggingface:
-    api_key_env: HF_TOKEN
-    model: BAAI/bge-m3
-
   qwen3:
     model: Qwen/Qwen3-Embedding-4B
 
   openrouter:
     api_key_env: OPENROUTER_API_KEY
     model: qwen/qwen3-embedding-4b
+
+  # Fallback for openrouter — SAME model (qwen3-embedding-4b), served by DeepInfra
+  # under its HF id, truncated to 1024 dims for vector(1024) PG compatibility.
+  deepinfra:
+    api_key_env: DEEPINFRA_API_KEY
+    model: Qwen/Qwen3-Embedding-4B

@@ -50,8 +50,8 @@ async def test_search_required_triggers_secondary_search_and_rerun(monkeypatch):
     fake_analyst.research = AsyncMock(side_effect=[first, second])
     fake_critic = MagicMock()
     fake_critic.review = AsyncMock(return_value=MagicMock(status="PASS"))
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: fake_analyst)
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: fake_critic)
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: fake_analyst)
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: fake_critic)
 
     cm = MagicMock(); cm.research_question = "Q"
     await engine._run_mini_reasoning(cm, "原始 formatted results")
@@ -73,8 +73,8 @@ async def test_search_required_no_results_emits_narration(monkeypatch):
     fake_analyst.research = AsyncMock(side_effect=[first])
     fake_critic = MagicMock()
     fake_critic.review = AsyncMock(return_value=MagicMock(status="PASS"))
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: fake_analyst)
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: fake_critic)
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: fake_analyst)
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: fake_critic)
     cm = MagicMock(); cm.research_question = "Q"
     await engine._run_mini_reasoning(cm, "原始 results")
     assert fake_analyst.research.await_count == 1  # 無補搜結果 → 不重跑
@@ -112,8 +112,8 @@ async def test_secondary_search_eid_reaches_evidence_pool(monkeypatch):
     fake_analyst.research = AsyncMock(side_effect=[first, second])
     fake_critic = MagicMock()
     fake_critic.review = AsyncMock(return_value=MagicMock(status="PASS"))
-    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h: fake_analyst)
-    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h: fake_critic)
+    monkeypatch.setattr("reasoning.agents.analyst.AnalystAgent", lambda h, timeout=None: fake_analyst)
+    monkeypatch.setattr("reasoning.agents.critic.CriticAgent", lambda h, timeout=None: fake_critic)
 
     cm = MagicMock(); cm.research_question = "Q"
     pool_before = set(engine.evidence_pool.keys())

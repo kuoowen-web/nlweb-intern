@@ -86,6 +86,57 @@ async def test_compose_section_passes_lookup_to_prompt_builder():
     assert captured["evidence_lookup"] == lookup
 
 
+@pytest.mark.asyncio
+async def test_compose_section_passes_writer_view_to_prompt_builder():
+    """P2 W7：compose_section 接受並透傳 writer_evidence_view 給 prompt builder。"""
+    from reasoning.agents.writer import WriterAgent
+
+    handler = MagicMock()
+    writer = WriterAgent(handler=handler, timeout=10)
+    writer.call_llm_validated = AsyncMock(
+        return_value=(MagicMock(sources_used=[], confidence_level="Medium",
+                                section_content=""), 0, False)
+    )
+
+    captured = {}
+
+    def fake_build(**kw):
+        captured.update(kw)
+        return "PROMPT"
+
+    with patch.object(writer.prompt_builder, "build_section_compose_prompt",
+                      side_effect=fake_build):
+        await writer.compose_section(
+            section_title="X", section_outline="o", relevant_findings="f",
+            analyst_citations=[1], evidence_lookup={1: EvidencePoolEntry(
+                evidence_id=1, title="T", url="u")},
+            writer_evidence_view="VIEW-ALL-POOL",
+        )
+
+    assert captured["writer_evidence_view"] == "VIEW-ALL-POOL"
+
+
+def test_build_section_compose_prompt_injects_writer_view():
+    """P2 W7：writer_evidence_view 非空 → 注入 prompt（全 pool grounding 視圖段）。"""
+    from reasoning.prompts.writer import WriterPromptBuilder
+    prompt = WriterPromptBuilder().build_section_compose_prompt(
+        section_title="X", section_outline="o", relevant_findings="f",
+        analyst_citations=[1],
+        evidence_lookup={1: EvidencePoolEntry(evidence_id=1, title="T", url="u",
+                                              snippet="s")},
+        writer_evidence_view="### [9] 全 pool 來源九\n台積電擴廠案",
+    )
+    assert "台積電擴廠案" in prompt          # view 內容注入
+    # None → 不注入（向後相容）
+    prompt_none = WriterPromptBuilder().build_section_compose_prompt(
+        section_title="X", section_outline="o", relevant_findings="f",
+        analyst_citations=[1],
+        evidence_lookup={1: EvidencePoolEntry(evidence_id=1, title="T", url="u",
+                                              snippet="s")},
+    )
+    assert "台積電擴廠案" not in prompt_none
+
+
 # ============================================================================
 # Task 7: prompt body 注入 evidence_lookup 對照表
 # ============================================================================

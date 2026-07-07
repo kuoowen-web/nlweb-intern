@@ -71,21 +71,22 @@ GROUNDING_UNAVAILABLE_NARRATION = (
     "會直接在該章標示，不再重複提醒。"
 )
 
-# --- 章節字數超出規劃時的 user-facing 透明化旁白（a 軟提示，不觸發重寫） ---
-# 設計：每個超標章各發一則（章名 + 規劃字數 + 實際字數），逐章發資訊才完整；
-# 不 per-run dedup（每章超多少不同，是各自獨立、對 user 有意義的事實）。
-# 純白話、零開發術語（AST jargon guard 掃描全檔字串常數）。
-# 語意：中性透明化（「這章比規劃的長」），不是錯誤、沒有降級、內容照常保留。
+# --- 章節字數明顯超標、已 post-process 節略到規劃字數附近的旁白（bug 2026-06-20）---
+# 軟約束（prompt ±15% + 上面那則「照常保留」旁白）prod 證實壓不住字數，CEO/CTO 拍板
+# 改用 post-process truncate（硬切到 target 附近、切句界、補省略號明示）。
+# no silent fail：truncate 一定要讓 user 知道內容被切過，不可悄悄砍掉。
+# 語意：誠實告知「本章太長、已節略到規劃字數附近」，與上面「照常保留」舊文案區隔
+# （那則用在「超標但未切」，本則用在「已切」）。純白話、零開發術語（AST guard 掃描）。
 
 
-def chapter_word_overshoot_narration(
-    chapter_title: str, target: int, actual: int
+def chapter_word_truncated_narration(
+    chapter_title: str, target: int, actual_before: int
 ) -> str:
-    """字數超標旁白。target=規劃字數，actual=實際字數（皆已剝除引用標記）。"""
+    """字數節略旁白。target=規劃字數，actual_before=節略前的實際字數（已剝引用標記）。"""
     return (
-        f"提醒：「{chapter_title}」這一章規劃約 {target} 字，"
-        f"實際寫成約 {actual} 字，比規劃的長一些。"
-        f"內容照常保留，提供給你參考，方便你之後自行斟酌刪修。"
+        f"提醒：「{chapter_title}」這一章原本寫成約 {actual_before} 字，"
+        f"明顯超過規劃的約 {target} 字，已自動節略到規劃字數附近，"
+        f"結尾以刪節號標示。如果想保留完整內容，可以告訴我「這章不要節略」。"
     )
 
 
@@ -286,6 +287,18 @@ KG_MERGE_DEGRADED_NARRATION = (
 )
 
 
+# 檢索「出錯」（例外被 catch、該筆查詢被跳過）時的 user-facing 降級旁白
+# （2026-06-20 prod：embedding 雙 provider 同失敗 → _execute_search 內
+# retriever_search 拋例外 → 該筆查詢 silent 跳過，user 以為有補到資料）。
+# 與 SEARCH_REQUIRED_DEGRADED_NARRATION（補搜「無結果」）語義不同，不可混用：
+# 那是「查了但沒找到」，這是「查詢本身失敗」。
+# per-run 只播一次（dedup flag 在 loop_engine._reset_per_run_dedup_flags）。
+RETRIEVAL_ERROR_DEGRADED_NARRATION = (
+    "提醒：這一輪有部分資料查詢暫時失敗，可能因此少蒐集到一些資料，"
+    "研究仍會以現有資料繼續進行。"
+)
+
+
 # Stage 5 退回補搜（plan: lr-stage5-backward-recollect）。user-facing 文案，
 # 不暴露 BAB / analyst / loop / engine 等內部術語。
 
@@ -352,11 +365,6 @@ STYLE_INPUT_NOT_SAMPLE_FIRST_NARRATION = (
     "你這句看起來比較像是想法或指令，而不是一段可以分析的文筆範本。"
     "如果想設定寫作風格，請貼一段你喜歡的文章或段落；"
     "或回覆「用預設就好」由我採用通用的學術風格。"
-)
-
-STYLE_INPUT_NOT_SAMPLE_REDO_NARRATION = (
-    "你這句看起來比較像指令而不是一段新的文筆範本，"
-    "我先保留目前的分析。如果想換風格，請貼一段新的範本文字。"
 )
 
 

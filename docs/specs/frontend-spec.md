@@ -706,6 +706,12 @@ function openFeedbackModal(rating) {
 
 ### 6.2 SSE 串流處理
 
+> **@deprecated（2026-07-05）**：下方 `handleStreamingRequest` 這個 EventSource GET 路徑
+> 已**無 live caller**（全 repo 僅自身定義 + docs/comment 引用）。當前 SSE 走
+> `handlePostStreamingRequest`（POST fetch reader，見 §6.2 之後段落）。此範例僅存為
+> legacy 參考；若未來重新啟用，必須比照 `handlePostStreamingRequest` 補上
+> late-message generation gate，否則同一 SSE race 會在此路徑復現。
+
 ```javascript
 async function handleStreamingRequest(url, query) {
     const eventSource = new EventSource(url);
@@ -794,7 +800,7 @@ function renderAnswerProgressive(answerData) {
 **過濾中間 envelope 的正確做法**：用獨立 `case 'X': break;` 跳過，不要動 `default:`。
 
 ```javascript
-// static/news-search.js:2199-2210（handleStreamingRequest）+ 2378+（handlePostStreamingRequest）
+// static/js/features/search.js（handleStreamingRequest GET switch + handlePostStreamingRequest POST switch；原 news-search.js 已於 v4.0 Commit 14b 遷移）
 // Server-side intermediate envelopes — explicit skip so they
 // do NOT fall through to the default Object.assign below.
 case 'asking_sites':
@@ -824,10 +830,10 @@ default:
 
 | 端 | 位置 | 集合 |
 |----|------|------|
-| 前端 | `static/news-search.js:2199-2210`（GET SSE）+ `2378-2390+`（POST SSE）| `case 'X':` 清單 |
-| Server | `code/python/core/session_service.py:561-568`（`_BAD_MESSAGE_TYPES` frozenset）| 用於 `_sanitize_session_history` 在 create / update / migrate 時過濾 |
+| 前端 | `static/js/features/search.js`（`handleStreamingRequest` GET SSE + `handlePostStreamingRequest` POST SSE 兩個 switch）| `case 'X':` 清單 |
+| Server | `code/python/core/session_service.py:600-610`（`_BAD_MESSAGE_TYPES` frozenset）| 用於 `_sanitize_session_history` 在 create / update / migrate 時過濾 |
 
-**Server `_BAD_MESSAGE_TYPES`（5/01 完整清單）**：
+**Server `_BAD_MESSAGE_TYPES`（7/05 完整清單；`low_relevance_warning` / `low_keyword_match_warning` / `empty_results` 在前端是 render case 非 skip case，列入 server 端屬 defense-in-depth）**：
 ```python
 {
     'asking_sites', 'tool_selection', 'decontextualization',
@@ -836,6 +842,8 @@ default:
     'begin-nlweb-response', 'end-nlweb-response', 'complete',
     'error', 'remember', 'time_filter_relaxed',
     'author_search_no_results', 'clarification_required',
+    'low_relevance_warning', 'low_keyword_match_warning',
+    'empty_results',
 }
 ```
 
@@ -1112,7 +1120,7 @@ function initSidebarDragDelegation() {
 - `performDeepResearch()` - 執行 Deep Research（`features/deep-research.js`）
 - `performFreeConversation()` - 執行自由對話（news-search.js stub）
 - `cancelActiveSearch()` - 取消搜尋（news-search.js stub）
-- `handleStreamingRequest()` - 處理 SSE 串流（news-search.js stub）
+- `handleStreamingRequest()` - **@deprecated** legacy EventSource GET SSE，無 live caller（當前 SSE 走 `handlePostStreamingRequest`）
 - `performLiveResearch()` - 執行 Live Research（`features/live-research.js`）
 - `continueLiveResearch()` - 繼續 Live Research（`features/live-research.js`）
 

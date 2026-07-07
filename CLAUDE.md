@@ -45,6 +45,14 @@ python tools/indexer.py --search "關鍵字"
 
 ## 開發紀律
 
+### 全程使用繁體中文
+
+所有回覆、解釋、commit message、與 CEO 的溝通一律繁體中文。技術術語與程式碼識別字保留原文。長 session 後段不可漂移成簡體。
+
+### Commit 前先確認 worktree / branch
+
+任何 commit 前必須先 `git branch --show-current` + `git worktree list` 確認站在預期的 worktree / branch，不可假設「current branch 就是我以為的那條」。current branch 是 repo 級 persistent state，跨 session / 跨 agent 殘留 —— 在錯的 branch commit 會把工作落到不相關的功能線上。meta / 跨功能的文件改動（如 CLAUDE.md）尤其要確認 commit 去向，不混進無關的 feature 分支。
+
 ### Debug 先讀 Memory
 
 被要求 debug 或診斷問題時，必須先讀 `memory/MEMORY.md`（索引）→ 對應模組 `lessons-*.md`。許多 bug 有重複 pattern，先讀可避免重複踩坑。
@@ -73,7 +81,7 @@ Unit test + smoke test 通過 ≠ 完成。Pipeline：`Unit → Smoke → Agent 
 
 所有推測標為**假說** + 列**驗偽計畫**，驗偽後才升級為結論。常被忽略的驗偽手段：
 
-1. **環境驗證**：CEO 報「我重啟了」必須 `tasklist | grep python` 驗 PID 變了 + CPU time 重置，不可信任口頭確認
+1. **間接證據 ≠ 當下實況**：驗「當下狀態」前先問「我這命令／讀取反映的是 working tree 此刻，還是某快照 / git ref / 我的記憶 / 別人的轉述？」。例：CEO 報「我重啟了 / 收掉了」要 `tasklist | grep python` 驗 PID 變了（口頭≠實況）；`git grep <ref>` 搜的是該 commit 快照非 working tree（驗未提交改動用 `git grep --no-index`）；untracked plan / 檔頭 DEFERRED 標籤 ≠ 工作未完成（查 `git log -S` 看修法是否已 land）；subagent / audit 轉述、commit message「已親驗」≠ first-hand（自己驗到「生效」層，不只「存在」層）
 2. **對照實驗**：假設 X-specific 前用其他 X' 驗對照
 3. **Small test round-trip**：寫長 script 含特殊內容（中文 / unicode / JSON）前先 ~3 行 small test 驗讀寫一致
 

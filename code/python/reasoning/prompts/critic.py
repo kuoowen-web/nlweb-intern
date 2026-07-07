@@ -291,7 +291,7 @@ class CriticPromptBuilder:
 - `"hasty_generalization"`: 倉促歸納（小樣本推廣至全體）
 - `"missing_alternatives"`: 缺少替代解釋（abduction 只提 1 種可能）
 - `"invalid_deduction"`: 無效演繹（前提不支持結論）
-- `"source_tier_violation"`: 來源層級違規（社群來源未加警語即作為核心證據）
+- `"source_tier_violation"`: 來源可信度違規（未查證社群來源未加警語即作為核心證據）
 - `"logical_leap"`: 邏輯跳躍（缺少中間推理步驟）
 
 **Argument Graph 內容**：
@@ -314,7 +314,7 @@ class CriticPromptBuilder:
       "node_id": "uuid-from-analyst",
       "weakness_type": "source_tier_violation",
       "severity": "critical",
-      "explanation": "將 Dcard (Tier 5) 社群來源作為核心證據，未加『社群討論指出』類警語"
+      "explanation": "將 Dcard 等未查證社群來源作為核心證據，未加『社群討論指出』類警語"
     }}
   ]
 }}
@@ -364,13 +364,13 @@ Analyst 生成了一個知識圖譜 (Knowledge Graph)，包含實體 (entities) 
    - 關係的 `evidence_ids` 是否有效？
 
 3. **信心度一致性**：
-   - 實體/關係的 `confidence` 是否與證據來源層級一致？
-   - `high`：應基於 Tier 1-2 來源
-   - `medium`：應基於 Tier 2-3 來源或推論
-   - `low`：Tier 4-5 來源或高度推測
+   - 實體/關係的 `confidence` 是否與證據來源的查證度一致？
+   - `high`：應基於高查證度來源（官方公告、主流媒體）
+   - `medium`：應基於可靠來源或推論
+   - `low`：未查證社群來源或高度推測
 
 4. **來源合規性**：
-   - 不應有基於 Tier 4-5 來源但標記為高信心度（`high`）的實體/關係
+   - 不應有基於未查證社群來源但標記為高信心度（`high`）的實體/關係
 
 ### 檢查的知識圖譜
 

@@ -156,6 +156,10 @@ class AioHttpStreamingWrapper:
             except asyncio.CancelledError:
                 pass
         
+        # 斷線時 connection_alive 已 False（_mark_disconnected）→ 此 guard 跳過 write_eof：
+        # transport 已死，送 EOF 無意義。fd 釋放靠 route handler return（detach）+ aiohttp
+        # transport teardown；heartbeat_task.cancel()（上方）已釋放常駐 coroutine。
+        # （plan: lr-sse-connection-release-fix, 2026-06-22；真機 fd 驗於 Sprint Exit Gate）
         if self.connection_alive and not self.response._eof_sent:
             try:
                 await self.response.write_eof()

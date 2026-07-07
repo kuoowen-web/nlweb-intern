@@ -16,6 +16,8 @@ import threading
 import importlib
 import sentry_sdk
 
+from core.openai_http import keepalive_timeout_enabled
+
 
 from misc.logger.logging_config_helper import get_configured_logger, LogLevel
 logger = get_configured_logger("llm_wrapper")
@@ -174,7 +176,9 @@ async def ask_llm(
     level: str = "low",
     timeout: int = 60,
     query_params: Optional[Dict[str, Any]] = None,
-    max_length: int = 512
+    max_length: int = 512,
+    *,
+    _use_sdk_retry: bool = False,   # 內部旗標：high-tier(經 base.py layer1a)設 True → 走純 SDK retry 路徑
 ) -> Dict[str, Any]:
     """
     Route an LLM request to the specified endpoint, with dispatch based on llm_type.
@@ -251,10 +255,20 @@ async def ask_llm(
         # Simply call the provider's get_completion method without locking
         # Each provider should handle thread-safety internally
         logger.debug(f"Calling {llm_type} provider completion for endpoint {provider_name} with max_completion_tokens={max_length}")
-        result = await asyncio.wait_for(
-            provider_instance.get_completion(prompt, schema, model=model_id, timeout=timeout, max_completion_tokens=max_length),
-            timeout=timeout
-        )
+        if keepalive_timeout_enabled() and _use_sdk_retry:
+            # 收斂 high-tier 路徑：不包外層 wait_for，讓 get_completion 內的 httpx read timeout
+            # + SDK retry 成為唯一 timeout 機制（retry 不被 asyncio 砍）。get_completion 失敗
+            # 已回 LLMError（Task 3），直接上傳。
+            result = await provider_instance.get_completion(
+                prompt, schema, model=model_id, timeout=timeout, max_completion_tokens=max_length
+            )
+        else:
+            # low-tier（flag-ON 但無 _use_sdk_retry）保留 asyncio 安全網保住 60s 不變量；
+            # flag-OFF 走完全相同的舊路徑（行為逐字等價現狀）。
+            result = await asyncio.wait_for(
+                provider_instance.get_completion(prompt, schema, model=model_id, timeout=timeout, max_completion_tokens=max_length),
+                timeout=timeout
+            )
         logger.debug(f"{provider_name} response received, size: {len(str(result))} chars")
         return result
         

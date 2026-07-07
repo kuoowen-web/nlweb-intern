@@ -303,6 +303,92 @@ def _count_chapter_words(content: str) -> int:
     return len(re.sub(r"\{cite:\d+\}", "", content or ""))
 
 
+# 章節 post-process truncate 的省略號（明示節略，no silent fail）。
+# 章節內文走這個獨立切法，**不**複用 lr_copy 的 100 字 _WARN_EXPLANATION_MAX helper
+# （那是 critic warning 說明用、scope 100 字；章節是 800-2000 字級別，且該 helper 已死碼移除）。
+TRUNCATE_ELLIPSIS = "…"
+
+# 句末邊界字元（中文）。truncate 在 limit 內最後一個句末標點切，避免切句中。
+_SENTENCE_BOUNDARY_CHARS = "。！？；"
+
+# should-fix（沿用既有 truncate helper 精神）：limit 內最近的句界若離 limit 太遠
+# （< limit * 此比例），寧可硬切補省略號，也不丟掉大半內容。
+_TRUNCATE_MIN_BOUNDARY_RATIO = 0.6
+
+
+def _truncate_chapter_to_target(content, target: int):
+    """章節 post-process 硬切：實際字數遠超 target 時切到 target 附近、切句界、明示節略。
+
+    bug 2026-06-20：軟約束（prompt ±15% + 旁白）prod 證實壓不住章節字數
+    （target=800 actual=2258）。memory/lessons-live-research.md 記載「字數硬上限
+    prompt 層只能逼近不能精確，要硬切需 post-process truncate」。本函式即該硬切。
+
+    設計：
+    - 字數以 _count_chapter_words 度量（剝 {cite:N} 後字元數），與 target 同尺度。
+    - 在 citation render **之前**呼叫：content 仍是 {cite:N}，切句界天然不會切到半個
+      placeholder（citation 落在標點之前，句末標點是切點）。額外防禦：切後若殘留半個
+      `{cite` 片段（理論上不該發生）退一步到上一個完整 placeholder 之後。
+    - no silent fail：節略一律補 TRUNCATE_ELLIPSIS。
+    - limit 完全參數化（target），無 magic default。target <= 0 → no-op。
+
+    Returns:
+        (new_content, was_truncated)
+    """
+    text = content or ""
+    if not text or target <= 0:
+        return text, False
+    if _count_chapter_words(text) <= target:
+        return text, False
+
+    import re
+
+    # 1) 找出原字串中「剝 cite 後字元數」剛好到 target 的原字串切點 raw_cut。
+    #    逐字掃描，跳過 {cite:N} 整段（不計入字數、不可在中間切）。
+    cite_re = re.compile(r"\{cite:\d+\}")
+    counted = 0
+    raw_cut = len(text)
+    i = 0
+    n = len(text)
+    while i < n:
+        m = cite_re.match(text, i)
+        if m:
+            i = m.end()  # 整個 placeholder 跳過
+            continue
+        counted += 1
+        i += 1
+        if counted >= target:
+            raw_cut = i
+            break
+
+    head = text[:raw_cut]
+
+    # 2) 在 head 內找最後一個句末標點，切在句界。
+    best = -1
+    for ch in _SENTENCE_BOUNDARY_CHARS:
+        idx = head.rfind(ch)
+        if idx > best:
+            best = idx
+
+    if best >= 0 and _count_chapter_words(
+        head[: best + 1]
+    ) >= target * _TRUNCATE_MIN_BOUNDARY_RATIO:
+        # 句界保留標點本身，切到 best+1。
+        body = head[: best + 1]
+    else:
+        # 無句界 / 句界離 limit 太遠（丟太多）→ 寧可硬切（should-fix）。
+        body = head
+
+    # 3) 防禦：逐字掃描已跳過 placeholder，raw_cut 必落在 placeholder 邊界外，
+    #    句界切點亦在標點處（標點不在 {cite:N} 內）。但保險：若末端殘留開頭的
+    #    `{cite` 不完整片段（無對應 '}'），退到上一個 '}' 之後。
+    last_open = body.rfind("{cite")
+    last_close = body.rfind("}")
+    if last_open > last_close:
+        body = body[:last_open]
+
+    return body.rstrip() + TRUNCATE_ELLIPSIS, True
+
+
 def _is_intro_or_conclusion(book_outline, idx: int) -> bool:
     """Track A Task 3 (sprint 2026-05-28) — Gemini Critical 紅隊 #2 runtime
     double-check (defense in depth)。
@@ -1293,11 +1379,14 @@ class LiveResearchOrchestrator(OrchestratorBase):
             all_evidence.extend(self._build_topic_evidence_list(_topic, engine.evidence_pool))
 
         # 推送 checkpoint event
+        # evidence_total 用 final_pool 完整筆數（顯示層 all_evidence 只是 per-topic 子集，
+        # 前端據 total 標示「節選 vs 總量」，與下游 narration 同源）。
         await self._emit_checkpoint(
             stage=1,
             proposal=proposal,
             context_map_summary=context_map_to_summary(context_map),
             evidence_list=all_evidence,
+            evidence_total=len(final_pool),
         )
 
         await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
@@ -2047,7 +2136,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
             _mb_evidence: list = []
             for _topic in context_map.topics:
                 _mb_evidence.extend(self._build_topic_evidence_list(_topic, _mb_pool))
-            await self._emit_checkpoint(stage=2, proposal=proposal, evidence_list=_mb_evidence)
+            # evidence_total 與 consolidation narration 同源 mock_total_evidence。
+            await self._emit_checkpoint(
+                stage=2, proposal=proposal, evidence_list=_mb_evidence,
+                evidence_total=mock_total_evidence,
+            )
             await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
             return state
 
@@ -2150,7 +2243,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 "evidence_list will be empty in SSE payload"
             )
 
-        await self._emit_checkpoint(stage=2, proposal=proposal, evidence_list=_stage2_evidence)
+        # evidence_total 與 _emit_stage2_consolidation 的「共蒐集到 N 筆」同源 len(existing_pool)。
+        await self._emit_checkpoint(
+            stage=2, proposal=proposal, evidence_list=_stage2_evidence,
+            evidence_total=len(existing_pool),
+        )
 
         await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
         return state
@@ -5638,14 +5735,19 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if _f_was_corrected:
             was_corrected = True
 
-        # (a) 字數軟提示（lr-chapter-word-budget plan）：章節定稿後（所有 guard /
-        # publish gate mutate 完）、citation render 之前計算字數，超標只發旁白透明化，
-        # 不觸發重寫（排除 b）。content 此時仍是 {cite:N}，_count_chapter_words 剝除後算。
-        await self._maybe_narrate_word_overshoot(
-            chapter_title=section_output.section_title or section_title,
+        # 字數 post-process 硬切（bug 2026-06-20）：章節定稿後（所有 guard /
+        # publish gate mutate 完）、citation render 之前處理。此時 content 仍是
+        # {cite:N}，切句界天然不切到半個 placeholder。
+        #
+        # 設計演進：原本只發「超標」軟旁白（_maybe_narrate_word_overshoot，內容照常
+        # 保留）。但 prod 證實軟約束（prompt ±15% + 旁白）壓不住字數（target=800
+        # 實際=2258），CEO/CTO 拍板改 post-process truncate（硬切到 target 附近、
+        # 切句界、補省略號、發「已節略」誠實旁白 no silent fail）。truncate 取代軟旁白：
+        # 過閾值的章直接切並發 truncate 旁白；未過閾值的章不動、不發。
+        # 仍**不**回呼 writer.compose_section（排除字數 auto-rewrite，避免多輪重寫迴圈）。
+        await self._maybe_truncate_chapter(
+            section_output=section_output,
             target=self._chapter_target_words(book_outline, current_chapter_index),
-            actual=_count_chapter_words(section_output.section_content),
-            status=getattr(section_output, "status", "drafted"),
         )
 
         # TypeAgent Target 3 (2026-05-19, CEO 拍板 OQ-5): typed citations render
@@ -5678,28 +5780,54 @@ class LiveResearchOrchestrator(OrchestratorBase):
             return 0
         return getattr(chapters[current_chapter_index], "target_word_count", 0) or 0
 
-    async def _maybe_narrate_word_overshoot(
-        self, *, chapter_title: str, target: int, actual: int, status: str,
-    ) -> None:
-        """(a) 軟提示：章節實際字數明顯超出規劃時，發一則 user-facing 旁白透明化。
+    async def _maybe_truncate_chapter(
+        self, *, section_output, target: int,
+    ) -> bool:
+        """章節 post-process 硬切（bug 2026-06-20）：實際字數明顯超出規劃時，硬切到
+        target 附近、切句界、補省略號，並發一則「已節略」誠實旁白（no silent fail）。
 
-        純讀觀測：**不**重寫、**不** mutate section、**不**改 was_corrected（排除 b）。
-        - target <= 0（未指定字數）→ 跳過。
+        背景：軟約束（prompt ±15% + chapter_word_overshoot_narration 旁白）prod 證實
+        壓不住章節字數（target=800 actual=2258）。memory/lessons-live-research.md 記載
+        「字數硬上限 prompt 層只能逼近不能精確，要硬切需 post-process truncate」。
+
+        - target <= 0（未指定字數）→ 跳過（不切）。
         - status != "drafted"（被 block / critic_rejected / guard_failed，content 已是
-          替換文）→ 跳過（替換文字數無意義）。
-        - 每個超標章各發一則（不 per-run dedup）：各章超多少不同，逐章發資訊才完整。
+          替換文）→ 跳過（替換文字數無意義，且切替換文會破壞 sentinel）。
+        - 與 overshoot 旁白同閾值（_WORD_OVERSHOOT_RATIO）：超標 30% 才切，正常波動不切。
+        - **在 citation render 之前呼叫**：content 仍是 {cite:N}，切句界天然不切到半個
+          placeholder（_truncate_chapter_to_target 另有防禦）。
+        - 切完直接 mutate section_output.section_content，回傳是否有切。
+
+        Returns:
+            True 若有節略（content 已被切短 + 已發旁白）；False 若未動。
         """
+        status = getattr(section_output, "status", "drafted")
         if target <= 0 or status != "drafted":
-            return
-        if actual <= target * self._WORD_OVERSHOOT_RATIO:
-            return
+            return False
+        actual_before = _count_chapter_words(section_output.section_content)
+        if actual_before <= target * self._WORD_OVERSHOOT_RATIO:
+            return False
+
+        new_content, was_truncated = _truncate_chapter_to_target(
+            section_output.section_content, target,
+        )
+        if not was_truncated:
+            return False
+
+        chapter_title = getattr(section_output, "section_title", "") or "本章"
         logger.info(
-            f"[LIVE RESEARCH] Chapter word overshoot: {chapter_title!r} "
-            f"target={target} actual={actual} (ratio={actual / max(target, 1):.2f})"
+            f"[LIVE RESEARCH] Chapter word truncate: {chapter_title!r} "
+            f"target={target} actual_before={actual_before} "
+            f"actual_after={_count_chapter_words(new_content)} "
+            f"(ratio={actual_before / max(target, 1):.2f})"
         )
+        section_output.section_content = new_content
         await self._emit_narration(
-            lr_copy.chapter_word_overshoot_narration(chapter_title, target, actual)
+            lr_copy.chapter_word_truncated_narration(
+                chapter_title, target, actual_before
+            )
         )
+        return True
 
     def _stage5_remaining_count(self, state) -> int:
         """回傳還有幾段沒寫完（0 = 全寫完）。
@@ -5745,6 +5873,22 @@ class LiveResearchOrchestrator(OrchestratorBase):
             # 段3 的「無 token 短肯定兜底」判定 —— 否則「算了」（短、無修改 marker、無 token）
             # 會被段3 誤當 confirm 觸發不可逆刪章。abort 優先級最高（誤判代價最高）。
             meta = await _classify_meta_intent(user_message, self.handler)
+            # B fail-loud（抄 export gate :5844-5854 / nav restart gate :1088-1102）：
+            # meta is None = LLM 故障。必在 abort / bounded-affirmative 判定之前攔截，
+            # 絕不放行不可逆補搜（清章節 + 重蒐 + 重寫 = 燒錢 + 資料流失）。
+            # 不可 silent fail（#21）：停原地、emit 系統端旁白、重設 pending flag 讓 user
+            # 恢復後可再確認一次（不誤觸刪章）。
+            if meta is None:
+                logger.warning(
+                    "[LIVE RESEARCH] Stage 5 recollect-confirm meta-intent classify failed "
+                    "(None) — stay at checkpoint, NOT dispatching recollect"
+                )
+                await self._emit_narration(lr_copy.LLM_UNAVAILABLE_NARRATION)
+                state.pending_recollect_confirmation = True   # 重設：本輪已於 5738 清，故障後復原讓 user 再確認
+                state.set_checkpoint(lr_copy.RECOLLECT_CONSENT_PROMPT)
+                await self._emit_checkpoint(stage=5, proposal=state.checkpoint_prompt)
+                await self._persist_checkpoint_boundary(state)
+                return state
             if meta == META_INTENT_ABORT:
                 # 明確取消（「算了/取消/不要了」）→ 回常規 Stage 5 checkpoint，不刪章節。
                 logger.info("[LIVE RESEARCH] Stage 5: recollect cancelled by user (abort)")
@@ -6959,14 +7103,22 @@ class LiveResearchOrchestrator(OrchestratorBase):
         context_map_summary: str = "",
         evidence_list: Optional[List[dict]] = None,
         show_new_sample_button: bool = False,
+        evidence_total: Optional[int] = None,
     ):
+        # evidence_total：evidence_pool 完整筆數（與 Stage 2 consolidation narration
+        # 「共蒐集到 N 筆」同源 len(pool)）。前端「N 筆資料」標題只拿得到 evidence_list
+        # 子集長度，會讓 user 誤以為只蒐到那幾筆；帶上總量讓前端標示「節選 vs 總量」。
+        # 不傳時 fallback 為 evidence_list 長度（向後兼容：舊 caller / Stage 3 等無 pool 的 checkpoint）。
+        _evidence_list = evidence_list or []
+        _evidence_total = evidence_total if evidence_total is not None else len(_evidence_list)
         await emit_sse(self.handler, {
             "message_type": "live_research_checkpoint",
             "stage": stage,
             "proposal": proposal,
             "context_map_summary": context_map_summary,
             "auto_continue_option": True,
-            "evidence_list": evidence_list or [],
+            "evidence_list": _evidence_list,
+            "evidence_total": _evidence_total,
             # Stage 3 風格 checkpoint 才設 True：前端據此顯示「重新提供範本」按鈕。
             "show_new_sample_button": show_new_sample_button,
         })

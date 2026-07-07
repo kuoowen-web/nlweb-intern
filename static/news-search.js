@@ -70,8 +70,9 @@ import {
     // commit 14b — heavy SSE entry + populate + summaries toggle (8 functions)
     performSearch, handleStreamingRequest, handlePostStreamingRequest,
     populateResultsFromAPI, showMemoryNotification, showTimeFilterRelaxedWarning,
+    showLowRelevanceWarning, showLowKeywordMatchWarning,
     showSummaries, hideSummaries
-} from './js/features/search.js';
+} from './js/features/search.js?v=20260705c';
 // v4.0 Commit 3 (2026-05-24) — chatHistory.
 // v4.0 Commit 17 (2026-05-25, Phase 8): 13 chat function bodies MIGRATED.
 //   - performFreeConversation (main entry — POST /ask streaming for free-chat with research context)
@@ -92,7 +93,7 @@ import {
     truncateText, scrollToMessage, togglePinnedDropdown, closePinnedDropdown,
     initPinnedBanner,
     togglePinNewsCard, updateNewsCardPinState, renderPinnedNewsList
-} from './js/features/chat.js';
+} from './js/features/chat.js?v=20260705c';
 // Re-bridge for search.js performSearch chat-mode delegate path. Sweep commit 25.
 window.performFreeConversation = performFreeConversation;
 // v4.0 Commit 4 (2026-05-24) — pin pair (pinnedMessages / pinnedNewsCards).
@@ -152,7 +153,9 @@ import {
     restoreLRCheckpointFromState,
     // B5 (2026-06-05) — session-switch stale restore guard
     bumpLRSwitchToken,
-} from './js/features/live-research.js?v=20260611a';
+    // v3 LR dialog snapshot — feed loaded snapshot to restore for stage-toggle replay
+    setLRLoadedSnapshot,
+} from './js/features/live-research.js?v=20260705c';
 // Re-bridge performLiveResearch onto window so features/search.js performSearch
 // LR mode delegate can still find it via window.performLiveResearch. Sweep target
 // commit 25 final cleanup when search.js imports it directly.
@@ -292,7 +295,7 @@ import {
     createCriticalNodesAlert, renderArgumentNode, setupHoverInteractions,
     inferScore, formatReasoningForVerification,
     getCurrentResearchQueryId, setCurrentResearchQueryId, clearCurrentResearchQueryId
-} from './js/features/deep-research.js';
+} from './js/features/deep-research.js?v=20260705c';
 
         // v4.0 Commit 15 (2026-05-25, Phase 8): re-bridge deep-research.js exports to
         //   window so features/search.js performSearch (DR mode delegate) can reach them
@@ -317,7 +320,7 @@ import {
 import {
     displayKnowledgeGraph,
     getCurrentKGData, getKGEditMode, resetKGState
-} from './js/features/knowledge-graph.js';
+} from './js/features/knowledge-graph.js?v=20260705c';
 // Re-bridge so features/deep-research.js can still reach via window. Sweep commit 25
 // when deep-research.js direct-imports from knowledge-graph.js.
 window.displayKnowledgeGraph = displayKnowledgeGraph;
@@ -2331,6 +2334,49 @@ window.__getCurrentKGData = getCurrentKGData;
                 });
             }
 
+            const newSampleBtn = document.getElementById('lrBtnNewSample');
+            if (newSampleBtn) {
+                newSampleBtn.addEventListener('click', () => {
+                    // Stage 3「重新提供範本」：送後端約定的 sentinel user_message
+                    // （與 orchestrator.STAGE3_NEW_SAMPLE_SENTINEL 逐字相同），
+                    // 後端據此清空既有分析、重問新範本。沿用既有 continueLiveResearch wiring。
+                    const input = document.getElementById('lrReplyInput');
+                    if (input) input.value = '';
+                    continueLiveResearch('__LR_STAGE3_NEW_SAMPLE__', false);
+                });
+            }
+
+            // backward-nav 退回/重來按鈕（plan: lr-backward-nav, B3 — wire 在此 IIFE
+            // 與既有 checkpoint 按鈕同處綁定，bound once on load）。語意化系統訊息在此加，
+            // continueLiveResearch 收到 navAction 後不再重複加「（讀豹決定）」。
+            const navBackBtn = document.getElementById('lrBtnNavBack');
+            if (navBackBtn) {
+                navBackBtn.addEventListener('click', () => {
+                    addLRChatMessage('system', '（退回上一階段）');
+                    continueLiveResearch('', false, 'back_one');
+                });
+            }
+
+            const navRestartBtn = document.getElementById('lrBtnNavRestart');
+            if (navRestartBtn) {
+                navRestartBtn.addEventListener('click', () => {
+                    addLRChatMessage('system', '（重新規劃）');
+                    continueLiveResearch('', false, 'restart');
+                });
+            }
+
+            // recollect 按鈕：送一句 _parse_revision_intent 認得的固定文字（navAction 留空，
+            // 走正常 reply 路徑）→ 後端判 action="recollect" → 既有四段式 consent flow。
+            // Note: continueLiveResearch 會自己加 user 氣泡（live-research.js:2588-2589），
+            // 此處不要呼叫 addLRChatMessage，否則重複。亦不要送 navAction='recollect'——
+            // 後端目前無此分支（那是 design 決策三 fallback 才加的），空字串走正常 reply 即可。
+            const recollectBtn = document.getElementById('lrBtnRecollect');
+            if (recollectBtn) {
+                recollectBtn.addEventListener('click', () => {
+                    continueLiveResearch('再去找更多資料，補充後再寫', false, '');
+                });
+            }
+
         })();
 
         // v4.0 Commit 15 (2026-05-25, Phase 8): displayDeepResearchResults MIGRATED to features/deep-research.js.
@@ -2474,13 +2520,13 @@ window.__getCurrentKGData = getCurrentKGData;
                 // Expand summary - just show the descriptions that are already loaded
                 showSummaries();
                 setSummaryExpanded(true);
-                btnToggleSummary.innerHTML = '<span class="emoji-bw">📝</span> 收起摘要';
+                btnToggleSummary.innerHTML = '<img src="/static/images/icon-memo.svg" alt="摘要" class="inline-icon"> 收起摘要';
                 btnToggleSummary.classList.add('expanded');
             } else {
                 // Collapse summary
                 hideSummaries();
                 setSummaryExpanded(false);
-                btnToggleSummary.innerHTML = '<span class="emoji-bw">📝</span> 展開摘要';
+                btnToggleSummary.innerHTML = '<img src="/static/images/icon-memo.svg" alt="摘要" class="inline-icon"> 展開摘要';
                 btnToggleSummary.classList.remove('expanded');
             }
         });
@@ -2514,6 +2560,17 @@ window.__getCurrentKGData = getCurrentKGData;
             const freshSession = getSavedSessions().find(s => window.matchSessionId(s.id, session.id)) || session;
             session = freshSession;
 
+            // 方向 A（race fix 2026-06-17）：每次 session switch（含切到非 LR session）都 bump
+            // LR switch token，作廢上一個 LR session 排的 stale setTimeout restore。
+            // ★必須在 loadSavedSession 第一個 await（下方 hydrate fetch）之前★ — 否則切到
+            // server-backed 非 LR session 時，hydrate await 期間 stale restore 仍會觸發過 guard
+            // （Codex AR blocker）。語意對齊既有 bumpSearchGenerationId（同為切換時作廢上一 session
+            // pending callback），只是必須更前置（在 await 前，bumpSearchGenerationId 在 await 後不夠早）。
+            // LR 分支自己的 bumpLRSwitchToken（restore 排程處，savedMode === 'live_research' 分支）保留
+            // ——它讓當前 session 的 restore 拿到最新 token、guard 正常放行；本次 bump 只作廢
+            // 「上一個」session 的 stale restore。
+            bumpLRSwitchToken();
+
             // Task 9 (Trigger E): always force-hydrate from server on click.
             // Cache may be stale across tabs (another tab edited this session). The
             // only exceptions: (a) _isShared sessions already hydrate inline via the
@@ -2546,6 +2603,8 @@ window.__getCurrentKGData = getCurrentKGData;
                             conversationId: s.conversation_id ?? s.conversationId ?? null,
                             // G3：live_research_state 含 schema_version，供 legacy session gate 使用
                             liveResearchState: s.live_research_state ?? s.liveResearchState ?? null,
+                            // v3 LR dialog snapshot：snake→camel hydrate，供回顧逐條重播（Task 6）
+                            lrDialogSnapshot: s.lr_dialog_snapshot ?? s.lrDialogSnapshot ?? [],
                         };
                         // Replace in-memory entry so future clicks (and saveSession) see full content
                         const idx = getSavedSessions().findIndex(x => window.matchSessionId(x.id, session.id));
@@ -2712,6 +2771,9 @@ window.__getCurrentKGData = getCurrentKGData;
                     const msgId = msg.msgId || `msg-${msg.timestamp}-${Math.random().toString(36).substr(2, 9)}`;
                     messageDiv.setAttribute('data-msg-id', msgId);
 
+                    const roleIcon = msg.role === 'user'
+                        ? '<img src="/static/images/icon-role-user.svg" alt="你" class="inline-icon">'
+                        : '<img src="/static/images/icon-role-dubao.svg" alt="讀豹" class="inline-icon">';
                     const headerText = msg.role === 'user' ? '你' : '讀豹';
                     let formattedContent = msg.content;
                     if (msg.role === 'assistant') {
@@ -2723,7 +2785,7 @@ window.__getCurrentKGData = getCurrentKGData;
                     const isPinned = getPinnedMessages().some(p => p.msgId === msgId);
 
                     messageDiv.innerHTML = `
-                        <div class="chat-message-header">${headerText}</div>
+                        <div class="chat-message-header">${roleIcon} ${headerText}</div>
                         <div class="chat-message-content-wrapper">
                             <div class="chat-message-bubble">${formattedContent}</div>
                             <button class="chat-message-pin ${isPinned ? 'pinned' : ''}" data-msg-id="${msgId}" title="${isPinned ? '取消釘選' : '釘選訊息'}"><img src="/static/images/Icon_Pin.png" alt="" class="inline-icon"></button>
@@ -2869,7 +2931,7 @@ window.__getCurrentKGData = getCurrentKGData;
                     ? getConversationHistory()[getConversationHistory().length - 1]
                     : '';
 
-                setLRLegacyMode(isLegacyLRSession, legacyQuery);
+                setLRLegacyMode(isLegacyLRSession, legacyQuery, lrState);
 
                 if (isLegacyLRSession) {
                     console.info('[Session] Legacy LR session (schema_version <2) — locking revise/continue UI');
@@ -2899,6 +2961,9 @@ window.__getCurrentKGData = getCurrentKGData;
                     // rendering real content — no stale "載入中" residue.
                     const _lrChatEl = document.getElementById('lrChat');
                     if (_lrChatEl) _lrChatEl.innerHTML = '<div class="lr-loading">載入研究進度中…</div>';
+                    // v3：餵 snapshot 給 restore，completed 分支 getLRLoadedSnapshot() 讀此做 stage-toggle 回顧。
+                    // snapshot 存獨立欄位 lr_dialog_snapshot，不進 chat_history → 不碰 :2727 自由對話 restore loop。
+                    setLRLoadedSnapshot(session.lrDialogSnapshot || []);
                     setTimeout(() => restoreLRCheckpointFromState(lrState, lrServerId, _switchToken), 0);
                 }
             } else if (savedMode === 'chat') {
@@ -2925,8 +2990,10 @@ window.__getCurrentKGData = getCurrentKGData;
             const _fp = document.getElementById('folderPage');
             if (_fp) _fp.style.display = 'none';
             clearPreFolderState();
-            // 確保搜尋容器可見
-            searchContainer.style.display = 'block';
+            // 確保搜尋容器可見（LR mode 例外：LR view 用 lrCheckpointReply，主搜尋框須隱藏）
+            // 在同步流程就決定可見性，避免 LR resume 時先 block 再被 next-tick
+            // restoreLRCheckpointFromState / lrTab.click() 改 none 造成搜尋框閃一幀。
+            searchContainer.style.display = (savedMode === 'live_research') ? 'none' : 'block';
 
             // Refresh sidebar to sync active session highlight
             window.renderLeftSidebarSessions();

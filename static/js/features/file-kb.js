@@ -338,7 +338,7 @@ export function renderFileTreeView() {
                         <span class="tree-item-status ${file.status}">${statusText}</span>
                         ${canDelete ? `
                         <div class="tree-item-actions">
-                            <button class="tree-item-action-btn delete" data-file-id="${file.source_id}" data-file-name="${file.name}" title="刪除檔案"><span class="emoji-bw">🗑️</span></button>
+                            <button class="tree-item-action-btn delete" data-file-id="${file.source_id}" data-file-name="${file.name}" title="刪除檔案"><img src="/static/images/icon-delete.svg" alt="刪除" class="inline-icon"></button>
                         </div>
                         ` : ''}
                     </div>
@@ -690,12 +690,12 @@ export async function deleteUserFile(sourceId, fileName) {
 // ============================================================================
 export function getFileIcon(fileType) {
     const icons = {
-        '.pdf': '<span class="emoji-bw">📄</span>',
-        '.docx': '<span class="emoji-bw">📝</span>',
-        '.txt': '<span class="emoji-bw">📃</span>',
-        '.md': '<span class="emoji-bw">📋</span>'
+        '.pdf': '<img src="/static/images/icon-pdf.svg" alt="PDF" class="inline-icon">',
+        '.docx': '<img src="/static/images/icon-doc.svg" alt="DOC" class="inline-icon">',
+        '.txt': '<img src="/static/images/icon-txt.svg" alt="TXT" class="inline-icon">',
+        '.md': '<img src="/static/images/icon-md.svg" alt="MD" class="inline-icon">'
     };
-    return icons[fileType] || '<span class="emoji-bw">📄</span>';
+    return icons[fileType] || '<img src="/static/images/icon-pdf.svg" alt="檔案" class="inline-icon">';
 }
 
 export function getStatusText(status) {

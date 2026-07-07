@@ -53,10 +53,10 @@ import { initSessionManager } from './features/session-manager.js';
 import './features/mode.js';
 
 // v4.0 Commit 2 imports (2026-05-24) — search trio owner module.
-import './features/search.js';
+import './features/search.js?v=20260705c';
 
 // v4.0 Commit 3 imports (2026-05-24) — chat owner module.
-import './features/chat.js';
+import './features/chat.js?v=20260705c';
 
 // v4.0 Commit 4 imports (2026-05-24) — pins owner module.
 import './features/pins.js';
@@ -72,7 +72,7 @@ import './features/sharing.js';
 // injectStateSyncBackref({...}) at module init to register backref bundle into
 // state-sync.js. state-sync.js MUST be imported (above) before live-research.js so
 // its module-local _backrefs binding is initialized when the inject call fires.
-import './features/live-research.js?v=20260611a';
+import './features/live-research.js?v=20260705c';
 
 // v4.0 Commit 8 imports (2026-05-24) — folders owner module (folders quad + folder mode flag).
 import './features/folders.js';

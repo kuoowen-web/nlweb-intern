@@ -70,14 +70,15 @@
 
 // v4.0 Commit 21 (2026-05-25, Phase 8 part C) — direct cross-module imports per D-V6 relax.
 import { getResearchReport, getArgumentGraph, getChainAnalysis } from './research.js';
-import { getConversationHistory } from './search.js';
+import { getConversationHistory } from './search.js?v=20260705c';
 import {
     getCurrentResearchQueryId,
     displayDeepResearchResults,
     showDRError
-} from './deep-research.js';
-import { setCurrentConversationId } from './search.js';
+} from './deep-research.js?v=20260705c';
+import { setCurrentConversationId } from './search.js?v=20260705c';
 import { getSessionHistory } from './sessions-list.js';
+import { copyAndOpen } from './sharing.js';
 
 // ============================================================================
 // KG Constants — entity-type → color/shape/label, relation-type → label
@@ -135,6 +136,52 @@ const KG_RELATION_LABELS = {
 };
 
 // ============================================================================
+// buildKGCopyText — 純函式：KG 資料 → 結構化文字（複製功能用，可單元測試）
+// 鏡像 renderKGListView 的欄位讀取與 fallback，但輸出 plain text 而非 HTML。
+// 無 DOM / 無 state；空圖回傳 ''（呼叫端據此略過複製）。
+// ============================================================================
+export function buildKGCopyText(kg) {
+    if (!kg || !kg.entities || kg.entities.length === 0) return '';
+
+    const entityCount = kg.entities.length;
+    const relCount = (kg.relationships || []).length;
+
+    let out = '知識圖譜\n';
+    out += `${entityCount} 個實體 • ${relCount} 個關係\n\n`;
+
+    // 實體區
+    out += '【實體】\n';
+    kg.entities.forEach((entity, i) => {
+        const typeLabel = KG_TYPE_LABELS[entity.entity_type] || entity.entity_type;
+        const conf = entity.confidence ? ` [${entity.confidence}]` : '';
+        out += `${i + 1}. ${entity.name}（${typeLabel}）${conf}\n`;
+        if (entity.description) {
+            out += `   ${entity.description}\n`;
+        }
+    });
+
+    // 關係區
+    if (relCount > 0) {
+        const entityMap = {};
+        kg.entities.forEach(e => { entityMap[e.entity_id] = e.name; });
+
+        out += '\n【關係】\n';
+        kg.relationships.forEach((rel, i) => {
+            const relationLabel = KG_RELATION_LABELS[rel.relation_type] || rel.relation_type;
+            const sourceName = entityMap[rel.source_entity_id] || '未知';
+            const targetName = entityMap[rel.target_entity_id] || '未知';
+            const conf = rel.confidence ? ` [${rel.confidence}]` : '';
+            out += `${i + 1}. ${sourceName} --[${relationLabel}]--> ${targetName}${conf}\n`;
+            if (rel.description) {
+                out += `   ${rel.description}\n`;
+            }
+        });
+    }
+
+    return out;
+}
+
+// ============================================================================
 // Per-instance KG factory (Track D fix 2026-05-29): 消除 module-global 單例。
 // 每個 instance 持有自己的 prefix + 全部 runtime state，DR / LR 同頁互不污染。
 //
@@ -171,6 +218,37 @@ function createKGInstance(prefix) {
     // ---- External read accessors ----
     function getCurrentKGData() { return _currentKGData; }
     function getKGEditMode() { return _kgEditMode; }
+
+    // ---- 複製 KG 為結構化文字（沿用 sharing.js#copyAndOpen pattern）----
+    // 隔離要求：只讀本 instance closure 的 _currentKGData，禁止呼叫 exported getCurrentKGData()
+    function copyKGAsText(buttonEl) {
+        const text = buildKGCopyText(_currentKGData);
+        if (!text) {
+            // 不可 silent fail：無資料時給可見訊息（沿用 copyAndOpen 失敗回饋風格）
+            const original = buttonEl.textContent;
+            buttonEl.textContent = '✗ 無資料';
+            setTimeout(() => { buttonEl.textContent = original; }, 2000);
+            console.warn('[KG] 複製略過：無 KG 資料');
+            return;
+        }
+        copyAndOpen(text, null, buttonEl);
+    }
+
+    function setupKGCopy() {
+        const copyBtn = document.getElementById(_kgId('CopyBtn'));
+        if (!copyBtn) return;
+        // 沿用 setupKGEditMode 的 clone-to-strip-stale-listener pattern
+        const fresh = copyBtn.cloneNode(true);
+        copyBtn.parentNode.replaceChild(fresh, copyBtn);
+        const wired = document.getElementById(_kgId('CopyBtn'));
+        // disable 鏡像 edit 鈕：空圖時複製鈕 disabled（鏡像 displayKnowledgeGraph 的 editBtn.disabled = !hasEntities）
+        const hasEntities = _currentKGData && _currentKGData.entities && _currentKGData.entities.length > 0;
+        wired.disabled = !hasEntities;
+        wired.title = hasEntities ? '複製實體與關係文字' : '無資料可複製';
+        wired.addEventListener('click', function () {
+            copyKGAsText(this);
+        });
+    }
 
     // ---- App-shell reset coordinator (called by news-search.js resetConversation) ----
     // Replaces the inline reset block (was news-search.js 2421-2440). Mirrors the
@@ -292,6 +370,8 @@ function displayKnowledgeGraph(kg) {
     setupKGViewToggle();
     // Setup edit mode toggle
     setupKGEditMode();
+    // Setup copy button（沿用 sharing.js copyAndOpen pattern）
+    setupKGCopy();
 
     // Disable edit button if KG is empty
     const editBtn = document.getElementById(_kgId('EditToggleBtn'));

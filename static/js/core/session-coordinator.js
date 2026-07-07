@@ -42,24 +42,25 @@ import {
     getConversationHistory,
     getAccumulatedArticles,
     getCurrentConversationId,
-} from '../features/search.js';
-import { getChatHistory } from '../features/chat.js';
+} from '../features/search.js?v=20260705c';
+import { getChatHistory } from '../features/chat.js?v=20260705c';
 import { getPinnedMessages, getPinnedNewsCards } from '../features/pins.js';
 import {
     getResearchReport,
     getArgumentGraph,
     getChainAnalysis,
 } from '../features/research.js';
-import { getCurrentKGData } from '../features/knowledge-graph.js';
+import { getCurrentKGData } from '../features/knowledge-graph.js?v=20260705c';
 import { getCurrentMode } from '../features/mode.js';
-import { getCurrentResearchQueryId } from '../features/deep-research.js';
+import { getCurrentResearchQueryId } from '../features/deep-research.js?v=20260705c';
 import {
     isSessionDirty,
     clearSessionDirty,
 } from '../features/session-manager.js';
+import { resolveLRSnapshotForSave } from '../features/lr-snapshot.js';
 
 // 儲存當前對話
-export function saveCurrentSession() {
+export function saveCurrentSession(opts = {}) {
     // RCA Fix 1: pure-browse early return.
     // Outer callsite guards only check "is there in-memory content", which is
     // TRUE for any loaded session even when nothing changed. The dirty flag
@@ -103,6 +104,13 @@ export function saveCurrentSession() {
         chainAnalysis: getChainAnalysis() ? { ...getChainAnalysis() } : null
     } : null;
 
+    // v3 LR dialog snapshot：只在 LR mode 才 serialize 當前 #lrChat DOM（存的就是 user 此刻所見）。
+    // 用 window bridge（window.serializeLRChatDOM，live-research.js 暴露）避免 core→features import 循環。
+    const lrDialogSnapshot = (getCurrentMode() === 'live_research'
+        && typeof window !== 'undefined' && typeof window.serializeLRChatDOM === 'function')
+        ? window.serializeLRChatDOM()
+        : [];
+
     if (existingSessionIndex !== -1) {
         // 更新現有 session
         // Title 優先保留 user-edited 名稱（rename 過的），避免 saveCurrentSession 把使用者命名覆蓋掉。
@@ -111,6 +119,12 @@ export function saveCurrentSession() {
         const preservedTitle = (existingTitle && existingTitle !== '未命名搜尋')
             ? existingTitle
             : (getConversationHistory()[0] || '未命名搜尋');
+        // TRAP 2 guard (D-4): never let an empty serialize clobber a good snapshot.
+        const priorSnapshot = getSavedSessions()[existingSessionIndex].lrDialogSnapshot;
+        const lrSnapResolved = resolveLRSnapshotForSave(lrDialogSnapshot, priorSnapshot);
+        if (lrSnapResolved.preserved) {
+            console.warn('[saveCurrentSession] empty LR snapshot serialize skipped — preserving existing non-empty snapshot. currentLoadedSessionId=', getCurrentLoadedSessionId());
+        }
         getSavedSessions()[existingSessionIndex] = {
             id: getCurrentLoadedSessionId(),
             _serverId: getSavedSessions()[existingSessionIndex]._serverId,
@@ -126,6 +140,7 @@ export function saveCurrentSession() {
             knowledgeGraph: getCurrentKGData() ? JSON.parse(JSON.stringify(getCurrentKGData())) : null,
             conversationId: getCurrentConversationId(),
             researchQueryId: getCurrentResearchQueryId(),
+            lrDialogSnapshot: lrSnapResolved.snapshot,
             createdAt: getSavedSessions()[existingSessionIndex].createdAt,
             updatedAt: Date.now()
         };
@@ -145,6 +160,7 @@ export function saveCurrentSession() {
             knowledgeGraph: getCurrentKGData() ? JSON.parse(JSON.stringify(getCurrentKGData())) : null,
             conversationId: getCurrentConversationId(),
             researchQueryId: getCurrentResearchQueryId(),
+            lrDialogSnapshot: lrDialogSnapshot,
             createdAt: Date.now()
         };
         getSavedSessions().push(newSession);
@@ -169,8 +185,11 @@ export function saveCurrentSession() {
     const persistedSession = existingSessionIndex !== -1
         ? getSavedSessions()[existingSessionIndex]
         : getSavedSessions()[getSavedSessions().length - 1];
+    // D-6: capture the scheduleSave promise so the export caller can await dispatch.
+    // {immediate} forwarded from opts; debounced (default) callers ignore the return.
+    let saveResult;
     if (persistedSession && window.authManager.isLoggedIn()) {
-        window.sessionManager.scheduleSave(persistedSession);
+        saveResult = window.sessionManager.scheduleSave(persistedSession, opts);
     }
 
     // RCA Fix 1: clear dirty after the save body has run. scheduleSave debounces
@@ -179,6 +198,7 @@ export function saveCurrentSession() {
     clearSessionDirty();
 
     document.dispatchEvent(new CustomEvent('session-saved'));
+    return saveResult;  // D-6: undefined for debounced path; the saveSession().catch() promise for immediate
 }
 
 /**

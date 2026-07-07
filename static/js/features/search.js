@@ -151,6 +151,8 @@ import {
 } from '../utils/analytics.js';
 import { markSessionDirty } from './session-manager.js';
 import { UserStateSync } from '../core/state-sync.js';
+import { buildCitationHref, escapeHtmlAttr } from './text-fragment.js';
+import { isCurrentGeneration } from './search-generation.js';
 
 // ----------------------------------------------------------------------------
 // UI flag — AI summary expanded state
@@ -168,6 +170,7 @@ let _currentSearchEventSource = null;
 
 export function getSearchGenerationId() { return _searchGenerationId; }
 export function bumpSearchGenerationId() { _searchGenerationId++; return _searchGenerationId; }
+export { isCurrentGeneration };
 
 export function getCurrentSearchAbortController() { return _currentSearchAbortController; }
 export function setCurrentSearchAbortController(c) { _currentSearchAbortController = c; }
@@ -344,9 +347,15 @@ export function clearQueryState() {
     const researchViewEl = document.getElementById('researchView');
     if (researchViewEl) researchViewEl.innerHTML = '';
 
-    // Clear time filter warning
+    // Clear retrieval notice banners (time filter / relevance A / keyword B / empty):
+    // they are per-query verdicts inserted at the top of #resultsSection and must not
+    // survive into the next query's results (stale "no results" over 60 fresh cards)
     const timeWarning = document.getElementById('timeFilterWarning');
     if (timeWarning) timeWarning.remove();
+    for (const staleNoticeId of ['lowRelevanceWarning', 'lowKeywordMatchWarning', 'emptyResultsNotice']) {
+        const staleNotice = document.getElementById(staleNoticeId);
+        if (staleNotice) staleNotice.remove();
+    }
 
     // Clear time_filter_relaxed notification
     const relaxedNotice = document.getElementById('timeFilterRelaxedNotice');
@@ -475,6 +484,9 @@ export function createArticleCard(article, index) {
     const date = new Date(datePublished).toISOString().split('T')[0];
     const description = schema.description || article.description || '';
     const url = schema.url || '#';
+    // text fragment verbatim quote（Task 2 後端帶 snake_case matched_text；舊 payload 無此 key → '' → 降級裸 URL）
+    const matchedText = schema.matched_text || '';
+    const { href: readHref, textfrag } = buildCitationHref({ url, quote: matchedText });
     const isPinned = getPinnedNewsCards().some(p => p.url === url);
 
     const card = document.createElement('div');
@@ -495,12 +507,12 @@ export function createArticleCard(article, index) {
         </div>
         ${description ? `<div class="news-excerpt">${escapeHTML(description)}</div>` : ''}
         <div class="news-card-footer">
-            <a href="${escapeHTML(url)}" class="btn-read-more" target="_blank">閱讀全文 →</a>
+            <a href="${escapeHtmlAttr(readHref)}" class="btn-read-more" target="_blank" rel="noopener noreferrer" data-textfrag="${escapeHtmlAttr(textfrag)}">閱讀全文 →</a>
             <button class="news-card-pin ${isPinned ? 'pinned' : ''}" title="${isPinned ? '取消釘選' : '釘選新聞'}">📌</button>
         </div>
     `;
 
-    return { card, date, title, publisher, description, url, starsHTML, relevancePercent, isPinned };
+    return { card, date, title, publisher, description, url, matchedText, starsHTML, relevancePercent, isPinned };
 }
 
 // Progressively render articles replacing skeletons
@@ -529,14 +541,14 @@ export function renderArticlesProgressive(articles) {
     const articlesByDate = {};
 
     articles.forEach((article, index) => {
-        const { card, date, title, publisher, description, url, starsHTML, relevancePercent, isPinned } = createArticleCard(article, index);
+        const { card, date, title, publisher, description, url, matchedText, starsHTML, relevancePercent, isPinned } = createArticleCard(article, index);
         listView.appendChild(card);
 
         // Group for timeline
         if (!articlesByDate[date]) {
             articlesByDate[date] = [];
         }
-        articlesByDate[date].push({ title, publisher, description, url, starsHTML, relevancePercent, isPinned });
+        articlesByDate[date].push({ title, publisher, description, url, matchedText, starsHTML, relevancePercent, isPinned });
     });
 
     // Populate timeline view
@@ -548,7 +560,9 @@ export function renderArticlesProgressive(articles) {
                 <div class="timeline-date">
                     <div class="timeline-dot"></div>
                     <div class="date-label">${date}</div>
-                    ${dateArticles.map(art => `
+                    ${dateArticles.map(art => {
+                        const { href: readHref, textfrag } = buildCitationHref({ url: art.url, quote: art.matchedText || '' });
+                        return `
                         <div class="news-card progressive-fade-in" data-url="${escapeHTML(art.url)}" data-title="${escapeHTML(art.title)}">
                             <div class="news-title">${escapeHTML(art.title)}</div>
                             <div class="news-meta">
@@ -560,11 +574,12 @@ export function renderArticlesProgressive(articles) {
                             </div>
                             ${art.description ? `<div class="news-excerpt">${escapeHTML(art.description)}</div>` : ''}
                             <div class="news-card-footer">
-                                <a href="${escapeHTML(art.url)}" class="btn-read-more" target="_blank">閱讀全文 →</a>
+                                <a href="${escapeHtmlAttr(readHref)}" class="btn-read-more" target="_blank" rel="noopener noreferrer" data-textfrag="${escapeHtmlAttr(textfrag)}">閱讀全文 →</a>
                                 <button class="news-card-pin ${art.isPinned ? 'pinned' : ''}" title="${art.isPinned ? '取消釘選' : '釘選新聞'}">📌</button>
                             </div>
                         </div>
-                    `).join('')}
+                    `;
+                    }).join('')}
                 </div>
             `;
             timelineView.innerHTML += timelineHTML;
@@ -656,7 +671,7 @@ export function showMemoryNotification(itemToRemember) {
     const notification = document.createElement('div');
     notification.className = 'memory-notification';
     notification.innerHTML = `
-        <span class="memory-icon"><span class="emoji-bw">💾</span></span>
+        <span class="memory-icon"><img src="/static/images/icon-memory.svg" alt="記住" class="inline-icon"></span>
         <span class="memory-text">我會記住：「${escapeHTML(itemToRemember)}」</span>
     `;
 
@@ -689,6 +704,48 @@ export function showTimeFilterRelaxedWarning(message) {
 
     const resultsSection = document.getElementById('resultsSection');
     if (resultsSection) resultsSection.insertBefore(warning, resultsSection.firstChild);
+}
+
+export function showLowRelevanceWarning(message) {
+    const existing = document.getElementById('lowRelevanceWarning');
+    if (existing) existing.remove();
+
+    const warning = document.createElement('div');
+    warning.id = 'lowRelevanceWarning';
+    warning.className = 'low-relevance-warning';
+    warning.innerHTML = `<span class="warning-text">${escapeHTML(message)}</span>`;
+
+    const resultsSection = document.getElementById('resultsSection');
+    if (resultsSection) resultsSection.insertBefore(warning, resultsSection.firstChild);
+}
+
+export function showLowKeywordMatchWarning(message) {
+    const existing = document.getElementById('lowKeywordMatchWarning');
+    if (existing) existing.remove();
+
+    const warning = document.createElement('div');
+    warning.id = 'lowKeywordMatchWarning';
+    warning.className = 'low-keyword-match-warning';
+    warning.innerHTML = `<span class="warning-text">${escapeHTML(message)}</span>`;
+
+    const resultsSection = document.getElementById('resultsSection');
+    if (resultsSection) resultsSection.insertBefore(warning, resultsSection.firstChild);
+}
+
+// Empty-result honest notice (CDE plan §E): neutral info tone, not a warning —
+// an empty corpus hit is a fact, not an error. Mutually exclusive server-side
+// with the A/B warnings (never fire on empty sets) and author_search_no_results.
+export function showEmptyResultsNotice(message) {
+    const existing = document.getElementById('emptyResultsNotice');
+    if (existing) existing.remove();
+
+    const notice = document.createElement('div');
+    notice.id = 'emptyResultsNotice';
+    notice.className = 'empty-results-notice';
+    notice.innerHTML = `<span class="warning-text">${escapeHTML(message)}</span>`;
+
+    const resultsSection = document.getElementById('resultsSection');
+    if (resultsSection) resultsSection.insertBefore(notice, resultsSection.firstChild);
 }
 
 // Function to populate UI from API response (used by loadSavedSession to render
@@ -732,8 +789,8 @@ export function populateResultsFromAPI(data, query) {
             <div class="summary-footer">
                 <div class="source-info">讀豹基於 ${articles.length} 則報導生成</div>
                 <div class="feedback-buttons">
-                    <button class="btn-feedback" data-rating="positive"><span class="emoji-bw">👍</span> 有幫助</button>
-                    <button class="btn-feedback" data-rating="negative"><span class="emoji-bw">👎</span> 不準確</button>
+                    <button class="btn-feedback" data-rating="positive"><img src="/static/images/icon-good.svg" alt="有幫助" class="inline-icon"> 有幫助</button>
+                    <button class="btn-feedback" data-rating="negative"><img src="/static/images/icon-bad.svg" alt="不準確" class="inline-icon"> 不準確</button>
                 </div>
             </div>
         `;
@@ -746,8 +803,8 @@ export function populateResultsFromAPI(data, query) {
             <div class="summary-footer">
                 <div class="source-info">讀豹基於 ${articles.length} 則報導生成</div>
                 <div class="feedback-buttons">
-                    <button class="btn-feedback" data-rating="positive"><span class="emoji-bw">👍</span> 有幫助</button>
-                    <button class="btn-feedback" data-rating="negative"><span class="emoji-bw">👎</span> 不準確</button>
+                    <button class="btn-feedback" data-rating="positive"><img src="/static/images/icon-good.svg" alt="有幫助" class="inline-icon"> 有幫助</button>
+                    <button class="btn-feedback" data-rating="negative"><img src="/static/images/icon-bad.svg" alt="不準確" class="inline-icon"> 不準確</button>
                 </div>
             </div>
         `;
@@ -809,14 +866,16 @@ export function populateResultsFromAPI(data, query) {
         const date = new Date(datePublished).toISOString().split('T')[0];
         const description = schema.description || article.description || '';
         const url = schema.url || '#';
+        const matchedText = schema.matched_text || '';
+        const { href: readHref, textfrag } = buildCitationHref({ url, quote: matchedText });
         const isPinned = getPinnedNewsCards().some(p => p.url === url);
 
         const cardHTML = `
             <div class="news-card" data-url="${escapeHTML(url)}" data-title="${escapeHTML(title)}" data-description="${escapeHTML(description)}">
                 <div class="news-title">${escapeHTML(title)}</div>
                 <div class="news-meta">
-                    <span><span class="emoji-bw">🏢</span> ${escapeHTML(publisher)}</span>
-                    <span><span class="emoji-bw">📅</span> ${date}</span>
+                    <span><img src="/static/images/icon-source.svg" alt="來源" class="inline-icon"> ${escapeHTML(publisher)}</span>
+                    <span><img src="/static/images/icon-date.svg" alt="日期" class="inline-icon"> ${date}</span>
                     <div class="relevance">
                         <span class="stars">${starsHTML}</span>
                         <span>相關度 ${relevancePercent}%</span>
@@ -824,7 +883,7 @@ export function populateResultsFromAPI(data, query) {
                 </div>
                 ${description ? `<div class="news-excerpt">${escapeHTML(description)}</div>` : ''}
                 <div class="news-card-footer">
-                    <a href="${escapeHTML(url)}" class="btn-read-more" target="_blank">閱讀全文 →</a>
+                    <a href="${escapeHtmlAttr(readHref)}" class="btn-read-more" target="_blank" rel="noopener noreferrer" data-textfrag="${escapeHtmlAttr(textfrag)}">閱讀全文 →</a>
                     <button class="news-card-pin ${isPinned ? 'pinned' : ''}" title="${isPinned ? '取消釘選' : '釘選新聞'}"><img src="/static/images/Icon_Pin.png" alt="" class="inline-icon"></button>
                 </div>
             </div>
@@ -836,7 +895,7 @@ export function populateResultsFromAPI(data, query) {
             articlesByDate[date] = [];
         }
         articlesByDate[date].push({
-            title, publisher, description, url, starsHTML, relevancePercent, isPinned
+            title, publisher, description, url, matchedText, starsHTML, relevancePercent, isPinned
         });
     });
 
@@ -848,11 +907,13 @@ export function populateResultsFromAPI(data, query) {
                 <div class="timeline-date">
                     <div class="timeline-dot"></div>
                     <div class="date-label">${date}</div>
-                    ${dateArticles.map(art => `
+                    ${dateArticles.map(art => {
+                        const { href: readHref, textfrag } = buildCitationHref({ url: art.url, quote: art.matchedText || '' });
+                        return `
                         <div class="news-card" data-url="${escapeHTML(art.url)}" data-title="${escapeHTML(art.title)}">
                             <div class="news-title">${escapeHTML(art.title)}</div>
                             <div class="news-meta">
-                                <span><span class="emoji-bw">🏢</span> ${escapeHTML(art.publisher)}</span>
+                                <span><img src="/static/images/icon-source.svg" alt="來源" class="inline-icon"> ${escapeHTML(art.publisher)}</span>
                                 <div class="relevance">
                                     <span class="stars">${art.starsHTML}</span>
                                     <span>相關度 ${art.relevancePercent}%</span>
@@ -860,11 +921,12 @@ export function populateResultsFromAPI(data, query) {
                             </div>
                             ${art.description ? `<div class="news-excerpt">${escapeHTML(art.description)}</div>` : ''}
                             <div class="news-card-footer">
-                                <a href="${escapeHTML(art.url)}" class="btn-read-more" target="_blank">閱讀全文 →</a>
+                                <a href="${escapeHtmlAttr(readHref)}" class="btn-read-more" target="_blank" rel="noopener noreferrer" data-textfrag="${escapeHtmlAttr(textfrag)}">閱讀全文 →</a>
                                 <button class="news-card-pin ${art.isPinned ? 'pinned' : ''}" title="${art.isPinned ? '取消釘選' : '釘選新聞'}"><img src="/static/images/Icon_Pin.png" alt="" class="inline-icon"></button>
                             </div>
                         </div>
-                    `).join('')}
+                    `;
+                    }).join('')}
                 </div>
             `;
             timelineView.innerHTML += timelineHTML;
@@ -900,6 +962,10 @@ export function hideSummaries() {
 //   handlePostStreamingRequest (POST fetch reader)
 // ============================================================================
 
+// @deprecated — legacy EventSource GET path. 無 live caller（2026-07-05 重驗：
+//   全 repo 僅自身定義 + docs/comment 引用）。整支零世代 gate；若未來重新啟用，
+//   必須比照 handlePostStreamingRequest 的 late-message generation gate 補上，
+//   否則同一 SSE race 會在此路徑復現。Sweep 目標 commit 19/25。
 export async function handleStreamingRequest(url, query) {
     return new Promise((resolve, reject) => {
         const eventSource = new EventSource(url);
@@ -964,9 +1030,24 @@ export async function handleStreamingRequest(url, query) {
                         showTimeFilterRelaxedWarning(data.content);
                         break;
 
+                    case 'low_relevance_warning':
+                        console.warn('[Relevance] Low relevance:', data.content);
+                        showLowRelevanceWarning(data.content);
+                        break;
+
+                    case 'low_keyword_match_warning':
+                        console.warn('[Relevance] Low keyword match:', data.content);
+                        showLowKeywordMatchWarning(data.content);
+                        break;
+
                     case 'author_search_no_results':
                         console.warn('[Author] No results for author:', data.content);
                         showTimeFilterRelaxedWarning(data.content);
+                        break;
+
+                    case 'empty_results':
+                        console.warn('[Results] Empty result set:', data.content);
+                        showEmptyResultsNotice(data.content);
                         break;
 
                     case 'complete':
@@ -1015,7 +1096,7 @@ export async function handleStreamingRequest(url, query) {
 // Function to handle POST streaming requests (for large payloads like research reports)
 // Bug #23: Added abortSignal parameter for cancellation support
 // Progressive rendering: Added callbacks parameter for real-time UI updates
-export async function handlePostStreamingRequest(url, body, query, abortSignal = null, callbacks = {}) {
+export async function handlePostStreamingRequest(url, body, query, abortSignal = null, callbacks = {}, generationToken = null) {
     const { onArticles, onSummary, onAnswer, onComplete, onProgress } = callbacks;
     const fetchOptions = {
         method: 'POST',
@@ -1061,6 +1142,16 @@ export async function handlePostStreamingRequest(url, body, query, abortSignal =
         const { done, value } = await reader.read();
         if (done) break;
 
+        // Late-message generation gate（層一）：本 stream 已被後續搜尋/切換 supersede
+        // 時，停止消化剩餘 chunk。abort 後 reader loop 要等下一次 read() 才 throw，
+        // 同一 chunk buffer 內多條 message 會在同步迴圈全部處理完——這道 gate 讓遲到
+        // stream 在下一輪 read 前就退場，避免整批 stale message 灌進當前畫面。
+        if (!isCurrentGeneration(generationToken, getSearchGenerationId())) {
+            console.log('[POST SSE] stale generation, stopping reader loop (token', generationToken, '!= current', getSearchGenerationId(), ')');
+            try { reader.cancel(); } catch (_) {}
+            return accumulatedData;
+        }
+
         buffer += decoder.decode(value, { stream: true });
 
         const messages = buffer.split('\n\n');
@@ -1089,6 +1180,19 @@ export async function handlePostStreamingRequest(url, body, query, abortSignal =
                             console.warn('[SSE:handlePostStreamingRequest] envelope missing user_id (expected after Task 2A); passing through without identity check.');
                         }
 
+                        // Late-message generation gate（層二）：即使同一 chunk buffer 內
+                        // 多條 message 在層一 gate 通過後才被後續搜尋 supersede，這道逐
+                        // message gate 確保 stale message 不會進 switch 觸發任何 inline
+                        // sink（remember / *_warning / begin-nlweb-response shared-state /
+                        // injection_blocked cancel）。這是「驗世代」不是「過濾 message
+                        // type」——放行的 message 仍走原 switch，default Object.assign 黑名單
+                        // 行為完全不變。
+                        if (!isCurrentGeneration(generationToken, getSearchGenerationId())) {
+                            console.log('[POST SSE] stale generation, skipping message_type:', data.message_type);
+                            try { reader.cancel(); } catch (_) {}
+                            return accumulatedData;
+                        }
+
                         switch(data.message_type) {
                             case 'begin-nlweb-response':
                                 if (data.query_id) {
@@ -1113,9 +1217,24 @@ export async function handlePostStreamingRequest(url, body, query, abortSignal =
                                 showTimeFilterRelaxedWarning(data.content);
                                 break;
 
+                            case 'low_relevance_warning':
+                                console.warn('[Relevance] Low relevance:', data.content);
+                                showLowRelevanceWarning(data.content);
+                                break;
+
+                            case 'low_keyword_match_warning':
+                                console.warn('[Relevance] Low keyword match:', data.content);
+                                showLowKeywordMatchWarning(data.content);
+                                break;
+
                             case 'author_search_no_results':
                                 console.warn('[Author] No results for author:', data.content);
                                 showTimeFilterRelaxedWarning(data.content);
+                                break;
+
+                            case 'empty_results':
+                                console.warn('[Results] Empty result set:', data.content);
+                                showEmptyResultsNotice(data.content);
                                 break;
 
                             case 'injection_blocked': {
@@ -1184,8 +1303,12 @@ export async function handlePostStreamingRequest(url, body, query, abortSignal =
         }
     }
 
-    // Process any remaining content in buffer after stream ends
-    if (buffer.trim()) {
+    // Process any remaining content in buffer after stream ends.
+    // Late-message generation gate：stream 已 done 但若本 stream 已被後續搜尋
+    // supersede，這段重播（begin-nlweb-response 寫 conversation_id / analytics
+    // query_id 等 shared state）必須跳過，否則 stale stream 的尾 buffer 會覆蓋當前
+    // 對話 ID，導致後續追問接錯對話串。
+    if (buffer.trim() && isCurrentGeneration(generationToken, getSearchGenerationId())) {
         const lines = buffer.split('\n');
         for (const line of lines) {
             if (line.startsWith('data: ')) {
@@ -1335,8 +1458,8 @@ export async function performSearch() {
             },
             onArticles: (articles) => {
                 const safeArticles = Array.isArray(articles) ? articles : [];
-                lastReceivedArticles = safeArticles;
                 if (mySearchGeneration !== getSearchGenerationId()) return;
+                lastReceivedArticles = safeArticles;
                 console.log('[Progressive] Articles received:', safeArticles.length);
                 renderArticlesProgressive(safeArticles);
                 if (loadingState) loadingState.classList.remove('active');
@@ -1374,7 +1497,7 @@ export async function performSearch() {
         };
 
         const combinedData = await handlePostStreamingRequest(
-            '/ask', body, query, getCurrentSearchAbortController().signal, callbacks
+            '/ask', body, query, getCurrentSearchAbortController().signal, callbacks, mySearchGeneration
         );
 
         // Stale check: user switched away during search

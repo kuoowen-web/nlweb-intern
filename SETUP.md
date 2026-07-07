@@ -24,8 +24,8 @@
 
 ```bash
 # 1. Clone
-git clone <YOUR_INTERN_REPO_URL>
-cd nlweb-intern-strip
+git clone https://github.com/kuoowen-web/taiwan-news-ai-search.git
+cd taiwan-news-ai-search
 
 # 2. 一鍵 setup（自動檢查環境 + 建 venv + 裝 dependencies + 建 .env）
 bash scripts/setup.sh

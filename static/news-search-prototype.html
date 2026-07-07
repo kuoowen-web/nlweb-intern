@@ -9,7 +9,7 @@
     <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png?v=20260604a">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon-180.png?v=20260604a">
     <link rel="shortcut icon" href="/static/images/favicon.ico">
-    <link rel="stylesheet" href="/static/news-search.css?v=20260604a">
+    <link rel="stylesheet" href="/static/news-search.css?v=20260705c">
     <link rel="stylesheet" href="/static/css/feedback-modal.css">
     <script src="/static/js/feedback-utils.js"></script>
     <!-- D3.js for Knowledge Graph Visualization -->
@@ -506,14 +506,14 @@
             <div class="results-section" id="resultsSection">
                 <!-- KG Restore Bar (shown when KG is hidden by user) -->
                 <div class="kg-restore-bar" id="kgRestoreBar">
-                    <span class="emoji-bw">📊</span> 知識圖譜已隱藏 — 點擊此處重新顯示
+                    <img src="/static/images/icon-chart.svg" alt="知識圖譜" class="inline-icon"> 知識圖譜已隱藏 — 點擊此處重新顯示
                 </div>
 
                 <!-- Knowledge Graph Display (Phase KG Enhanced) -->
                 <div class="kg-display-container" id="kgDisplayContainer" style="display: none;">
                     <div class="kg-display-header">
                         <div class="kg-display-title">
-                            <span class="kg-display-icon"><span class="emoji-bw">📊</span></span>
+                            <span class="kg-display-icon"><img src="/static/images/icon-chart.svg" alt="知識圖譜" class="inline-icon"></span>
                             <span>知識圖譜</span>
                             <span class="kg-display-metadata" id="kgMetadata"></span>
                         </div>
@@ -531,6 +531,9 @@
                                 <button class="kg-edit-btn kg-edit-confirm-btn" id="kgConfirmEditBtn">確認送出</button>
                                 <button class="kg-edit-btn kg-edit-cancel-btn" id="kgCancelEditBtn">取消</button>
                             </div>
+                            <button class="kg-edit-toggle-btn kg-copy-btn" id="kgCopyBtn" title="複製實體與關係文字">
+                                複製文字
+                            </button>
                             <button class="kg-edit-toggle-btn" id="kgEditToggleBtn" title="進入編輯模式">
                                 編輯
                             </button>
@@ -646,7 +649,7 @@
 
                 <!-- Summary Toggle (for both list and timeline views) -->
                 <div class="summary-toggle active" id="summaryToggle">
-                    <button class="btn-toggle-summary" id="btnToggleSummary"><span class="emoji-bw">📝</span> 展開摘要</button>
+                    <button class="btn-toggle-summary" id="btnToggleSummary"><img src="/static/images/icon-memo.svg" alt="摘要" class="inline-icon"> 展開摘要</button>
                 </div>
 
                 <!-- Summary Loading -->
@@ -696,6 +699,9 @@
                         <span data-stage="6">匯出</span>
                     </div>
 
+                    <!-- LR per-stage 回顧容器（completed v2 session resume 時填入） -->
+                    <div class="lr-stage-review" id="lrStageReview" style="display:none;"></div>
+
                     <!-- Stage 5 控制列：VP-7 per-section checkpoint 是唯一中斷安全網；
                          placebo 停止按鈕已移除（移除記錄：2026-06-04，fix(lr)）。 -->
                     <div class="lr-stage-controls" id="lrStageControls"></div>
@@ -711,6 +717,10 @@
                         <div class="lr-reply-actions">
                             <button id="lrBtnReply" class="lr-btn-primary">送出</button>
                             <button id="lrBtnAutoContine" class="lr-btn-secondary">讀豹決定</button>
+                            <button id="lrBtnNewSample" class="lr-btn-secondary" style="display:none;">🔄 重新提供範本</button>
+                            <button id="lrBtnNavBack" class="lr-btn-secondary" style="display:none;">← 退回上一階段</button>
+                            <button id="lrBtnNavRestart" class="lr-btn-secondary" style="display:none;">↺ 重新規劃</button>
+                            <button id="lrBtnRecollect" class="lr-btn-secondary" style="display:none;">補充更多資料再寫</button>
                         </div>
                     </div>
 
@@ -723,13 +733,13 @@
                     <!-- D-CEO-Q4 LOCKED Option (β): LR 獨立 #lrKGDisplayContainer + DR module 參數化 -->
                     <!-- HTML 結構平行 DR #kgDisplayContainer (line 504-623), id 改 lrKG prefix -->
                     <div class="kg-restore-bar" id="lrKGRestoreBar">
-                        <span class="emoji-bw">📊</span> 知識圖譜已隱藏 — 點擊此處重新顯示
+                        <img src="/static/images/icon-chart.svg" alt="知識圖譜" class="inline-icon"> 知識圖譜已隱藏 — 點擊此處重新顯示
                     </div>
 
                     <div class="kg-display-container" id="lrKGDisplayContainer" style="display: none;">
                         <div class="kg-display-header">
                             <div class="kg-display-title">
-                                <span class="kg-display-icon"><span class="emoji-bw">📊</span></span>
+                                <span class="kg-display-icon"><img src="/static/images/icon-chart.svg" alt="知識圖譜" class="inline-icon"></span>
                                 <span>知識圖譜</span>
                                 <span class="kg-display-metadata" id="lrKGMetadata"></span>
                             </div>
@@ -747,6 +757,9 @@
                                     <button class="kg-edit-btn kg-edit-confirm-btn" id="lrKGConfirmEditBtn">確認送出</button>
                                     <button class="kg-edit-btn kg-edit-cancel-btn" id="lrKGCancelEditBtn">取消</button>
                                 </div>
+                                <button class="kg-edit-toggle-btn kg-copy-btn" id="lrKGCopyBtn" title="複製實體與關係文字">
+                                    複製文字
+                                </button>
                                 <button class="kg-edit-toggle-btn" id="lrKGEditToggleBtn" title="進入編輯模式">
                                     編輯
                                 </button>
@@ -940,7 +953,7 @@
     <!-- DOMPurify for sanitizing HTML output from marked.js -->
     <script src="/static/dompurify.min.js"></script>
 
-    <script type="module" src="/static/news-search.js?v=20260611a"></script>
+    <script type="module" src="/static/news-search.js?v=20260705c"></script>
 
     <!-- D-11 Programmatic Probe — external parser-blocking self-gated script (Phase 1).
          MUST load BEFORE main.js module so the probe object & EventTarget monkey-patch
@@ -950,7 +963,7 @@
 
     <!-- ES-module bootstrap entrypoint (Phase 3 Path B). main.js controls all internal module
          import ordering; external classic <script src> above remain HTML-loaded. -->
-    <script type="module" src="/static/js/main.js?v=20260611a"></script>
+    <script type="module" src="/static/js/main.js?v=20260705c"></script>
 
     <!-- Org Management Modal -->
     <div class="org-modal-overlay" id="orgModalOverlay" style="display:none;">

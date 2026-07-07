@@ -6,6 +6,16 @@ reasoning:
   writer_timeout: 90    # 縮短以讓 OpenAI Responses API hang 模式提早顯化，舊值 300 會遮蔽 5 分鐘 hang
   outline_planner_timeout: 90  # gpt-5.1 reasoning model 跑多章 outline (prompt~9500) 慢，30s 不夠致 skeleton fallback；對齊 writer_timeout
 
+  # OpenAI 收斂路徑（openai_keepalive_timeout=true 時生效）的 httpx 分項 timeout + SDK retry。
+  # ⚠ openai_read_timeout 必須 < 600（SDK 預設 read=600，不設短則 retry×600s 爆炸，openai-python #809）。
+  # budget 推導：總耗時上限 ≈ read×(max_retries+1) + backoff。high-tier agent 容忍上限
+  #   = analyst_timeout(300)/critic_timeout(120)/writer_timeout(90)。read 短以快速偵測 hang(路 B)，
+  #   靠 SDK retry 救 transient API hang（lessons-general 2026-06-24：hang 是 transient，retry 對的）。
+  # TODO(CEO gate)：以下為 placeholder，最終值待真機校準（read 太短會誤砍正常慢 compose，太長失去快偵測意義）。
+  openai_read_timeout: 45     # 每次 HTTP read 上限（秒）。45×(2+1)≈135 < analyst 300，但 > writer 90 → 校準時注意
+  openai_write_timeout: 30    # 每次 HTTP write 上限（秒）
+  openai_max_retries: 2       # SDK 自動 retry 次數（APITimeoutError/連線錯/429/5xx）。SDK 預設 2
+
   # 離線防呆燒錢上限（plan: lr-sse-reconnect-resume, 2026-06-15 CEO 拍板）。
   # 斷線不取消、跑到 checkpoint 才停 → 離線後仍可能燒 LLM。扁平 key（對齊 analyst_timeout 慣例）。
   # offline_max_checkpoint_advances: 離線後最多再跨幾個 checkpoint。1 = 跑完當前 stage 到它的
@@ -36,6 +46,21 @@ reasoning:
     live_research_dry_run: false  # true = 用 mock agents 跑 pipeline，不呼叫 LLM
     live_research_mock_bab: false  # true = Stage 1+2 用 fixture ContextMap（省 BAB LLM 成本），Stage 3-6 跑真實 LLM
     live_research_critic_publish_gate: true  # Track F F1 (sprint 2026-05-28): per-section Critic publish gate (claim-level fabrication)
+    # OpenAI gpt-5.1 Responses API hang 收斂（plan: openai-hang-timeout-convergence, 2026-06-24）。
+    # false = 現狀（四層 asyncio.wait_for 疊加，舊 wait_for 路徑原封）。
+    # true  = 收斂路徑：httpx read timeout(client 層) + SDK max_retries 當唯一 timeout 機制，
+    #         拆掉 layer1a/layer2/layer3 的冗餘 asyncio.wait_for（runtime 選路非刪碼，OFF 可 rollback）。
+    # 注意：keepalive(SO_KEEPALIVE) 無條件套、不受此 flag 控制（純防護零行為改變）。
+    # 先驗 DR writer 路徑再考慮預設開。
+    #
+    # ⚠ STARTUP-ONLY（B1，AR round-3，CEO 拍板）：此 flag 為**啟動時生效**，運行中改變需
+    #   **重啟 server** 才生效，**不支援運行中熱切換**。OpenAI client（provider + instructor）
+    #   皆為 singleton、只在首次初始化讀一次 flag 決定 timeout/retry 形態；但 call site 每次
+    #   請求動態讀 flag 決定拆不拆 asyncio.wait_for。若運行中翻動此 flag，舊 client 與 call site
+    #   選路會錯配 → timeout 保護兩邊皆失效（最壞 hang 到 SDK 預設 600s）。code 層已 fail-loud：
+    #   偵測到熱切換會 raise RuntimeError 明示需重啟（見 llm_providers/openai.py 與
+    #   reasoning/agents/base.py 的 _assert_*keepalive_flag_unchanged）。
+    openai_keepalive_timeout: false
     # 注意：不需要 checkpoint_timeout — Chat-based 模型每個 request 獨立，session state 永久保留
 
   # SEC-6: Agent Isolation Configuration
@@ -164,28 +189,3 @@ reasoning:
       enabled: true
       save_event_stream: true
       save_full_data: true
-
-source_tiers:
-  # Tier 1: Official
-  "cna.com.tw": {tier: 1, type: "official"}              # 中央社
-  "moea.gov.tw": {tier: 1, type: "government"}           # 經濟部
-
-  # Tier 2: Mainstream
-  "udn.com": {tier: 2, type: "news"}                     # 聯合新聞網
-  "news.ltn.com.tw": {tier: 2, type: "news"}             # 自由時報
-  "health.ltn.com.tw": {tier: 2, type: "news"}           # 自由時報健康
-  "art.ltn.com.tw": {tier: 2, type: "news"}              # 自由時報藝文
-  "def.ltn.com.tw": {tier: 2, type: "news"}              # 自由時報國防
-  "chinatimes.com": {tier: 2, type: "news"}              # 中時新聞網
-
-  # Tier 3: Digital / Specialty
-  "esg.businesstoday.com.tw": {tier: 3, type: "digital"} # 今周刊 ESG
-  "e-info.org.tw": {tier: 3, type: "digital"}            # 環境資訊中心
-
-mode_configs:
-  strict:
-    max_tier: 2
-  discovery:
-    max_tier: 5
-  monitor:
-    compare_tiers: [1, 5]

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-專案代碼索引工具 - 將 .py, .yaml, .md 檔案索引到 SQLite 資料庫
+專案代碼索引工具 - 將程式碼/文件/config 檔案索引到 SQLite 資料庫
 
 功能：
 - 遞迴掃描專案目錄
-- 過濾特定副檔名 (.py, .yaml, .md)
+- 過濾特定副檔名（程式碼 .py/.js/.css/.html、文件 .md、config/schema .yaml/.yml/.json/.sql/.toml/.ini/.cfg）
 - 排除隱藏資料夾、.git、__pycache__、venv 等
 - 使用 FTS5 實現高速全文搜尋
 - 增量更新機制（只更新有變動的檔案）
@@ -32,7 +32,11 @@ if sys.platform == "win32":
 
 # 設定
 DB_NAME = "project_index.db"
-INCLUDE_EXTENSIONS = {".py", ".yaml", ".yml", ".md", ".js", ".css", ".html"}
+# 程式碼 + 文件 + config/schema。不收資料檔（.jsonl/.log/.tsv/.db/.ndjson）避免灌爆索引。
+INCLUDE_EXTENSIONS = {
+    ".py", ".yaml", ".yml", ".md", ".js", ".css", ".html",
+    ".json", ".sql", ".toml", ".ini", ".cfg",
+}
 EXCLUDE_DIRS = {
     ".git",
     "__pycache__",
@@ -48,8 +52,15 @@ EXCLUDE_DIRS = {
     ".ipynb_checkpoints",
     ".obsidian",
     ".claude",
+    # 資料產物 / fixture / 模型權重 / 臨時封存 — 非搜尋目標，避免灌爆索引
+    "data",
+    "fixtures",
+    "models",
+    "temp_files_archive",
 }
 EXCLUDE_PATTERNS = {".db", ".pyc", ".pyo"}
+# 單檔大小上限：config/schema/程式碼都遠小於此；擋住任何漏網的大型資料/dump 檔
+MAX_FILE_SIZE = 256 * 1024  # 256 KB
 
 
 def get_db_path() -> Path:
@@ -141,6 +152,12 @@ def should_include_file(file_path: Path) -> bool:
         return False
     # 排除 .db 檔案
     if file_path.suffix == ".db":
+        return False
+    # 排除超過大小上限的檔（漏網的資料/dump 檔；config/schema/程式碼都遠小於此）
+    try:
+        if file_path.stat().st_size > MAX_FILE_SIZE:
+            return False
+    except OSError:
         return False
     return True
 

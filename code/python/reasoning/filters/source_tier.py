@@ -52,44 +52,32 @@ class SourceTierFilter:
         mode: str
     ) -> List[Dict[str, Any]]:
         """
-        Enrich items with tier metadata.
+        Pass-through no-op (source tier mechanism removed 2026-06).
 
-        Note: strict/discovery/monitor mode-based hard filtering has been removed
-        (2026-04). All sources (Tier 1-5) are now passed through; the prompt
-        instructions guide the LLM to apply appropriate source handling.
-        The 'mode' parameter is kept for signature compatibility but is not used
-        for filtering.
+        The Tier 1-5 authority-grading enrichment ([Tier N | type] prefix +
+        _reasoning_metadata) has been removed. Items are now returned unchanged;
+        the prompt instructions guide the LLM to apply non-graded source handling.
+        The 'mode' parameter is kept for signature compatibility but is not used.
+
+        Note: Tier 6 provenance markers ([Tier 6 | ...]) are NOT produced here —
+        they are built independently by the orchestrator / loop_engine and are
+        unaffected by this pass-through.
 
         Args:
             items: List of retrieved items (NLWeb Item format)
             mode: Research mode (kept for signature compatibility, value ignored)
 
         Returns:
-            Enriched list of items (no hard filtering applied)
+            The items unchanged (no enrichment, no hard filtering).
 
         Raises:
-            NoValidSourcesError: If no items are available at all
+            NoValidSourcesError: If no items are available at all.
         """
-        filtered_items = []
-
-        for item in items:
-            # Extract source from item
-            source = self._extract_site(item)
-
-            # Get tier info
-            tier_info = self._get_tier_info(source)
-            tier = tier_info["tier"]
-            source_type = tier_info["type"]
-
-            # Enrich item with tier metadata (no mode-based hard filtering)
-            enriched_item = self._enrich_item(item, tier, source_type, source)
-            filtered_items.append(enriched_item)
-
-        # Raise if no items at all (upstream issue, not mode filtering)
-        if not filtered_items:
+        # Empty-source guardrail retained (upstream issue, not mode filtering).
+        if not items:
             raise NoValidSourcesError("No valid sources available")
 
-        return filtered_items
+        return items
 
     def _get_tier_info(self, source: str) -> Dict[str, Any]:
         """

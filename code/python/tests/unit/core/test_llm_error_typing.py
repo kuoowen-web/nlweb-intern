@@ -76,3 +76,47 @@ def test_llmerror_falsy_contract():
     # (6) 防禦：即使有人誤塞 dict item（len>0），__bool__ 仍釘 False
     e["leaked"] = 1
     assert bool(e) is False, "__bool__ 必須無視 dict 內容恆 False（防誤存 item 翻 True）"
+
+
+# ── 收斂路徑：flag-ON 時 layer2 拆 wait_for + low-tier 安全網不變量 ──
+
+@pytest.mark.asyncio
+async def test_ask_llm_flag_on_high_tier_no_outer_wait_for():
+    """flag-ON + _use_sdk_retry=True（high-tier）：不包 asyncio.wait_for，
+    get_completion 回的 LLMError(timeout) 直接上傳（不被外層砍/改）。"""
+    async def _timeout_sentinel(*a, **k):
+        return LLMError("timeout", "transport timeout")
+    with patch("core.llm._get_provider", return_value=_mk_provider(_timeout_sentinel)), \
+         patch("core.llm.keepalive_timeout_enabled", return_value=True):
+        resp = await ask_llm("p", {}, provider="openai", timeout=60, _use_sdk_retry=True)
+    assert isinstance(resp, LLMError)
+    assert resp.error_kind == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_ask_llm_flag_on_low_tier_keeps_asyncio_safety_net():
+    """flag-ON + 不傳 _use_sdk_retry（low-tier）：仍保留外層 asyncio.wait_for 安全網（60s）。
+    用一個真的 hang 的 get_completion 驗 wait_for 仍會 fire → LLMError(timeout)。"""
+    async def _hang_forever(*a, **k):
+        import asyncio
+        await asyncio.sleep(10)
+        return {"foo": "bar"}
+    with patch("core.llm._get_provider", return_value=_mk_provider(_hang_forever)), \
+         patch("core.llm.keepalive_timeout_enabled", return_value=True):
+        resp = await ask_llm("p", {}, provider="openai", timeout=1)  # 1s 安全網 fire
+    assert isinstance(resp, LLMError)
+    assert resp.error_kind == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_ask_llm_flag_off_low_tier_unchanged():
+    """flag-OFF：low-tier 行為逐字等價現狀（舊 wait_for 路徑）。"""
+    async def _hang_forever(*a, **k):
+        import asyncio
+        await asyncio.sleep(10)
+        return {"foo": "bar"}
+    with patch("core.llm._get_provider", return_value=_mk_provider(_hang_forever)), \
+         patch("core.llm.keepalive_timeout_enabled", return_value=False):
+        resp = await ask_llm("p", {}, provider="openai", timeout=1)
+    assert isinstance(resp, LLMError)
+    assert resp.error_kind == "timeout"

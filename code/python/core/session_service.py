@@ -604,6 +604,8 @@ class SessionService:
         'begin-nlweb-response', 'end-nlweb-response', 'complete',
         'error', 'remember', 'time_filter_relaxed',
         'author_search_no_results', 'clarification_required',
+        'low_relevance_warning', 'low_keyword_match_warning',
+        'empty_results',
     })
 
     @classmethod

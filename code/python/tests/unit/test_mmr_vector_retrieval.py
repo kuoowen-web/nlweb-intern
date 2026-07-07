@@ -54,8 +54,9 @@ def aggregator_keep_scores(value):
 
     Restoring (not popping) is required so these tests are deterministic whether
     the whole suite runs with the flag globally on or off, under any test order.
-    Legacy 4/5-tuple contract tests pin it OFF (None); the 6-tuple contract test
-    pins it ON ('1').
+    Legacy 4/5-tuple contract tests pin it OFF ('0'); the 6-tuple contract test
+    pins it ON ('1'). Note: since 2026-07-05 the code default (env unset) is ON,
+    so legacy tests must pin '0' explicitly — None no longer means off.
     """
     prev = os.environ.get('AGGREGATOR_KEEP_SCORES')
     if value is None:
@@ -174,7 +175,7 @@ class TestSearchReturnsVectorWhenRequested(unittest.TestCase):
         # no current loop, so get_event_loop() raises RuntimeError on Python 3.11.
         loop = asyncio.new_event_loop()
         try:
-            with aggregator_keep_scores(None):  # legacy 4/5-tuple contract
+            with aggregator_keep_scores('0'):  # explicitly off: legacy 4/5-tuple contract
                 result = loop.run_until_complete(
                     client.search(
                         "test query",
@@ -256,7 +257,7 @@ class TestSearchBackwardCompatNoVector(unittest.TestCase):
         # Dedicated event loop — immune to pytest-asyncio main-thread loop pollution.
         loop = asyncio.new_event_loop()
         try:
-            with aggregator_keep_scores(None):  # legacy 4-tuple contract
+            with aggregator_keep_scores('0'):  # explicitly off: legacy 4-tuple contract
                 result = loop.run_until_complete(
                     client.search("test query", site=[], num_results=10)
                     # No include_vectors kwarg
@@ -535,7 +536,7 @@ class TestSearchSQLIncludesEmbeddingWhenVectorsRequested(unittest.TestCase):
         # Dedicated event loop — immune to pytest-asyncio main-thread loop pollution.
         loop = asyncio.new_event_loop()
         try:
-            with aggregator_keep_scores(None):  # legacy 5-tuple contract
+            with aggregator_keep_scores('0'):  # explicitly off: legacy 5-tuple contract
                 results = loop.run_until_complete(
                     client.search("query", site=[], include_vectors=True)
                 )
@@ -580,7 +581,7 @@ class TestSearchSQLIncludesEmbeddingWhenVectorsRequested(unittest.TestCase):
         # Dedicated event loop — immune to pytest-asyncio main-thread loop pollution.
         loop = asyncio.new_event_loop()
         try:
-            with aggregator_keep_scores(None):  # legacy 4-tuple contract
+            with aggregator_keep_scores('0'):  # explicitly off: legacy 4-tuple contract
                 results = loop.run_until_complete(
                     client.search("query", site=[], num_results=10)
                 )

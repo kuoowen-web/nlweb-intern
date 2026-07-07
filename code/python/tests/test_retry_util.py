@@ -28,6 +28,7 @@ from core import retry_util
 from core.retry_util import (
     calculate_backoff,
     is_retryable_exception,
+    mask_sensitive_url_params,
     retry_async,
 )
 
@@ -155,6 +156,87 @@ class TestRetryAsync:
 
 
 # ==============================================================================
+# mask_sensitive_url_params (2026-06-20 prod incident: CSE key printed in log)
+# ==============================================================================
+
+class TestMaskSensitiveUrlParams:
+    def test_key_value_masked_others_preserved(self):
+        url = "https://www.googleapis.com/customsearch/v1?key=AIzaSySECRET123&cx=abc&q=test"
+        masked = mask_sensitive_url_params(url)
+        assert "AIzaSySECRET123" not in masked
+        assert "key=***" in masked
+        # Non-sensitive params stay diagnostic.
+        assert "cx=abc" in masked
+        assert "q=test" in masked
+
+    def test_api_key_apikey_token_masked_case_insensitive(self):
+        text = "GET https://api.test/v1?API_KEY=abc123&Token=tok456&apikey=zzz789&page=2"
+        masked = mask_sensitive_url_params(text)
+        for secret in ("abc123", "tok456", "zzz789"):
+            assert secret not in masked
+        assert "API_KEY=***" in masked
+        assert "Token=***" in masked
+        assert "apikey=***" in masked
+        assert "page=2" in masked
+
+    def test_api_key_not_mangled_by_key_rule(self):
+        # `api_key` must be masked as a whole, not partially re-matched by `key`.
+        assert mask_sensitive_url_params("?api_key=secret") == "?api_key=***"
+
+    def test_no_sensitive_params_unchanged(self):
+        text = "google_cse: HTTP 429 for url 'https://x.test/v1?cx=abc&q=news'"
+        assert mask_sensitive_url_params(text) == text
+
+    def test_no_false_positive_on_key_suffix_words(self):
+        # `monkey=` is not a credential param; word boundary must protect it.
+        text = "https://x.test/v1?monkey=banana"
+        assert mask_sensitive_url_params(text) == text
+
+
+class TestRetryLogsMaskSensitiveUrl:
+    """The retry log lines print `{exc}`, and httpx embeds the full request URL
+    (including `key=...`) in HTTPStatusError messages — both log points must
+    mask the credential while keeping the rest of the error text."""
+
+    _URL = "https://www.googleapis.com/customsearch/v1?key=AIzaSySECRET&cx=abc&q=x"
+
+    def _cse_429(self) -> httpx.HTTPStatusError:
+        request = httpx.Request("GET", self._URL)
+        response = httpx.Response(429, request=request)
+        return httpx.HTTPStatusError(
+            f"Client error '429 Too Many Requests' for url '{self._URL}'",
+            request=request,
+            response=response,
+        )
+
+    @pytest.mark.asyncio
+    async def test_warning_log_masks_key(self):
+        func = AsyncMock(side_effect=[self._cse_429(), "ok"])
+        with patch.object(retry_util.logger, "warning") as warn:
+            result = await retry_async(func, max_retries=1, description="google_cse")
+        assert result == "ok"
+        logged = " ".join(str(c.args[0]) for c in warn.call_args_list)
+        assert "AIzaSySECRET" not in logged
+        assert "key=***" in logged
+        # Error stays diagnostic (no silent fail): label + status still present.
+        assert "google_cse" in logged
+        assert "429" in logged
+
+    @pytest.mark.asyncio
+    async def test_exhausted_error_log_masks_key(self):
+        func = AsyncMock(side_effect=self._cse_429())
+        with patch.object(retry_util.logger, "error") as err_log:
+            with pytest.raises(httpx.HTTPStatusError) as ei:
+                await retry_async(func, max_retries=1, description="google_cse")
+        # Raised exception itself is untouched (original message preserved).
+        assert "AIzaSySECRET" in str(ei.value)
+        logged = " ".join(str(c.args[0]) for c in err_log.call_args_list)
+        assert "AIzaSySECRET" not in logged
+        assert "key=***" in logged
+        assert "429" in logged
+
+
+# ==============================================================================
 # Part A: core.embedding.get_embedding wrapper retry
 # ==============================================================================
 
@@ -204,21 +286,44 @@ class TestEmbeddingWrapperRetry:
 
     @pytest.mark.asyncio
     async def test_openrouter_429_exhausted_reraises(self):
+        """429 耗盡 + DeepInfra fallback 也失敗 → re-raise 原 OpenRouter error。
+
+        2026-06-19 起 get_embedding 行為改為：OpenRouter retry 耗盡先 fallback
+        DeepInfra，不再立即 raise；只有 fallback 也失敗才 raise 原 OpenRouter
+        error（對應 prod log「DeepInfra fallback also failed; raising original
+        OpenRouter error」）。DeepInfra 必須 mock 失敗——否則走不到 re-raise 分支
+        （fallback 成功 case 由 tests/unit/core/test_embedding_deepinfra_fallback.py
+        ::test_openrouter_exhausts_falls_back_to_deepinfra_success 覆蓋）。
+        """
         from core import embedding as emb_mod
 
+        or_err = _http_status_error(429)
+
         async def always_429(text, model=None, timeout=30.0):
-            raise _http_status_error(429)
+            raise or_err
+
+        # fallback 用「不同型別」的錯誤（timeout），驗 re-raise 的是原 OpenRouter
+        # error 而非 DeepInfra 的錯誤（identity assert，不只 type match）。
+        di_mock = AsyncMock(side_effect=httpx.TimeoutException("deepinfra down"))
 
         with self._patch_config(), \
              patch.object(emb_mod.CONFIG, "is_development_mode", return_value=False, create=True), \
              patch.object(emb_mod.CONFIG, "get_embedding_provider",
                           return_value=type("C", (), {"model": "qwen/qwen3-embedding-4b"})(),
                           create=True), \
+             patch.object(emb_mod.CONFIG, "embedding_fallback_provider", "deepinfra", create=True), \
              patch("embedding_providers.openrouter_embedding.get_openrouter_embedding",
                    side_effect=always_429), \
+             patch("embedding_providers.deepinfra_embedding.get_deepinfra_embedding",
+                   di_mock), \
              patch.object(retry_util.asyncio, "sleep", new=AsyncMock(return_value=None)):
-            with pytest.raises(httpx.HTTPStatusError):
+            with pytest.raises(httpx.HTTPStatusError) as ei:
                 await emb_mod.get_embedding("hello", provider="openrouter")
+
+        # 原 OpenRouter error 原樣浮出（no silent fail、不被 DeepInfra 錯誤覆蓋）
+        assert ei.value is or_err
+        # fallback 真的被打過（1 initial + 3 retries），不是被跳過
+        assert di_mock.await_count == 4
 
     @pytest.mark.asyncio
     async def test_openrouter_200_error_retried_in_wrapper(self):

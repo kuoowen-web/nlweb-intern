@@ -98,11 +98,6 @@ class ConfigLoader:
         rules = config.get("mode_compliance_rules", {})
         return rules.get(mode, rules.get("discovery", {}))
 
-    def get_tier_definitions(self) -> Dict[int, Dict[str, Any]]:
-        """Get source tier definitions."""
-        config = self.load("source_filtering")
-        return config.get("tier_definitions", {})
-
     def get(self, config_name: str, key: str, default: Any = None) -> Any:
         """
         Get a specific key from a config file.

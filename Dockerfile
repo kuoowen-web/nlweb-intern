@@ -10,11 +10,29 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Copy requirements file
-COPY code/python/requirements.txt .
+# Install uv (U2: pip install method, simplest in slim image — no curl needed)
+RUN pip install --no-cache-dir uv
 
-# Install Python packages
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy dependency manifests (uv.lock pins everything)
+COPY code/python/pyproject.toml code/python/uv.lock ./
+
+# Install the EXACT locked dependency set (F1: frozen lock, never an unlocked
+# re-resolve of pyproject.toml). `uv export --frozen` reads uv.lock verbatim
+# (fails loud if the lock is stale rather than silently drifting) and emits a
+# fully-pinned requirements file; `uv pip install --system` installs it into the
+# system site-packages so the runtime stage's
+# `COPY --from=builder /usr/local/lib/python3.11/site-packages` keeps working unchanged.
+# --no-dev = core deps only (prod default, no dev group).
+#
+# F8 = B HARD STEP: the preferred LLM provider's extra MUST be installed in prod.
+# Current prod preferred_endpoint = openai (config/config_llm.yaml), and openai is a
+# CORE/always-installed dependency — so NO `--extra` is needed today. If prod's
+# preferred is ever switched to anthropic/gemini, add the matching `--extra <name>`
+# to the `uv export` line below (e.g. `--extra gemini`), or the container will
+# fail-hard at startup by design (fail-hard is the safety net; this line is the
+# primary defense — see Task 4 Step 3b / F8).
+RUN uv export --frozen --no-dev --no-hashes -o requirements-prod.txt && \
+    uv pip install --system --no-cache -r requirements-prod.txt
 
 # Stage 2: Runtime stage
 FROM python:3.11-slim

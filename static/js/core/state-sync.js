@@ -56,8 +56,8 @@ import {
 } from '../features/sessions-list.js';
 import {
     clearConversationHistory, clearAccumulatedArticles, clearCurrentConversationId
-} from '../features/search.js';
-import { clearChatHistory } from '../features/chat.js';
+} from '../features/search.js?v=20260705c';
+import { clearChatHistory } from '../features/chat.js?v=20260705c';
 import { clearPinnedMessages, clearPinnedNewsCards } from '../features/pins.js';
 import {
     clearResearchReport, clearArgumentGraph, clearChainAnalysis

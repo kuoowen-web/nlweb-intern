@@ -837,7 +837,7 @@ class VectorDBClient:
                                 #  retrieval_scores] so downstream XGBoost gets
                                 # non-zero retrieval features. Off -> 4/5-tuple
                                 # exactly as before.
-                                if os.environ.get('AGGREGATOR_KEEP_SCORES', '0') == '1':
+                                if os.environ.get('AGGREGATOR_KEEP_SCORES', '1') == '1':
                                     merged_result = [
                                         data["url"],
                                         merged_json_str,

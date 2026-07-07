@@ -63,3 +63,36 @@ async def test_legacy_genuine_empty_still_raises_empty():
         with pytest.raises(ValueError) as exc_info:
             await agent._legacy_call_llm_validated("p", _Schema, level="low")
     assert "empty response" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_legacy_flag_on_passes_use_sdk_retry_and_no_outer_wait_for():
+    """flag-ON：layer1a 不包外層 wait_for + 以 _use_sdk_retry=True 呼叫 ask_llm。
+    ask_llm 回 LLMError(timeout) → 既有 sentinel 分型 → raise TimeoutError（不誤標 empty）。"""
+    agent = _agent()
+    captured = {}
+    async def _fake_ask_llm(*a, **k):
+        captured.update(k)
+        return LLMError("timeout", "transport timeout")
+    with patch("reasoning.agents.base.ask_llm", new=_fake_ask_llm), \
+         patch("reasoning.agents.base.keepalive_timeout_enabled", return_value=True):
+        with pytest.raises(TimeoutError):
+            await agent._legacy_call_llm_validated("p", _Schema, level="low")
+    assert captured.get("_use_sdk_retry") is True, "high-tier 必須帶 _use_sdk_retry=True"
+
+
+@pytest.mark.asyncio
+async def test_legacy_flag_off_unchanged_inner_timeout_path():
+    """flag-OFF：維持 RSN-2 inner_timeout 舊路徑（不傳 _use_sdk_retry，包外層 wait_for）。"""
+    agent = _agent()
+    captured = {}
+    async def _fake_ask_llm(*a, **k):
+        captured.update(k)
+        return LLMError("timeout", "timed out")
+    with patch("reasoning.agents.base.ask_llm", new=_fake_ask_llm), \
+         patch("reasoning.agents.base.keepalive_timeout_enabled", return_value=False):
+        with pytest.raises(TimeoutError):
+            await agent._legacy_call_llm_validated("p", _Schema, level="low")
+    # flag-OFF：仍傳 inner timeout（self.timeout-10），不帶 _use_sdk_retry
+    assert captured.get("_use_sdk_retry") in (None, False)
+    assert "timeout" in captured  # 舊路徑傳 inner_timeout

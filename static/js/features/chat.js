@@ -67,10 +67,10 @@
 import {
     handlePostStreamingRequest,
     escapeHTML,
-    setProcessingState, cancelAllActiveRequests,
+    setProcessingState, cancelAllActiveRequests, getSearchGenerationId, isCurrentGeneration,
     getConversationHistory, getAccumulatedArticles, getCurrentConversationId,
     getCurrentFreeConvAbortController, setCurrentFreeConvAbortController
-} from './search.js';
+} from './search.js?v=20260705c';
 import { getResearchReport } from './research.js';
 import {
     getPinnedMessages, setPinnedMessages,
@@ -146,6 +146,9 @@ export async function performFreeConversation(query) {
         chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
     }
 
+    // Late-message generation gate token — function scope 宣告，供 try 尾端 caller guard
+    // 與 catch guard 共用（catch 讀不到 try 內的 const）。
+    let myChatGeneration = null;
     try {
         // Build conversation context
         const searchQueries = getConversationHistory().slice();
@@ -204,16 +207,26 @@ export async function performFreeConversation(query) {
 
         // Bug #23: Cancel any previous active requests and create abort controller
         cancelAllActiveRequests();
+        // Late-message generation gate：在 bump（cancelAllActiveRequests 內）之後賦值，
+        // 與 performSearch 的 mySearchGeneration 捕捉時序對稱。chat 遲到 SSE 被後續
+        // search/chat supersede 時，inline sink 靠此 token 攔截。
+        myChatGeneration = getSearchGenerationId();
         setCurrentFreeConvAbortController(new AbortController());
         setProcessingState(true);
 
         // Use fetch with POST for streaming (handles large payloads)
-        let chatData = await handlePostStreamingRequest('/ask', requestBody, query, getCurrentFreeConvAbortController().signal);
+        let chatData = await handlePostStreamingRequest('/ask', requestBody, query, getCurrentFreeConvAbortController().signal, {}, myChatGeneration);
+        // Late-message generation gate（caller 端）：await 返回後本 chat 已被後續
+        // search/chat supersede 時，下面整串 shared-state 寫入（controller / chat DOM /
+        // processingState / saveCurrentSession）現在都屬於「接管的新請求」——stale 返回時
+        // 一律不得碰。責任劃分：stale 時仍負責清理**自己建立的** typingDiv（否則同 id
+        // 孤兒轉圈永久殘留），只跳過 shared-state 寫入。用 isCurrentGeneration 純函式：
+        // null/undefined token = opt-out 放行（真錯誤照走既有處理），與 Task 1 語意統一。
+        if (!isCurrentGeneration(myChatGeneration, getSearchGenerationId())) { typingDiv.remove(); return; }
         setCurrentFreeConvAbortController(null);
 
-        // Remove typing indicator
-        const typingEl = document.getElementById('chatTypingIndicator');
-        if (typingEl) typingEl.remove();
+        // Remove typing indicator（清本函式自己建立的節點，避免同 id 重複造成孤兒）
+        typingDiv.remove();
 
         // Add assistant response to chat
         if (chatData.answer) {
@@ -227,11 +240,17 @@ export async function performFreeConversation(query) {
         // 自動建立/更新 session
         if (typeof window.saveCurrentSession === 'function') window.saveCurrentSession();
     } catch (error) {
+        // Late-message generation gate（catch 端）：被 supersede 的 stale chat 其 fetch
+        // 被 abort → 走這裡。stale 時同樣不得碰 shared state（controller / processingState
+        // / chat DOM）——那些屬於接管的新請求。責任劃分：stale 時仍清自己建立的 typingDiv
+        // （防同 id 孤兒轉圈），只跳過 shared-state 寫入。用 isCurrentGeneration 純函式：
+        // null/undefined token（錯誤發生在 myChatGeneration 賦值前）= opt-out 放行，讓真
+        // 錯誤照走既有處理，不誤判 stale 靜默吞錯。
+        if (!isCurrentGeneration(myChatGeneration, getSearchGenerationId())) { typingDiv.remove(); return; }
         setCurrentFreeConvAbortController(null);
         setProcessingState(false); // Bug #23
-        // Remove typing indicator on error
-        const typingElErr = document.getElementById('chatTypingIndicator');
-        if (typingElErr) typingElErr.remove();
+        // Remove typing indicator on error（清本函式自己建立的節點）
+        typingDiv.remove();
 
         if (error.name === 'AbortError') {
             console.log('[Free Conversation] Request aborted');
@@ -255,6 +274,9 @@ export function addChatMessage(role, content, referenceInfo = null, existingMsgI
     const msgId = existingMsgId || `msg-${Date.now()}-${_messageIdCounter++}`;
     messageDiv.setAttribute('data-msg-id', msgId);
 
+    const roleIcon = role === 'user'
+        ? '<img src="/static/images/icon-role-user.svg" alt="你" class="inline-icon">'
+        : '<img src="/static/images/icon-role-dubao.svg" alt="讀豹" class="inline-icon">';
     const headerText = role === 'user' ? '你' : '讀豹';
 
     // For assistant messages, use marked.js for full Markdown rendering
@@ -270,7 +292,7 @@ export function addChatMessage(role, content, referenceInfo = null, existingMsgI
     const isPinned = getPinnedMessages().some(p => p.msgId === msgId);
 
     let messageHTML = `
-        <div class="chat-message-header">${headerText}</div>
+        <div class="chat-message-header">${roleIcon} ${headerText}</div>
         <div class="chat-message-content-wrapper">
             <div class="chat-message-bubble">${formattedContent}</div>
             <button class="chat-message-pin ${isPinned ? 'pinned' : ''}" data-msg-id="${msgId}" title="${isPinned ? '取消釘選' : '釘選訊息'}"><img src="/static/images/Icon_Pin.png" alt="" class="inline-icon"></button>
@@ -278,7 +300,7 @@ export function addChatMessage(role, content, referenceInfo = null, existingMsgI
     `;
 
     if (referenceInfo && role === 'assistant') {
-        messageHTML += `<div class="chat-reference-info"><span class="emoji-bw">📚</span> ${referenceInfo}</div>`;
+        messageHTML += `<div class="chat-reference-info"><img src="/static/images/icon-citation.svg" alt="參考資訊" class="inline-icon"> ${referenceInfo}</div>`;
     }
 
     messageDiv.innerHTML = messageHTML;

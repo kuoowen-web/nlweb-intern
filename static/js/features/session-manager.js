@@ -132,7 +132,7 @@ export class SessionManager {
             try {
                 if (session._serverId) {
                     // Update existing
-                    await this._auth.authenticatedFetch(`/api/sessions/${session._serverId}`, {
+                    const putRes = await this._auth.authenticatedFetch(`/api/sessions/${session._serverId}`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -146,8 +146,13 @@ export class SessionManager {
                             pinned_news_cards: session.pinnedNewsCards,
                             research_report: session.researchReport,
                             conversation_id: session.conversationId,
+                            lr_dialog_snapshot: session.lrDialogSnapshot,
                         })
                     });
+                    if (!putRes.ok) {
+                        // no-silent-fail: a failed PUT means PG keeps the stale/empty snapshot.
+                        console.error('[SessionManager] PUT save failed — session NOT persisted to PG. status=' + putRes.status + ' sid=' + session._serverId + ' snapshotLen=' + (Array.isArray(session.lrDialogSnapshot) ? session.lrDialogSnapshot.length : 'n/a'));
+                    }
                 } else {
                     // DEFENSIVE: detect _serverId-loss regression. If POST fires twice in
                     // 5s for the same in-memory session id, _serverId was lost between calls.
@@ -179,6 +184,7 @@ export class SessionManager {
                             pinned_news_cards: session.pinnedNewsCards,
                             research_report: session.researchReport,
                             conversation_id: session.conversationId,
+                            lr_dialog_snapshot: session.lrDialogSnapshot,
                         })
                     });
                     const data = await res.json();

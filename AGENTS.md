@@ -91,7 +91,7 @@
 | ---------------------- | ------- | ------------------------------------ |
 | **M0: Indexing**       | 🟢 完成   | Crawler (7 Parser, Subprocess 隔離) + Indexing Pipeline |
 | **M1: Input**          | 🟢 完成   | Query Decomposition ✅ / Guardrails Phase 1+2 ✅ |
-| **M2: Retrieval**      | 🟡 部分完成 | Internal Search ✅ / Web Search ❌     |
+| **M2: Retrieval**      | 🟡 部分完成 | Internal Search ✅ / Web Search 🟡（Reasoning gap resolution 已上 prod；通用 retrieval 刻意不混外網） |
 | **M3: Ranking**        | 🟢 完成   | LLM + XGBoost + MMR（BM25 已移除）    |
 | **M4: Reasoning**      | 🟢 完成   | Actor-Critic + 4 Agents + Tier 6 API |
 | **M5: Output**         | 🟡 部分完成 | API + Frontend + Help Center + KG ✅ / Visualizer ❌ |

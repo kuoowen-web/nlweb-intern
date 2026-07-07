@@ -23,6 +23,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Awaitable, Callable, Optional, TypeVar
 
 import httpx
@@ -36,6 +37,29 @@ T = TypeVar("T")
 # HTTP status codes that indicate a transient, retryable upstream condition.
 # 429 = rate limited (the prod engine_overloaded case), 5xx / 529 = overloaded.
 RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 529)
+
+# Sensitive URL query-parameter names whose values must never reach app logs.
+# Prod incident 2026-06-20: Google CSE 429 made httpx embed the full request URL
+# (including `key=AIzaSy...`) in the exception message, which our retry log lines
+# then printed verbatim. Longer names first so `api_key` wins over `key`.
+_SENSITIVE_QUERY_PARAMS = ("api_key", "apikey", "token", "key")
+
+_SENSITIVE_PARAM_RE = re.compile(
+    r"\b(" + "|".join(_SENSITIVE_QUERY_PARAMS) + r")=([^&\s'\"]+)",
+    re.IGNORECASE,
+)
+
+
+def mask_sensitive_url_params(text: str) -> str:
+    """
+    Mask sensitive query-parameter values (key/api_key/apikey/token, case-
+    insensitive) in any URL embedded in `text`, replacing the value with `***`.
+
+    The rest of the text — error class, status code, URL path, non-sensitive
+    params — is preserved so the log line stays diagnostic (no silent fail /
+    no information loss beyond the credential itself).
+    """
+    return _SENSITIVE_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", text)
 
 
 def calculate_backoff(attempt: int, base: float = 1.0, cap: float = 30.0) -> float:
@@ -122,18 +146,22 @@ async def retry_async(
                 # Non-transient error: do not retry, surface immediately.
                 raise
 
+            # Exception text may embed the full request URL (httpx does this);
+            # mask credential query params before it reaches the log.
+            exc_text = mask_sensitive_url_params(f"{type(exc).__name__}: {exc}")
+
             if attempt >= max_retries:
                 # Retries exhausted — surface the original error (no silent fail).
                 logger.error(
                     f"{description}: retries exhausted after {max_retries + 1} attempts; "
-                    f"last error: {type(exc).__name__}: {exc}"
+                    f"last error: {exc_text}"
                 )
                 raise
 
             delay = calculate_backoff(attempt, base=base_delay, cap=backoff_cap)
             logger.warning(
                 f"{description}: attempt {attempt + 1}/{max_retries + 1} failed with "
-                f"{type(exc).__name__}: {exc}; retrying in {delay:.1f}s"
+                f"{exc_text}; retrying in {delay:.1f}s"
             )
             if on_retry is not None:
                 on_retry(attempt, exc, delay)

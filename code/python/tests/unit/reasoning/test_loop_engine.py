@@ -1557,6 +1557,94 @@ async def test_kg_merge_dedup_flag_is_reset_by_per_run_reset(monkeypatch):
     assert len(captured) == 2, "reset 後第二次 run 的 KG 降級旁白被永久靜音（reset wiring 斷了）"
 
 
+# ============================================================================
+# 檢索出錯降級旁白（2026-06-20 prod：embedding 雙 provider 同失敗 →
+# retriever_search 拋例外 → _execute_search silent 跳過該筆查詢）
+# 鏡像 O5a KG merge 旁白 test pattern：call-path / per-run dedup / reset wiring。
+# ============================================================================
+
+def _make_retrieval_error_engine(monkeypatch):
+    """Helper: retriever_search 持久拋例外的 engine + narration capture。
+
+    query 刻意不含 INTL_KEYWORDS（handler 是 MagicMock，enable_web_search 為
+    truthy mock — 含國際 keyword 會誤觸 Track C C3 fallback web 路徑）。
+    """
+    async def boom_search(**kwargs):
+        raise RuntimeError("retrieval backend down")
+
+    monkeypatch.setattr(
+        "reasoning.live_research.loop_engine.retriever_search", boom_search,
+    )
+    engine = _make_e3_engine()
+    engine._reset_per_run_dedup_flags()  # 直呼 _execute_search 不經 run_loop
+    captured = []
+
+    async def fake_emit(text):
+        captured.append(text)
+    engine._emit_narration = fake_emit
+    return engine, captured
+
+
+def _retrieval_error_seed():
+    return ContextMapSearchSeed(
+        query="台灣光電 土地爭議",
+        target_topic_id="t1",
+        rationale="r",
+        source_strategy="internal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_retrieval_error_emits_degraded_narration(monkeypatch):
+    """call-path：retriever_search 拋例外時 narration 真的被 emit，且 non-fatal
+    （_execute_search 正常 return 空結果，不往外炸）。"""
+    from reasoning.live_research import lr_copy
+
+    engine, captured = _make_retrieval_error_engine(monkeypatch)
+
+    formatted, source_map = await engine._execute_search([_retrieval_error_seed()])
+
+    assert formatted == "（未找到相關結果）"
+    assert source_map == {}
+    assert captured == [lr_copy.RETRIEVAL_ERROR_DEGRADED_NARRATION], (
+        "檢索例外被 catch 時必須 emit 降級旁白（不可 silent skip）"
+    )
+
+
+@pytest.mark.asyncio
+async def test_retrieval_error_narration_deduped_per_run(monkeypatch):
+    """per-run dedup：持久性故障（每 seed × 每 iteration 都拋）同一 run 只播一次。"""
+    engine, captured = _make_retrieval_error_engine(monkeypatch)
+
+    # 同一 run 內：單次呼叫含兩個 seed + 第二次呼叫（模擬下一輪 iteration）
+    await engine._execute_search([_retrieval_error_seed(), _retrieval_error_seed()])
+    await engine._execute_search([_retrieval_error_seed()])
+
+    assert len(captured) == 1, f"per-run 應只播一次，實得 {len(captured)} 次"
+
+
+@pytest.mark.asyncio
+async def test_retrieval_error_dedup_flag_is_reset_by_per_run_reset(monkeypatch):
+    """reset wiring：flag 必須由 _reset_per_run_dedup_flags 重置（非僅 __init__），
+    否則 engine 跨 run 重用時第二次 run 的降級旁白被永久靜音。"""
+    engine, captured = _make_retrieval_error_engine(monkeypatch)
+
+    # 第一次 run：emit 一次後 flag=True
+    await engine._execute_search([_retrieval_error_seed()])
+    assert len(captured) == 1
+    assert engine._retrieval_error_degraded_narrated is True
+
+    # 模擬「新一輪 run 開始」——run_loop 入口會呼叫 _reset_per_run_dedup_flags
+    engine._reset_per_run_dedup_flags()
+    assert engine._retrieval_error_degraded_narrated is False, (
+        "flag 未被 _reset_per_run_dedup_flags 重置 — 它沒進 reset path（只放 __init__）"
+    )
+
+    # 第二次 run：reset 後必須能再 emit 一次
+    await engine._execute_search([_retrieval_error_seed()])
+    assert len(captured) == 2, "reset 後第二次 run 的降級旁白被永久靜音（reset wiring 斷了）"
+
+
 @pytest.mark.asyncio
 async def test_run_mini_reasoning_skips_kg_merge_on_reject_critic(monkeypatch):
     """Critic REJECT → KG 不入 state.knowledge_graph (D-AMB-4 LOCKED)."""

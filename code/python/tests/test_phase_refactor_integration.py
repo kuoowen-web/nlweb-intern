@@ -150,7 +150,9 @@ def make_orchestrator(analyst_responses=None, critic_responses=None):
     orch.critic = MagicMock()
     orch.critic.review = mock_critic_review
 
-    # Source filter
+    # Source filter (source tier mechanism removed 2026-06; filter_and_enrich
+    # is now a pass-through no-op. Mock retained as a stub target; the test does
+    # not assert tier behavior.)
     orch.source_filter = MagicMock()
     orch.source_filter.filter_and_enrich = MagicMock(return_value=[])
 

@@ -518,6 +518,8 @@ class NLWebHandler:
                 search_filters = []
                 self.time_filter_relaxed = False
                 self.author_search_no_results = False
+                self.low_relevance_warning = False
+                self.low_keyword_match_warning = False
 
                 if temporal_range and temporal_range.get('is_temporal'):
                     start_date = temporal_range.get('start_date')
@@ -621,6 +623,31 @@ class NLWebHandler:
                     except Exception as e:
                         logger.warning(f"Failed to send time_filter_relaxed message: {e}")
 
+                # Low-relevance warning (Signal A): fallback safety net — provider judged
+                # the overall result relevance low (highest vector_score below the warn band).
+                # Does not block results; frontend renders a banner above the result list.
+                if getattr(self, 'low_relevance_warning', False):
+                    logger.warning("[WARN] low_relevance_warning — notifying frontend")
+                    try:
+                        await self.message_sender.send_message({
+                            "message_type": "low_relevance_warning",
+                            "content": "以下結果與您的搜尋可能關聯性較鬆，建議交叉參考其他來源"
+                        })
+                    except Exception as e:
+                        logger.warning(f"Failed to send low_relevance_warning message: {e}")
+
+                # Low-keyword-match warning (Signal B): fewer than the minimum number of
+                # pg_bigm keyword hits. Independent of Signal A — both can fire together.
+                if getattr(self, 'low_keyword_match_warning', False):
+                    logger.warning("[WARN] low_keyword_match_warning — notifying frontend")
+                    try:
+                        await self.message_sender.send_message({
+                            "message_type": "low_keyword_match_warning",
+                            "content": "以下結果與關鍵字的字面吻合度較低，建議留意是否切合您的需求"
+                        })
+                    except Exception as e:
+                        logger.warning(f"Failed to send low_keyword_match_warning message: {e}")
+
                 # Author search returned no results — strict filter, don't show unrelated articles
                 if getattr(self, 'author_search_no_results', False):
                     author_name = author_search.get('author_name', '') if author_search else ''
@@ -632,6 +659,10 @@ class NLWebHandler:
                         })
                     except Exception as e:
                         logger.warning(f"Failed to send author_search_no_results message: {e}")
+
+                # Empty-result honest notice (non-author): a silent empty page is the
+                # worst UX — say explicitly that the corpus has nothing (CDE plan §E).
+                await self._maybe_emit_empty_results_notice(items)
 
                 self.final_retrieved_items = items
 
@@ -656,6 +687,27 @@ class NLWebHandler:
                 self.retrieval_done_event.set()
 
         logger.info("Preparation phase completed")
+
+    async def _maybe_emit_empty_results_notice(self, items):
+        """Honest empty-result notice: fires only when the final merged result list
+        (public + private) is empty AND this is not an author search.
+
+        Mutually exclusive with the other retrieval notices (CDE plan §E):
+        Signals A/B never fire on an empty set (compute_* return False on []),
+        and author-search empty results keep the more specific
+        author_search_no_results copy emitted above — so at most one notice
+        reaches the user. Graceful degradation, never silent: the emit itself
+        logs on failure.
+        """
+        if len(items) == 0 and not getattr(self, 'author_search_no_results', False):
+            logger.warning("[EMPTY] Retrieval returned 0 final items — notifying frontend")
+            try:
+                await self.message_sender.send_message({
+                    "message_type": "empty_results",
+                    "content": "在目前的資料範圍中沒有找到相關內容。這個主題可能尚未被收錄，或不在本系統的新聞涵蓋範圍內。"
+                })
+            except Exception as e:
+                logger.warning(f"Failed to send empty_results message: {e}")
 
     def decontextualizeQuery(self):
         if (len(self.prev_queries) < 1):

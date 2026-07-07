@@ -154,6 +154,7 @@ class BABLoopEngine:
         self._revise_degraded_narrated = False            # M-5: revise 降級旁白
         self._search_required_degraded_narrated = False   # M-5: SEARCH_REQUIRED 補搜降級旁白
         self._kg_merge_degraded_narrated = False          # O5a-(2): KG merge 降級旁白
+        self._retrieval_error_degraded_narrated = False   # 檢索出錯（例外跳過該筆查詢）降級旁白
         # 外部來源無標題補標題 per-run cap 計數器（每 run 最多 TITLE_BACKFILL_CAP 次 LLM
         # call，超過用 source_domain）。per-run 重置 = engine 重用時下一輪重新配額。
         self._title_backfill_count = 0
@@ -460,6 +461,11 @@ class BABLoopEngine:
             seed_items_count = 0  # F-9 per-seed local count (不 cross-seed 累計)
             try:
                 if seed.source_strategy in ("internal", "both"):
+                    # NOTE: deliberately NO handler= here. Per-loop retrieval (num_results=5,
+                    # web-augmented via Track C) must NOT trigger the low-relevance/low-keyword
+                    # warning — those fire only on the initial prepare() in-corpus retrieval
+                    # (research-start baseline). Passing handler= would re-emit warnings every
+                    # loop (5 results always < KEYWORD_HIT_MIN) and mislead when web augments.
                     items = await retriever_search(
                         query=seed.query + query_suffix,  # Track E: query suffix
                         site=getattr(self.handler, 'site', 'all'),
@@ -483,6 +489,17 @@ class BABLoopEngine:
 
             except Exception as e:
                 logger.warning(f"[BAB LOOP] Search failed for '{seed.query}': {e}")
+                # 2026-06-20 prod：embedding 雙 provider 同失敗 → retriever_search 拋例外
+                # → 該 seed 完全沒撈到資料卻只有 log（silent skip），user 以為有補到資料。
+                # 降級必有 user-facing 訊息（CLAUDE.md 不可 silent fail）。
+                # 持久性故障會每 seed × 每 iteration 重複觸發 → per-run 只播一次
+                # （flag 登記於 _reset_per_run_dedup_flags）。log 每次照記，只旁白 dedup。
+                # 與 _search_required_degraded_narrated（補搜「無結果」）語義不同：
+                # 這裡是「檢索出錯（例外）」，不可混用同一 flag / 文案。
+                await self._narrate_once(
+                    "_retrieval_error_degraded_narrated",
+                    lr_copy.RETRIEVAL_ERROR_DEGRADED_NARRATION,
+                )
 
             # Track C C3 (F-9 根解 2026-05-28): 站內空集合 + 國際 keyword 雙閘 fallback web gate.
             # 觸發條件 (AND)：

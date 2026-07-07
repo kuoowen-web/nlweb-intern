@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 1080 1080" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g transform="matrix(1,0,0,1.10922,2.90139,-29.5885)">
+        <g id="图层2">
+            <path d="M800.228,368.282L800.228,368.893L600.375,368.893L600.375,190.02L800.228,368.282ZM801.395,406.457L801.395,815.997C801.395,829.148 789.553,839.824 774.966,839.824L299.232,839.824C284.645,839.824 272.802,829.148 272.802,815.997L272.802,211.01C272.802,197.86 284.645,187.183 299.232,187.183L558.708,187.183L558.708,387.675C558.708,398.048 568.035,406.457 579.541,406.457L801.395,406.457Z" style="fill:rgb(178,190,195);"/>
+        </g>
+    </g>
+    <g transform="matrix(1,0,0,1,-98.4363,91.8531)">
+        <g id="图层3">
+            <g>
+                <path d="M490.324,597.276L490.324,473.375L446.074,473.375L446.074,448.147L564.584,448.147L564.584,473.375L520.435,473.375L520.435,597.276L490.324,597.276Z" style="fill:white;fill-rule:nonzero;stroke:white;stroke-width:1px;"/>
+                <path d="M568.856,597.276L619.821,519.456L573.637,448.147L608.834,448.147L638.741,496.059L668.038,448.147L702.93,448.147L656.543,520.575L707.508,597.276L671.192,597.276L638.131,545.701L604.969,597.276L568.856,597.276Z" style="fill:white;fill-rule:nonzero;stroke:white;stroke-width:1px;"/>
+                <path d="M756.539,597.276L756.539,473.375L712.289,473.375L712.289,448.147L830.799,448.147L830.799,473.375L786.65,473.375L786.65,597.276L756.539,597.276Z" style="fill:white;fill-rule:nonzero;stroke:white;stroke-width:1px;"/>
+            </g>
+        </g>
+    </g>
+</svg>

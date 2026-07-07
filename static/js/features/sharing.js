@@ -53,8 +53,8 @@
 //   from chat.js feedback handler residual (event delegation in news-search.js uses named
 //   import).
 
-import { getConversationHistory } from './search.js';
-import { getChatHistory } from './chat.js';
+import { getConversationHistory } from './search.js?v=20260705c';
+import { getChatHistory } from './chat.js?v=20260705c';
 import { getSessionHistory, getSavedSessions, clearSharedSessions, renderSharedSessions } from './sessions-list.js';
 import { getSourceDisplayNames } from './source-filters.js';
 import { getCurrentSessionId } from '../utils/analytics.js';
@@ -349,7 +349,7 @@ export function openFeedbackModal(rating) {
     const existing = document.getElementById('feedbackModal');
     if (existing) existing.remove();
 
-    const ratingLabel = rating === 'positive' ? '<span class="emoji-bw">👍</span> 正面回饋' : '<span class="emoji-bw">👎</span> 負面回饋';
+    const ratingLabel = rating === 'positive' ? '<img src="/static/images/icon-good.svg" alt="正面" class="inline-icon"> 正面回饋' : '<img src="/static/images/icon-bad.svg" alt="負面" class="inline-icon"> 負面回饋';
 
     const modal = document.createElement('div');
     modal.id = 'feedbackModal';

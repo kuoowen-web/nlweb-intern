@@ -349,7 +349,12 @@ class AppConfig:
             )
 
     def load_reasoning_config(self, path: str = "config_reasoning.yaml"):
-        """Load reasoning module configuration including source tiers and mode configs."""
+        """Load reasoning module configuration.
+
+        Note: source_tiers / mode_configs were removed (2026-06, source tier
+        mechanism deprecated). reasoning_source_tiers now defaults to {} (the
+        downstream SourceTierFilter is a pass-through no-op).
+        """
         # Build the full path to the config file using the config directory
         full_path = os.path.join(self.config_directory, path)
 
@@ -376,9 +381,6 @@ class AppConfig:
 
         # Load source tier knowledge base
         self.reasoning_source_tiers: Dict[str, Dict[str, Any]] = data.get("source_tiers", {})
-
-        # Load mode-specific configurations
-        self.reasoning_mode_configs: Dict[str, Dict[str, Any]] = data.get("mode_configs", {})
 
     def load_webserver_config(self, path: str = "config_webserver.yaml"):
         # Build the full path to the config file using the config directory

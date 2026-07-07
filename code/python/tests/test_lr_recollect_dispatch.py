@@ -115,6 +115,35 @@ def test_recollect_pending_explicit_cancel_returns_to_checkpoint():
     orch._run_stage_1.assert_not_awaited()
 
 
+def test_recollect_pending_meta_none_stays_at_checkpoint_no_dispatch():
+    """B: pending=True 時 _classify_meta_intent 回傳 None (LLM 故障)
+    → 絕不能 fall through 或走 bounded affirmative，必須重設 pending flag，
+    emit narration，並 emit 原本的 RECOLLECT_CONSENT_PROMPT checkpoint。"""
+    import reasoning.live_research.lr_copy as lr_copy
+    orch = _make_orch()
+    state = _make_state()
+    state.pending_recollect_confirmation = True
+    
+    # 短肯定形狀句，原本若 meta=None，在 abort 檢查時會 bypass，然後在段3 命中 affirmative shape
+    user_message = "嗯"
+    
+    with patch("reasoning.live_research.orchestrator._classify_meta_intent",
+               new=AsyncMock(return_value=None)):
+        result = asyncio.run(
+            orch._handle_stage_5_response(state, user_message, False))
+            
+    # 斷言：未呼叫 _run_stage_1（沒 dispatch），flag 被重設為 True（讓 user 再確認）
+    assert result.pending_recollect_confirmation is True
+    assert result.current_stage == 5
+    assert result.written_sections != []  # 沒清章節
+    orch._run_stage_1.assert_not_awaited()
+    # 斷言 emit_narration 用了 LLM_UNAVAILABLE_NARRATION
+    orch._emit_narration.assert_awaited_with(lr_copy.LLM_UNAVAILABLE_NARRATION)
+    # 斷言 checkpoint set 了 RECOLLECT_CONSENT_PROMPT
+    assert result.checkpoint_prompt == lr_copy.RECOLLECT_CONSENT_PROMPT
+
+
+
 def test_recollect_capped_blocks_at_intent_and_narrates():
     """cap 預檢在 recollect intent 分支（consent 之前）：已達 cap → 直接 block，
     不進 consent、不設 pending、明確 narration（非 silent）。"""

@@ -24,9 +24,9 @@ load_dotenv(_project_root / '.env')
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-# Initialize Sentry error tracking (reads SENTRY_DSN from env; disabled if unset)
+# Initialize Sentry error tracking (DSN strictly from env; no hardcoded fallback — see lessons-general)
 import sentry_sdk
-_sentry_dsn = os.environ.get('SENTRY_DSN')  # set in .env; no hardcoded fallback (avoids leaking prod DSN)
+_sentry_dsn = os.environ.get('SENTRY_DSN')
 if _sentry_dsn:
     sentry_sdk.init(
         dsn=_sentry_dsn,
@@ -34,6 +34,8 @@ if _sentry_dsn:
         send_default_pii=True,
         traces_sample_rate=0.1,  # 10% of requests for performance monitoring
     )
+else:
+    print("[sentry] SENTRY_DSN not set — error tracking disabled", file=sys.stderr)
 
 
 async def main():

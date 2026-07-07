@@ -28,11 +28,75 @@ from core.query_logger import get_query_logger
 
 logger = get_configured_logger("postgres_client")
 
+
+# --- Low-relevance / low-keyword-match warning thresholds ---
+# Signal A: highest vector_score across results below this -> "關聯性偏低" warning.
+# MUST sit a clear band ABOVE the quality-gate filter line (vector_similarity_min=0.40),
+# otherwise it overlaps the existing filter and never (or always) fires.
+# Calibrated 2026-06-26 (30-query real distribution, Task 7): high-relevance group
+# gated_max lower bound ~0.44, low-relevance (with results) upper bound ~0.47 — the two
+# groups overlap with no clean gap. Chosen on the high-relevance side at 0.55 (identical
+# trigger set to 0.50; no query lands in 0.50–0.55). Bias toward HIGH (under-warn).
+# Note: short compound-noun high-relevance queries (e.g. "詐騙集團") can still over-warn —
+# an embedding artefact, not threshold-solvable; tracked as a backlog item.
+# 2026-07-05: fix directions a–e evaluated — conclusion: SHELVED (banner copy mitigation
+# suffices); see "docs/in progress/plans/retrieval-warning-derived-issues-CDE-plan.md" §C.
+LOW_RELEVANCE_VECTOR_MAX = 0.55
+
+# Signal B: fewer than this many pg_bigm keyword hits (text_score > 0) -> "關鍵字匹配低" warning.
+# CEO-specified exact value.
+KEYWORD_HIT_MIN = 10
+
+
+def compute_low_relevance_warning(raw_results):
+    """Signal A: True when the highest *real* vector_score is below LOW_RELEVANCE_VECTOR_MAX.
+
+    Uses the MAX vector_score (not mean) so a few strong hits don't mask an overall
+    weak result set, and a few weak hits don't drag down an otherwise strong set.
+
+    Only considers results that actually have a vector hit (vector_score > 0).
+    Pure text-path (pg_bigm) results carry a placeholder vector_score of 0.0 — they
+    have no vector evidence, so they must NOT drag max() to 0 and trigger a false
+    low-relevance warning (e.g. "立法院" matches 50 docs purely by keyword). When no
+    result has a vector hit, abstain (return False) — there is no vector evidence to
+    judge semantic relevance, and the warning must not fire on keyword-only matches.
+    Empty result set -> no warning (emptiness is a separate concern).
+    """
+    if not raw_results:
+        return False
+    vector_scores = [s for r in raw_results
+                     if (s := float(r.get('vector_score') or 0.0)) > 0.0]
+    if not vector_scores:
+        return False
+    return max(vector_scores) < LOW_RELEVANCE_VECTOR_MAX
+
+
+def compute_low_keyword_match_warning(raw_results):
+    """Signal B: True when fewer than KEYWORD_HIT_MIN results have a pg_bigm hit.
+
+    "hit" = the row's `keyword_hit` flag, stamped at assembly in _search_docs from
+    the pg_bigm text-hit sets (chunk_id OR same-article url), counted over the
+    final merged/quality-gated result set the user actually receives.
+
+    Why not text_score > 0: vector-path rows carry a PLACEHOLDER text_score of 0.0
+    ("the text query never scored this row"), NOT "no keyword hit" — counting
+    text_score > 0 under-counted hits that arrived via the vector path and made
+    Signal B over-warn (mirror of the Signal A placeholder false positive).
+    `keyword_hit` is provenance-based and deliberately NOT gated on TEXT_SCORE_MIN:
+    presence in text_rows (LIKE match, no score floor) is equivalent to the old
+    text_score > 0 semantics (CDE plan §D, AR D-4).
+    Empty result set -> no warning.
+    """
+    if not raw_results:
+        return False
+    keyword_hit_count = sum(1 for r in raw_results if r.get('keyword_hit'))
+    return keyword_hit_count < KEYWORD_HIT_MIN
+
+
 class PgVectorClient(RetrievalClientBase):
 
     def __init__(self, endpoint_name: Optional[str] = None):
         self.endpoint_name = endpoint_name or CONFIG.write_endpoint
-        self._conn_lock = asyncio.Lock()
         self._pool = None
         self._pool_init_lock = asyncio.Lock()
         
@@ -530,6 +594,20 @@ class PgVectorClient(RetrievalClientBase):
                     sentry_sdk.capture_exception(e)
                     text_rows = []
 
+                # Real keyword-hit provenance (Signal B): text_rows is the set of
+                # chunks pg_bigm actually matched. Capture chunk ids AND urls here —
+                # after the text fetch, BEFORE union merge and URL dedup — because:
+                #  (a) union merge keeps the vector row for a chunk found by both
+                #      paths (that row has no text_score key -> later filled 0.0);
+                #  (b) URL dedup may drop a text-hit chunk in favour of the
+                #      same-URL vector chunk.
+                # In both cases the surviving row's filled text_score=0.0 means
+                # "text path never scored it", NOT "no keyword hit" — these sets
+                # preserve the hit fact (CDE plan §D, D-opt-1 + AR D-1 url OR).
+                # Text-search failure -> text_rows=[] -> both sets empty.
+                text_hit_chunk_ids = {r["chunk_id"] for r in text_rows}
+                text_hit_urls = {r["url"] for r in text_rows if r.get("url")}
+
                 # --- Union merge (deduplicate by chunk_id) ---
                 # Build lookup: chunk_id → embedding for vector-searched rows
                 vector_row_embeddings: dict = {}
@@ -586,6 +664,10 @@ class PgVectorClient(RetrievalClientBase):
                         'date_published': row["date_published"].isoformat() if row.get("date_published") else "",
                         'vector_score': float(row.get("vector_score") or 0.0),
                         'text_score': float(row.get("text_score") or 0.0),
+                        # True keyword-hit provenance (dedup-safe): the chunk itself
+                        # or any same-URL chunk appeared in the pg_bigm text_rows.
+                        'keyword_hit': (row["chunk_id"] in text_hit_chunk_ids
+                                        or row.get("url") in text_hit_urls),
                     }
                     if include_vectors:
                         cid = row["chunk_id"]
@@ -637,6 +719,24 @@ class PgVectorClient(RetrievalClientBase):
                     # Graceful degradation: caller gets the original empty list
                     # Error is logged above via logger.exception
             # --- End date filter fallback ---
+
+            # --- Low-relevance / low-keyword-match warning signals ---
+            # Computed here while raw_results still carries vector_score/text_score
+            # (these are dropped at the tuple conversion in search()). Sets handler flags;
+            # baseHandler.prepare() consumes them and emits SSE (mirrors time_filter_relaxed).
+            # Does NOT alter raw_results — warning only, never blocks.
+            if handler is not None:
+                try:
+                    if compute_low_relevance_warning(raw_results):
+                        handler.low_relevance_warning = True
+                        logger.info("[WARN] low_relevance_warning set (max vector_score below band)")
+                    if compute_low_keyword_match_warning(raw_results):
+                        handler.low_keyword_match_warning = True
+                        logger.info("[WARN] low_keyword_match_warning set (keyword hits below min)")
+                except Exception as warn_err:
+                    # Never let warning computation break retrieval — log and continue.
+                    logger.warning(f"[WARN] Failed to compute relevance warnings: {warn_err}")
+            # --- End warning signals ---
 
             # Analytics: Log retrieved documents with scores
             if handler and hasattr(handler, 'query_id'):
@@ -692,12 +792,12 @@ class PgVectorClient(RetrievalClientBase):
             # When include_vectors=True, emit 5-tuples so ranking.py can extract
             # vectors for MMR: [url, schema_str, title, source, vector]
             #
-            # AGGREGATOR_KEEP_SCORES flag (default '0' = off): when on, emit a
-            # fixed 6-tuple [url, schema_str, title, source, vector_or_None,
-            # retrieval_scores] so the XGBoost shadow ranker's retrieval features
-            # (index 14-18) are no longer all-zero. Flag off = 4/5-tuple exactly
-            # as before (no behavioural change to prod).
-            keep_scores = os.environ.get('AGGREGATOR_KEEP_SCORES', '0') == '1'
+            # AGGREGATOR_KEEP_SCORES flag (default '1' = on since 2026-07-05,
+            # CEO gate passed 2026-06-18 real-PG E2E): emit a fixed 6-tuple
+            # [url, schema_str, title, source, vector_or_None, retrieval_scores]
+            # so the XGBoost shadow ranker's retrieval features (index 14-18)
+            # are no longer all-zero. Set '0' to fall back to 4/5-tuple.
+            keep_scores = os.environ.get('AGGREGATOR_KEEP_SCORES', '1') == '1'
             results = []
             for item in raw_results:
                 row = [item['url'], item['schema_str'], item['title'], item['source']]

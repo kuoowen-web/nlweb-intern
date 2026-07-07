@@ -76,7 +76,7 @@ class TestTaskWrap:
 
         captured = {"task": None}
 
-        async def fake_continue(state, user_message, auto_continue):
+        async def fake_continue(state, user_message, auto_continue, nav_action=""):
             captured["task"] = handler._lr_research_task
             assert isinstance(captured["task"], asyncio.Task)
             return LiveResearchStageState(current_stage=5, stage_status="checkpoint")

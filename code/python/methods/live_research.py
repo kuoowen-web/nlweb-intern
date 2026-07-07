@@ -59,6 +59,11 @@ class LiveResearchHandler(DeepResearchHandler):
         # **不** cancel 此 task；named task 仍保留供「使用者明確 stop」或防呆上限觸發的
         # 內部 cancel（disconnect 本身不 cancel，見 routes/api.py::_lr_mark_client_disconnected）。
         self._lr_research_task: Optional[asyncio.Task] = None
+        # 連線釋放治本（plan: lr-sse-connection-release-fix, 2026-06-22）：
+        # client 斷線時 set 此 event，讓 runQuery / continueResearch 的 detach-aware
+        # await 偵測到並提早 return（背景 task 不 cancel、繼續跑）。與 connection_alive_event
+        # 並列由 _lr_mark_client_disconnected 觸發（single source of truth）。
+        self._lr_detach_event: asyncio.Event = asyncio.Event()
         # 斷線標記：首次偵測 client 離線的 server epoch 時戳（給 orchestrator 防呆上限起點）。
         # 只是「本次 request 內」傳 offline 起點給 orchestrator 的橋；真正跨 instance 防燒錢
         # 累積上限狀態進 state.offline_since / offline_capped（stage_state.py），非此 instance attr。
@@ -213,20 +218,56 @@ class LiveResearchHandler(DeepResearchHandler):
                 name=f"lr_runQuery_{self.lr_session_id or 'unknown'}",
             )
             self._lr_research_task.add_done_callback(self._on_lr_research_complete)
+            # Detach-aware await（plan: lr-sse-connection-release-fix, 2026-06-22）：
+            # 同時等「task 完成」與「client 離線」。離線先到 → 提早 return，
+            # **不** cancel task（disconnect-no-cancel 保留），task 在後台跑到下個
+            # checkpoint，由其 _persist_checkpoint_boundary 落 DB。done-callback
+            # 仍存活負責 exception retrieval。HTTP 連線釋放由 route 層 finish_response 收尾。
+            # slot release：detach 終態交由 route 層 closure done-callback（路 A，CEO-Locked #3 重議）。
+            detach_waiter = asyncio.ensure_future(self._lr_detach_event.wait())
+            _detached = False
             try:
-                state = await self._lr_research_task
-            except asyncio.CancelledError:
-                logger.info(
-                    f"[LIVE RESEARCH] runQuery task cancelled "
-                    f"(lr_session={self.lr_session_id})"
-                )
-                raise
+                try:
+                    done, _pending = await asyncio.wait(
+                        {self._lr_research_task, detach_waiter},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    if not detach_waiter.done():
+                        detach_waiter.cancel()
+
+                if self._lr_research_task not in done:
+                    # Detached：client 離線，task 仍在跑。提早 return，**不** 清 _lr_research_task
+                    # reference（event loop + done-callback 持有 → task 不被 GC；且 route 需讀此
+                    # ref 掛 slot-release done-callback），**不** trailing save。
+                    _detached = True
+                    logger.info(
+                        f"[LIVE RESEARCH] runQuery detached (client offline) — "
+                        f"task continues in background (lr_session={self.lr_session_id})"
+                    )
+                    self.return_value.update({"status": "detached"})
+                    return self.return_value
+
+                try:
+                    state = self._lr_research_task.result()
+                except asyncio.CancelledError:
+                    logger.info(
+                        f"[LIVE RESEARCH] runQuery task cancelled "
+                        f"(lr_session={self.lr_session_id})"
+                    )
+                    raise
             finally:
-                self._lr_research_task = None
+                # C2 修正（Gemini，2026-06-22）：清理涵蓋整個等待邏輯（含外部 CancelledError
+                # 強 cancel handler coroutine 的情況），與原 code「必定清理 task 參照」契約一致。
+                # **detach 路徑除外**——detach 刻意保留 reference 讓 task 不被 GC + 讓 route 掛
+                # slot-release done-callback。清理只在「非 detach 的終態」做。
+                if not _detached:
+                    self._lr_research_task = None
 
-            # Persist state using server-generated UUID
-            await self._save_state(state)
-
+            # 持久化責任歸背景 task 內部 _persist_checkpoint_boundary → _persist_progress
+            # → _save_state（每 boundary 都寫、idempotent）。route-path trailing save 已移除
+            # （plan: lr-sse-connection-release-fix, 2026-06-22, CEO-Locked #2）：detach 後
+            # 保留會與 task 內最後寫雙寫、可能用舊 snapshot 覆寫新。
             self.return_value.update({
                 "status": "checkpoint",
                 "stage": state.current_stage,
@@ -376,20 +417,43 @@ class LiveResearchHandler(DeepResearchHandler):
                 name=f"lr_continueResearch_{self.lr_session_id or 'unknown'}",
             )
             self._lr_research_task.add_done_callback(self._on_lr_research_complete)
+            # Detach-aware await（plan: lr-sse-connection-release-fix, 2026-06-22）。見 runQuery 同段註解。
+            detach_waiter = asyncio.ensure_future(self._lr_detach_event.wait())
+            _detached = False
             try:
-                state = await self._lr_research_task
-            except asyncio.CancelledError:
-                logger.info(
-                    f"[LIVE RESEARCH] continueResearch task cancelled "
-                    f"(lr_session={self.lr_session_id})"
-                )
-                raise
+                try:
+                    done, _pending = await asyncio.wait(
+                        {self._lr_research_task, detach_waiter},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    if not detach_waiter.done():
+                        detach_waiter.cancel()
+
+                if self._lr_research_task not in done:
+                    _detached = True
+                    logger.info(
+                        f"[LIVE RESEARCH] continueResearch detached (client offline) — "
+                        f"task continues in background (lr_session={self.lr_session_id})"
+                    )
+                    self.return_value.update({"status": "detached"})
+                    return self.return_value
+
+                try:
+                    state = self._lr_research_task.result()
+                except asyncio.CancelledError:
+                    logger.info(
+                        f"[LIVE RESEARCH] continueResearch task cancelled "
+                        f"(lr_session={self.lr_session_id})"
+                    )
+                    raise
             finally:
-                self._lr_research_task = None
+                # C2 修正（見 runQuery 同段註解）：清理涵蓋整個等待邏輯，detach 路徑除外。
+                if not _detached:
+                    self._lr_research_task = None
 
-            # Persist updated state
-            await self._save_state(state)
-
+            # 持久化責任歸背景 task 內部（見 runQuery 同段註解）。route-path trailing save
+            # 已移除（plan: lr-sse-connection-release-fix, 2026-06-22, CEO-Locked #2）。
             self.return_value.update({
                 "status": "checkpoint" if state.stage_status == "checkpoint" else "completed",
                 "stage": state.current_stage,

@@ -5169,60 +5169,6 @@ def test_count_chapter_words_strips_cite_placeholders():
     assert _count_chapter_words("") == 0
 
 
-@pytest.mark.asyncio
-async def test_word_overshoot_narrates_only_when_over_threshold(monkeypatch):
-    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
-    from reasoning.live_research import lr_copy
-
-    captured = []
-
-    handler = MagicMock()
-    handler.query = "字數測試"
-    handler.query_params = {}
-    handler.site = "all"
-    handler.message_sender = MagicMock()
-    handler.message_sender.send_message = AsyncMock()
-    handler.connection_alive_event = MagicMock()
-    handler.connection_alive_event.is_set = MagicMock(return_value=True)
-    handler.final_retrieved_items = []
-    handler._save_state = AsyncMock()
-    # B4: 非 dry_run __init__ 會建真 AssociatorAgent → 必須 patch（既有 fixture pattern
-    # test_live_orchestrator.py:43-44 / :790-792）。
-    with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
-        orch = LiveResearchOrchestrator(handler=handler)
-
-    async def fake_emit(text):
-        captured.append(text)
-    orch._emit_narration = fake_emit
-
-    # 超標（3600 > 2500 * 1.3 = 3250）→ 發一則含章名 + 兩數字
-    await orch._maybe_narrate_word_overshoot(
-        chapter_title="國內案例文獻", target=2500, actual=3600, status="drafted",
-    )
-    assert len(captured) == 1
-    assert "國內案例文獻" in captured[0]
-    assert "2500" in captured[0] and "3600" in captured[0]
-
-    # 未超標（2800 < 3250）→ 不發
-    captured.clear()
-    await orch._maybe_narrate_word_overshoot(
-        chapter_title="國外案例文獻", target=2500, actual=2800, status="drafted",
-    )
-    assert captured == []
-
-    # target=0（未指定字數）→ 不發
-    await orch._maybe_narrate_word_overshoot(
-        chapter_title="前言", target=0, actual=900, status="drafted",
-    )
-    assert captured == []
-
-    # status 非 drafted（章被 block，content 是替換文）→ 不發
-    await orch._maybe_narrate_word_overshoot(
-        chapter_title="結論", target=500, actual=5000, status="guard_failed",
-    )
-    assert captured == []
-
-
 def test_chapter_target_words_reads_from_outline():
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
     from reasoning.schemas_live import BookOutline, ChapterPlan

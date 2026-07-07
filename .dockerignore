@@ -34,7 +34,9 @@ wheels/
 
 # Virtual environments
 myenv/
+myenv311/
 venv/
+.venv/
 ENV/
 env/
 .env

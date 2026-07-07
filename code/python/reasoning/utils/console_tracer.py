@@ -198,13 +198,16 @@ class ConsoleTracer:
                 preview_text += f"  [{i}] {title}\n      {url}\n"
             self._print(preview_text, style="dim")
 
-    def source_filtering(self, original_items: List[Any], filtered_items: List[Any], mode: str):
+    def context_preparation(self, original_items: List[Any], filtered_items: List[Any], mode: str):
         """
-        Log source filtering operation.
+        Log context preparation operation.
+
+        Source tier filtering was removed (2026-06); this now reports a
+        pass-through preparation step.
 
         Args:
-            original_items: Full list before filtering
-            filtered_items: Filtered list after tier/quality filtering
+            original_items: Full list before preparation
+            filtered_items: Prepared list (pass-through)
             mode: Research mode
         """
         if not self._should_log("INFO"):
@@ -215,11 +218,11 @@ class ConsoleTracer:
 
         if self.enable_colors:
             self.console.print(
-                f"\n  🔽 [yellow]Filtering:[/yellow] {original_count} → {filtered_count} sources "
+                f"\n  🔽 [yellow]Preparing:[/yellow] {original_count} → {filtered_count} sources "
                 f"[dim](mode: {mode})[/dim]"
             )
         else:
-            print(f"\n  🔽 Filtering: {original_count} → {filtered_count} sources (mode: {mode})")
+            print(f"\n  🔽 Preparing: {original_count} → {filtered_count} sources (mode: {mode})")
 
     def context_formatted(self, source_map: Dict[int, Any], formatted_context: str):
         """

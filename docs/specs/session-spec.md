@@ -913,7 +913,7 @@ if (res.status === 401) {
 
 兩個 SSE handler，**case 清單必須一致**：
 
-#### 9.2.1 GET / EventSource Path（`news-search.js:2199-2210`）
+#### 9.2.1 GET / EventSource Path（`static/js/features/search.js` `handleStreamingRequest` 內 switch；原 news-search.js 已於 v4.0 Commit 14b 遷移）
 
 ```js
 case 'asking_sites':
@@ -938,15 +938,15 @@ default:
     break;
 ```
 
-#### 9.2.2 POST SSE Path（`news-search.js:2378-2398`）
+#### 9.2.2 POST SSE Path（`static/js/features/search.js` `handlePostStreamingRequest` 內 switch）
 
 同上 case 清單。
 
-> Cases already handled explicitly above（`begin-nlweb-response`、`remember`、`time_filter_relaxed`、`author_search_no_results`、`clarification_required`、`intermediate_result`、`complete`、`articles`、`summary`、`answer`）刻意 **NOT 重複**列在 black-list — 它們有自己的 break。
+> Cases already handled explicitly above（`begin-nlweb-response`、`remember`、`time_filter_relaxed`、`low_relevance_warning`、`low_keyword_match_warning`、`author_search_no_results`、`empty_results`、`clarification_required`、`intermediate_result`、`complete`、`articles`、`summary`、`answer`）刻意 **NOT 重複**列在 black-list — 它們有自己的 break。
 
 ### 9.3 後端 `_BAD_MESSAGE_TYPES`（必須對齊）
 
-實作：`SessionService._BAD_MESSAGE_TYPES`（`session_service.py:561-568`）：
+實作：`SessionService._BAD_MESSAGE_TYPES`（`session_service.py:600-610`）：
 
 ```python
 _BAD_MESSAGE_TYPES = frozenset({
@@ -956,6 +956,8 @@ _BAD_MESSAGE_TYPES = frozenset({
     'begin-nlweb-response', 'end-nlweb-response', 'complete',
     'error', 'remember', 'time_filter_relaxed',
     'author_search_no_results', 'clarification_required',
+    'low_relevance_warning', 'low_keyword_match_warning',
+    'empty_results',
 })
 ```
 
@@ -964,7 +966,7 @@ _BAD_MESSAGE_TYPES = frozenset({
 2. Server `_BAD_MESSAGE_TYPES` frozenset 加 `'X'`
 3. 互相同步避免漏邊。
 
-> Server-side 的清單比前端多一些（`begin-nlweb-response`、`remember`、`time_filter_relaxed`、`author_search_no_results`、`clarification_required`、`intermediate_result`、`complete`），這些是 server defense-in-depth：即使 client 在 default branch 將它們 merge 進 accumulatedData 並 push 到 sessionHistory，server `_sanitize_session_history` 仍會 filter 掉。
+> Server-side 的清單比前端 black-list block 多一些（`begin-nlweb-response`、`remember`、`time_filter_relaxed`、`low_relevance_warning`、`low_keyword_match_warning`、`author_search_no_results`、`empty_results`、`clarification_required`、`intermediate_result`、`complete`），這些在前端有自己的 render / handling case（不落 default merge），server 端列入是 defense-in-depth：即使 client 在 default branch 將它們 merge 進 accumulatedData 並 push 到 sessionHistory，server `_sanitize_session_history` 仍會 filter 掉。
 
 ---
 

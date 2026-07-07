@@ -354,6 +354,70 @@ class DeepResearchOrchestrator(OrchestratorBase):
             self.logger.warning(f"Failed to generate current time header: {e}")
             return ""
 
+    async def _attempt_zero_results_web_search(self, state) -> bool:
+        """
+        β path: when internal retrieval returned zero sources, run ONE Google web
+        search (synthetic WEB_SEARCH gap = state.query) to backfill grounding before
+        giving up. Returns True if web search added at least one source (caller then
+        proceeds to Actor-Critic), False otherwise (caller keeps no-results response).
+
+        Anti-hallucination: this is the ONLY place the Analyst is allowed to run on an
+        initially-empty source_map, and ONLY because real external sources were fetched.
+        """
+        import types
+        from reasoning.schemas_enhanced import GapResolution, GapResolutionType
+
+        # 1. Guard: web search disabled -> visible (non-silent) degradation.
+        if not state.enable_web_search:
+            self.logger.info(
+                "[ZERO-RESULTS] web search disabled (enable_web_search=False); "
+                "returning no-results"
+            )
+            return False
+
+        # 2. Build synthetic single-WEB_SEARCH-gap response (only .gap_resolutions is read).
+        gap = GapResolution(
+            gap_type="zero_retrieved",
+            resolution=GapResolutionType.WEB_SEARCH,
+            search_query=state.query,
+            reason="zero internal sources retrieved",
+            requires_web_search=True,
+        )
+        response = types.SimpleNamespace(gap_resolutions=[gap])
+
+        # 3. Record current context size before backfill.
+        before = len(state.current_context)
+
+        # 4. Reuse the existing gap-resolution machinery (Google + optional Wikipedia
+        #    fallback, tracing, ImportError/Exception log-only degradation all reused).
+        await self._process_gap_resolutions(
+            response=response,
+            mode=state.mode,
+            current_context=state.current_context,
+            enable_web_search=state.enable_web_search,
+            tracer=state.tracer,
+            query_id=state.query_id,
+        )
+
+        # 5. Measure how many sources were appended.
+        added = len(state.current_context) - before
+        self.logger.info(f"[ZERO-RESULTS] web search added {added} sources")
+
+        # 6. Nothing added -> caller keeps no-results (anti-hallucination preserved).
+        if added == 0:
+            return False
+
+        # 7. Re-format so formatted_context / source_map are contiguous + consistent
+        #    for the Analyst/Critic. _execute_web_searches only mutated self.source_map;
+        #    rebuild the whole map from the full enriched current_context, then re-establish
+        #    the G2 reference-identity invariant (mirror the sync in _phase_filter_and_prepare).
+        state.formatted_context, state.source_map = self._format_context_shared(state.current_context)
+        self.formatted_context = state.formatted_context
+        self.source_map = state.source_map
+
+        # 8. Web grounding fetched -> caller proceeds to Actor-Critic.
+        return True
+
     async def _phase_filter_and_prepare(self, state: 'ResearchState') -> 'ResearchState':
         """
         Phase 1: Filter sources by tier + format context with citations.
@@ -395,15 +459,26 @@ class DeepResearchOrchestrator(OrchestratorBase):
         self.formatted_context = state.formatted_context
         self.source_map = state.source_map
 
-        # RSN-11: Early return if source_map empty
+        # RSN-11 + β: empty source_map → try one web search before giving up
         if not state.source_map:
             self.logger.warning(
-                "RSN-11: source_map is empty -- no real sources retrieved. "
-                "Returning no-results response to prevent hallucination."
+                "RSN-11: source_map empty -- no internal sources. "
+                "β path: attempting zero-results web search backfill."
             )
-            state.early_return = self._create_no_results_response(state.query)
-            await self._emit_phase_event("filter_and_prepare", "completed")
-            return state
+            web_recovered = await self._attempt_zero_results_web_search(state)
+            if not web_recovered:
+                self.logger.warning(
+                    "RSN-11/β: web search yielded no sources (or disabled) -- "
+                    "returning no-results response to prevent hallucination."
+                )
+                state.early_return = self._create_no_results_response(state.query)
+                await self._emit_phase_event("filter_and_prepare", "completed")
+                return state
+            # web_recovered: fall through to normal flow with enriched source_map
+            self.logger.info(
+                f"RSN-11/β: web search recovered {len(state.source_map)} sources; "
+                "proceeding to Actor-Critic with web-augmented context."
+            )
 
         await self._emit_phase_event("filter_and_prepare", "completed")
         return state
@@ -577,13 +652,19 @@ class DeepResearchOrchestrator(OrchestratorBase):
                 self._check_connection()  # Checkpoint 4: before secondary searches
                 for new_query in response.new_queries:
                     try:
-                        # Call retriever with same parameters as original search
+                        # Call retriever with same parameters as original search.
+                        # NOTE: deliberately NO handler= here. The low-relevance/low-keyword
+                        # warnings are bound to the initial research-start retrieval only
+                        # (the research-start baseline). Gap search is a web-augment
+                        # reinforcement step that re-enters research() via the actor-critic loop;
+                        # passing handler= would re-set the monotonic (set-only, never-reset)
+                        # warning flags from gap-search results and spuriously re-emit the
+                        # SSE warning mid-research. Mirrors the LR loop_engine per-loop guard.
                         results = await retriever_search(
                             query=new_query,
                             site=self.handler.site,
                             num_results=20,  # Smaller batch for gap search
                             query_params=self.handler.query_params,
-                            handler=self.handler
                         )
                         secondary_results.extend(results)
                         self.logger.info(f"Gap search for '{new_query}': {len(results)} results")
@@ -592,7 +673,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
                 # Handle search results
                 if secondary_results:
-                    # Filter and enrich new results
+                    # Prepare new results (source tier enrichment removed; pass-through)
                     new_context = self.source_filter.filter_and_enrich(secondary_results, mode)
 
                     # Merge with existing context
@@ -771,11 +852,21 @@ class DeepResearchOrchestrator(OrchestratorBase):
                         f"total_source_map={len(state.source_map)}"
                     )
                 else:
-                    # Format context for re-analysis with enriched data
-                    formatted_context_enriched = "\n".join([
-                        f"[{i+1}] {doc.get('title', 'Unknown')} ({doc.get('site', 'Unknown')})"
-                        for i, doc in enumerate(state.current_context)
-                    ])
+                    # Format context for re-analysis with enriched data.
+                    # FIX (source tier Phase B 140ffb3a regression): 不可裸 doc.get()——
+                    # secondary-search 經 no-op filter_and_enrich 後可能把 list/tuple
+                    # 格式的 retriever item extend 進 current_context，裸 .get() 會
+                    # AttributeError。改走 tuple-safe 的 _format_context_shared（與
+                    # isolation 路徑、初次 analyst run、:709 既有非 isolation 先例一致）。
+                    # 四值一起設：state.formatted_context 必須同步更新，否則下游
+                    # 非 isolation Critic（:936-937 critic_context = state.formatted_context）
+                    # 會 review 到 stale 的 enrich 前 context，與重建的 source_map 錯位。
+                    state.formatted_context, state.source_map = self._format_context_shared(
+                        state.current_context
+                    )
+                    self.formatted_context = state.formatted_context
+                    self.source_map = state.source_map
+                    formatted_context_enriched = state.formatted_context
                     previous_draft_for_analyst = None
 
                 if tracer:
@@ -1244,21 +1335,24 @@ class DeepResearchOrchestrator(OrchestratorBase):
         tracer,
     ) -> List[Dict[str, Any]]:
         """
-        Apply source tier filtering based on research mode.
+        Prepare context sources for research.
+
+        Source tier enrichment was removed (2026-06); this is now a pass-through
+        that retains the empty-source guardrail.
 
         Returns:
-            Filtered items list
+            Prepared items list
 
         Raises:
-            ValueError: If no sources remain after filtering
+            ValueError: If no sources are available
         """
-        # Phase 1: Filter and enrich context by source tier
+        # Phase 1: Prepare context (source tier enrichment removed; pass-through)
         current_context = self.source_filter.filter_and_enrich(items, mode)
-        self.logger.info(f"Filtered context: {len(current_context)} sources (from {len(items)})")
+        self.logger.info(f"Prepared context: {len(current_context)} sources (from {len(items)})")
 
-        # Tracing: Source filtering
+        # Tracing: Context preparation
         if tracer:
-            tracer.source_filtering(
+            tracer.context_preparation(
                 original_items=items,
                 filtered_items=current_context,
                 mode=mode
@@ -1268,8 +1362,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
         if not current_context or len(current_context) == 0:
             self.logger.error(f"No sources available for research! Original items: {len(items)}")
             raise ValueError(
-                f"No sources available after filtering. "
-                f"Original: {len(items)}, Filtered: 0, Mode: {mode}"
+                f"No sources available. "
+                f"Original: {len(items)}, Prepared: 0, Mode: {mode}"
             )
 
         return current_context

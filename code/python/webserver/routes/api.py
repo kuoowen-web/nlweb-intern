@@ -41,6 +41,16 @@ def _lr_mark_client_disconnected(handler) -> None:
     （單一 source of truth，避免兩處行為漂移）。
     """
     handler.connection_alive_event.clear()
+    # 連線釋放治本（plan: lr-sse-connection-release-fix, 2026-06-22）：set detach event
+    # 讓 runQuery / continueResearch 的 detach-aware await 提早 return（task 不 cancel）。
+    # ⚠️ 成對設置（in-house Suggestion 3）：此 set() 必與上方 connection_alive_event.clear()
+    # **成對**出現——兩者都代表「client 已離線」這個 single source of truth 的不同消費者
+    # （clear() 給 emit_sse 早退 / orchestrator offline-skip；set() 給 detach-aware await
+    # 提早 return）。任何新增的「標記離線」路徑必須同時動這兩個，否則 detach 與 emit-skip
+    # 會不同步（一個認為離線、另一個還在等）。改 disconnect 標記邏輯時務必維持成對。
+    _detach_evt = getattr(handler, "_lr_detach_event", None)
+    if _detach_evt is not None:
+        _detach_evt.set()
     # 記首次離線時戳（給 orchestrator wall-clock 上限 + 跨 checkpoint 計數起點）。
     # 已離線過就不覆寫（重連未到 checkpoint 仍離線時保留原始 offline_since）。
     if getattr(handler, "_client_offline_since", None) is None:
@@ -1275,10 +1285,41 @@ async def live_research_start_handler(request: web.Request) -> web.Response:
 
     wrapper.set_on_disconnect(_on_lr_disconnect)
 
+    # 路 A（plan: lr-sse-connection-release-fix, 2026-06-22, CEO-Locked #3 重議）。見 continue handler 同段。
+    _start_slot_release_deferred = False
+
+    def _release_start_slots(_task=None):
+        if lr_start_limiter is not None:
+            if lr_start_search_acquired:
+                lr_start_limiter.release(lr_start_search_key, lr_start_request_id)
+            if lr_start_slot_acquired:
+                lr_start_limiter.release(lr_start_conc_key, lr_start_slot_id)
+
     try:
         await handler.runQuery()
+        # 釋放點分流（in-house AR2 I-A3）：detach 走 try 尾掛 done-callback 延後 release；
+        # 真 cancel 走下方 except 分支不掛 callback、finally 照常 release（見 continue handler 同段）。
+        # 此段（getattr→if→add_done_callback→set flag）為同步無 await（見 Design 不變量 I-A1）。
+        _start_bg_task = getattr(handler, "_lr_research_task", None)
+        if _start_bg_task is not None and not _start_bg_task.done():
+            _start_bg_task.add_done_callback(_release_start_slots)
+            _start_slot_release_deferred = True
+        # 連線釋放治本（plan: lr-sse-connection-release-fix, 2026-06-22）：
+        # 成功 / detach return 後主動收尾 SSE response → write_eof + transport teardown
+        # → HTTP 連線 fd 釋放（消除 522 殭屍連線累積）。finish_response 冪等
+        # （_eof_sent guard + 末尾 connection_alive=False），與例外分支互斥安全。
+        try:
+            await wrapper.finish_response()
+        except Exception:
+            pass
     except asyncio.CancelledError:
         logger.info("Live Research start: task cancelled (disconnect)")
+        # detach 不 raise CancelledError（detach 是正常 return）；但內部 cancel
+        # （user-stop / 防呆上限）會 raise 且 client 可能仍在線 → 仍須收尾。
+        try:
+            await wrapper.finish_response()
+        except Exception:
+            pass
     except ConnectionResetError as e:
         logger.info(f"Live Research start: client disconnected: {e}")
         try:
@@ -1296,11 +1337,10 @@ async def live_research_start_handler(request: web.Request) -> web.Response:
         except Exception:
             pass
     finally:
-        if lr_start_limiter is not None:
-            if lr_start_search_acquired:
-                lr_start_limiter.release(lr_start_search_key, lr_start_request_id)
-            if lr_start_slot_acquired:
-                lr_start_limiter.release(lr_start_conc_key, lr_start_slot_id)
+        # 非 detach 終態（task 已結束 / 未進入背景）：route 直接 release（與原行為一致）。
+        # detach 終態：release 已 defer 給 done-callback → 此處跳過。release() idempotent 安全網。
+        if not _start_slot_release_deferred:
+            _release_start_slots()
 
     return response
 
@@ -1479,14 +1519,51 @@ async def live_research_continue_handler(request: web.Request) -> web.Response:
 
     wrapper.set_on_disconnect(_on_lr_disconnect)
 
+    # 路 A（plan: lr-sse-connection-release-fix, 2026-06-22, CEO-Locked #3 重議）：
+    # slot release 綁背景 task 終態，不綁 HTTP 連線。detach 後 task 仍跑，slot 須跟 task。
+    _cont_slot_release_deferred = False
+
+    def _release_cont_slots(_task=None):
+        # closure 捕獲 limiter 區域變數。asyncio done-callback 對 task 所有終態都呼叫
+        # → release 必觸發。release() idempotent → 與 finally 互斥安全（雙釋放無害）。
+        if lr_cont_limiter is not None:
+            if lr_cont_search_acquired:
+                lr_cont_limiter.release(lr_cont_search_key, lr_cont_request_id)
+            if lr_cont_slot_acquired:
+                lr_cont_limiter.release(lr_cont_conc_key, lr_cont_slot_id)
+
     try:
         await handler.continueResearch(
             user_message=user_message,
             auto_continue=auto_continue,
             nav_action=nav_action,
         )
+        # detach：handler 提早 return 且保留 _lr_research_task（task 仍 pending）。
+        # slot release 延後給 task done-callback（綁 task 終態）→ 背景 task 未完成期間
+        # slot 仍佔住 → 同 user 第二請求被擋（429），不會啟動第二個並行 task（修 Gemini C1）。
+        #
+        # ⚠️ 釋放點分流（in-house AR2 I-A3）：detach 走「try 尾」掛 done-callback 延後 release；
+        # 真 cancel（continueResearch raise CancelledError，user-stop / 防呆上限）走下方 except
+        # 分支——except **不**掛 done-callback，finally 照常 release（task 已 cancel、當場放 slot
+        # 語意正確）。兩者釋放點不同：detach=task 終態 release（綁 task）；真 cancel=route finally
+        # 當場 release（task 已終結）。except 路徑**不該**掛 callback（task 已不再 pending，掛了
+        # 也只是即時 release，徒增混淆）。讀者勿誤以為 except 也要 defer。
+        # 此段（getattr→if→add_done_callback→set flag）為同步無 await（見 Design 不變量 I-A1）。
+        _cont_bg_task = getattr(handler, "_lr_research_task", None)
+        if _cont_bg_task is not None and not _cont_bg_task.done():
+            _cont_bg_task.add_done_callback(_release_cont_slots)
+            _cont_slot_release_deferred = True
+        # 連線釋放治本（plan: lr-sse-connection-release-fix, 2026-06-22）。見 start handler 同段註解。
+        try:
+            await wrapper.finish_response()
+        except Exception:
+            pass
     except asyncio.CancelledError:
         logger.info("Live Research continue: task cancelled (disconnect)")
+        try:
+            await wrapper.finish_response()
+        except Exception:
+            pass
     except ConnectionResetError as e:
         logger.info(f"Live Research continue: client disconnected: {e}")
         try:
@@ -1504,11 +1581,11 @@ async def live_research_continue_handler(request: web.Request) -> web.Response:
         except Exception:
             pass
     finally:
-        if lr_cont_limiter is not None:
-            if lr_cont_search_acquired:
-                lr_cont_limiter.release(lr_cont_search_key, lr_cont_request_id)
-            if lr_cont_slot_acquired:
-                lr_cont_limiter.release(lr_cont_conc_key, lr_cont_slot_id)
+        # 非 detach 終態（task 已結束 / 未進入背景）：route 直接 release（與原行為一致）。
+        # detach 終態：release 已 defer 給 done-callback → 此處跳過（避免提早釋放 slot）。
+        # 即使誤判，release() idempotent → 無害（安全網）。
+        if not _cont_slot_release_deferred:
+            _release_cont_slots()
 
     return response
 

@@ -71,7 +71,7 @@ import {
     pushConversationHistory,
     setCurrentConversationId, getCurrentConversationId,
     setCurrentDeepResearchAbortController, getCurrentDeepResearchAbortController
-} from './search.js';
+} from './search.js?v=20260705c';
 import {
     setResearchReport, getResearchReport,
     setArgumentGraph, getArgumentGraph,
@@ -83,7 +83,7 @@ import { getSelectedSitesParam, getIncludePrivateSources } from './source-filter
 import { markSessionDirty } from './session-manager.js';
 import { getCurrentMode } from './mode.js';
 import { getCurrentSessionId } from '../utils/analytics.js';
-import { getConversationHistory } from './search.js';
+import { getConversationHistory } from './search.js?v=20260705c';
 
 // ============================================================================
 // Owned state (was: news-search.js line 1676)
@@ -440,14 +440,14 @@ export function createReasoningChainContainer(nodes, chainAnalysis) {
     header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; cursor: pointer;';
     header.innerHTML = `
         <div style="font-size: 18px; font-weight: 700; color: #2D3436;">
-            <span class="emoji-bw">🧠</span> 推論過程
+            <img src="/static/images/icon-brain.svg" alt="推論" class="inline-icon"> 推論過程
             <span style="color: #636e72; font-size: 14px; font-weight: 400;">
                 (${nodes.length} 個推論步驟${chainAnalysis?.max_depth !== undefined ? `, 深度 ${chainAnalysis.max_depth}` : ''})
             </span>
         </div>
         <div style="display: flex; gap: 8px; align-items: center;">
             <button class="btn-share-reasoning" style="background: white; border: 1px solid #B2BEC3; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s;">
-                <span class="emoji-bw">🔗</span> 給其他 AI 驗證
+                <img src="/static/images/icon-link.svg" alt="驗證連結" class="inline-icon"> 給其他 AI 驗證
             </button>
             <button class="btn-toggle-chain" style="background: white; border: 1px solid #B2BEC3; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;">
                 展開
@@ -493,9 +493,9 @@ export function createLogicInconsistencyWarning(count) {
         margin-bottom: 16px;
     `;
     alert.innerHTML = `
-        <div style="font-weight: 700; color: #2D3436; margin-bottom: 4px;"><span class="emoji-bw">⚠️</span> 邏輯一致性問題</div>
+        <div style="font-weight: 700; color: #2D3436; margin-bottom: 4px;"><img src="/static/images/icon-warning.svg" alt="警告" class="inline-icon"> 邏輯一致性問題</div>
         <div style="color: #2D3436; font-size: 13px;">
-            偵測到 ${count} 個推論步驟的信心度可能高於其前提（邏輯膨脹）。請檢視帶有 <span class="emoji-bw">⚠️</span> 標記的推論步驟。
+            偵測到 ${count} 個推論步驟的信心度可能高於其前提（邏輯膨脹）。請檢視帶有 <img src="/static/images/icon-warning.svg" alt="警告" class="inline-icon"> 標記的推論步驟。
         </div>
     `;
     return alert;
@@ -511,7 +511,7 @@ export function createCycleWarning(cycleDetails) {
         margin-bottom: 16px;
     `;
     alert.innerHTML = `
-        <div style="font-weight: 700; color: #991b1b; margin-bottom: 4px;"><span class="emoji-bw">⚠️</span> 檢測到循環依賴</div>
+        <div style="font-weight: 700; color: #991b1b; margin-bottom: 4px;"><img src="/static/images/icon-warning.svg" alt="警告" class="inline-icon"> 檢測到循環依賴</div>
         <div style="color: #7f1d1d; font-size: 13px;">${cycleDetails || '推論鏈存在循環引用，可能影響可靠性'}</div>
     `;
     return alert;
@@ -540,7 +540,7 @@ export function createCriticalNodesAlert(criticalNodes, nodeMap) {
     }).join('');
 
     alert.innerHTML = `
-        <div style="font-weight: 700; color: #2D3436; margin-bottom: 8px;"><span class="emoji-bw">🚨</span> 關鍵薄弱環節</div>
+        <div style="font-weight: 700; color: #2D3436; margin-bottom: 8px;"><img src="/static/images/icon-alert.svg" alt="重要警示" class="inline-icon"> 關鍵薄弱環節</div>
         ${criticalHtml}
     `;
 
@@ -571,7 +571,7 @@ export function renderArgumentNode(node, stepNumber, nodeMap, chainAnalysis) {
         transition: all 0.2s ease;
     `;
 
-    const emoji = {deduction: '<span class="emoji-bw">🔷</span>', induction: '<span class="emoji-bw">🔶</span>', abduction: '<span class="emoji-bw">🔸</span>'}[node.reasoning_type] || '<span class="emoji-bw">💭</span>';
+    const emoji = {deduction: '<img src="/static/images/icon-deduction.svg" alt="演繹" class="inline-icon">', induction: '<img src="/static/images/icon-induction.svg" alt="歸納" class="inline-icon">', abduction: '<img src="/static/images/icon-abduction.svg" alt="溯因" class="inline-icon">'}[node.reasoning_type] || '<img src="/static/images/icon-interim.svg" alt="中間結論" class="inline-icon">';
     const label = {deduction: '演繹', induction: '歸納', abduction: '溯因'}[node.reasoning_type];
     const score = node.confidence_score ?? inferScore(node.confidence);
     const scoreColor = score >= 7 ? '#16a34a' : score >= 4 ? '#FDCB6E' : '#dc2626';
@@ -581,7 +581,7 @@ export function renderArgumentNode(node, stepNumber, nodeMap, chainAnalysis) {
         const critical = chainAnalysis.critical_nodes.find(c => c.node_id === node.node_id);
         if (critical && critical.affects_count > 0) {
             impactInfo = `<div style="color: #dc2626; font-size: 13px; margin-top: 8px;">
-                <span class="emoji-bw">⚡</span> 影響 ${critical.affects_count} 個後續推論
+                <img src="/static/images/icon-impact.svg" alt="影響力" class="inline-icon"> 影響 ${critical.affects_count} 個後續推論
             </div>`;
         }
     }
@@ -590,7 +590,7 @@ export function renderArgumentNode(node, stepNumber, nodeMap, chainAnalysis) {
     if (node.logic_warnings && node.logic_warnings.length > 0) {
         warningsHtml = node.logic_warnings.map(w => `
             <div style="color: #FDCB6E; font-size: 13px; margin-top: 4px;">
-                <span class="emoji-bw">⚠️</span> ${w}
+                <img src="/static/images/icon-warning.svg" alt="警告" class="inline-icon"> ${w}
             </div>
         `).join('');
     }
@@ -779,6 +779,26 @@ export function renderResearchReportToView(report, argGraph, chainAnalysis) {
     if (argGraph && argGraph.length > 0) {
         displayReasoningChainInContainer(argGraph, chainAnalysis, researchViewEl);
     }
+}
+
+// Low-relevance / low-keyword warning banner for DR, emitted during prepare()
+// (BEFORE the research orchestrator starts). Inserted at the TOP of #resultsSection
+// — the stable wrapper that holds every view (#researchView, #listView, ...). This
+// survives the #researchView.innerHTML='' clear at final_result because the banner
+// is a SIBLING above #researchView, not inside it (mirrors search.js Task 3 target).
+export function showResearchRelevanceWarning(message, kind) {
+    // kind: 'relevance' | 'keyword' — distinct DOM ids so both can show at once.
+    const id = kind === 'keyword' ? 'drLowKeywordWarning' : 'drLowRelevanceWarning';
+    const existing = document.getElementById(id);
+    if (existing) existing.remove();
+
+    const warning = document.createElement('div');
+    warning.id = id;
+    warning.className = kind === 'keyword' ? 'low-keyword-match-warning' : 'low-relevance-warning';
+    warning.innerHTML = `<span class="warning-text">${escapeHTML(message)}</span>`;
+
+    const container = document.getElementById('resultsSection');
+    if (container) container.insertBefore(warning, container.firstChild);
 }
 
 // Inline error display for DR (replaces alert() calls)
@@ -1060,15 +1080,15 @@ export function addClarificationMessage(clarificationData, originalQuery, eventS
     }
 
     const iconMap = {
-        'time': '<span class="emoji-bw">🕒</span>',
-        'scope': '<span class="emoji-bw">🎯</span>',
-        'entity': '<span class="emoji-bw">🌐</span>'
+        'time': '<img src="/static/images/icon-clarify-time.svg" alt="時間" class="inline-icon">',
+        'scope': '<img src="/static/images/icon-clarify-scope.svg" alt="範圍" class="inline-icon">',
+        'entity': '<img src="/static/images/icon-clarify-entity.svg" alt="實體" class="inline-icon">'
     };
 
     const messageDiv = document.createElement('div');
     messageDiv.className = 'chat-message assistant clarification';
 
-    let contentHTML = '<div class="chat-message-header">讀豹</div>';
+    let contentHTML = '<div class="chat-message-header"><img src="/static/images/icon-role-dubao.svg" alt="讀豹" class="inline-icon"> 讀豹</div>';
     contentHTML += '<div class="chat-message-bubble">';
     contentHTML += '<div class="clarification-card">';
 
@@ -1079,7 +1099,7 @@ export function addClarificationMessage(clarificationData, originalQuery, eventS
     `;
 
     clarificationData.questions.forEach(question => {
-        const icon = iconMap[question.clarification_type] || '<span class="emoji-bw">❓</span>';
+        const icon = iconMap[question.clarification_type] || '<img src="/static/images/icon-clarify-other.svg" alt="其他" class="inline-icon">';
         const requiredMark = question.required ? '<span class="required">*</span>' : '';
 
         contentHTML += `
@@ -1390,7 +1410,7 @@ export function submitClarification(selectedAnswers, originalQuery, eventSource,
     if (forceAllComprehensive && selections.length === 0) selections.push('直接開始研究');
     const selectionText = selections.join(' + ');
     userMessageDiv.innerHTML = `
-        <div class="chat-message-header">你</div>
+        <div class="chat-message-header"><img src="/static/images/icon-role-user.svg" alt="你" class="inline-icon"> 你</div>
         <div class="chat-message-bubble">${escapeHTML(selectionText)}</div>
     `;
     chatMessagesEl.appendChild(userMessageDiv);
@@ -1434,7 +1454,7 @@ export async function performDeepResearch(query, skipClarification = false, comp
             const userMessageDiv = document.createElement('div');
             userMessageDiv.className = 'chat-message user';
             userMessageDiv.innerHTML = `
-                <div class="chat-message-header">你</div>
+                <div class="chat-message-header"><img src="/static/images/icon-role-user.svg" alt="你" class="inline-icon"> 你</div>
                 <div class="chat-message-bubble">${escapeHTML(query)}</div>
             `;
             chatMessagesEl.appendChild(userMessageDiv);
@@ -1624,6 +1644,12 @@ export async function performDeepResearch(query, skipClarification = false, comp
                                 _currentResearchQueryId = data.query_id;
                                 console.log('[Deep Research] Captured query_id for rerun:', _currentResearchQueryId);
                             }
+                        } else if (data.message_type === 'low_relevance_warning') {
+                            console.warn('[Relevance] Low relevance (DR):', data.content);
+                            showResearchRelevanceWarning(data.content, 'relevance');
+                        } else if (data.message_type === 'low_keyword_match_warning') {
+                            console.warn('[Relevance] Low keyword match (DR):', data.content);
+                            showResearchRelevanceWarning(data.content, 'keyword');
                         } else if (data.message_type === 'clarification_required') {
                             console.log('[Clarification] Request received:', data.clarification);
                             addClarificationMessage(data.clarification, data.query, drAbortController, savedQuery);

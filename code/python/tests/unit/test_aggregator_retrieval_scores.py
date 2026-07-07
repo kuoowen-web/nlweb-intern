@@ -114,9 +114,13 @@ def test_aggregate_multisource_scores_take_max():
 
 
 def test_aggregate_flag_off_emits_legacy_4_or_5_tuple():
-    """Flag off: emit 4/5-tuple exactly as before — no scores appended."""
+    """Flag off: emit 4/5-tuple exactly as before — no scores appended.
+
+    Since 2026-07-05 the default (env unset) is ON, so legacy coverage must
+    pin '0' explicitly. Kept until the flag is removed (Task 10).
+    """
     r = _make_retriever()
-    with _flag(None):  # explicitly off
+    with _flag('0'):  # explicitly off (default is on since 2026-07-05)
         # 4-tuple input, no vector
         out4 = r._aggregate_results({'ep1': [['http://a/1', '{}', 'T', 'S']]})
         # 5-tuple input, with vector
@@ -124,3 +128,13 @@ def test_aggregate_flag_off_emits_legacy_4_or_5_tuple():
     assert len(out4[0]) == 4
     assert len(out5[0]) == 5
     assert out5[0][4] == [0.1, 0.2]
+
+
+def test_aggregate_default_env_unset_emits_six_tuple():
+    """Default flip (CEO 2026-07-05): env unset must behave as ON → 6-tuple."""
+    r = _make_retriever()
+    with _flag(None):  # unset — exercises the code default
+        out = r._aggregate_results({'ep1': [['http://a/1', '{}', 'T', 'S']]})
+    assert len(out[0]) == 6
+    assert out[0][4] is None                     # vector placeholder
+    assert isinstance(out[0][5], dict)           # scores dict appended

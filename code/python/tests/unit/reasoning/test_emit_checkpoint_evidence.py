@@ -36,7 +36,9 @@ async def test_emit_checkpoint_includes_evidence_list():
          "source_domain": "", "published_at": None, "source": "llm_knowledge"},
     ]
 
-    await orch._emit_checkpoint(stage=1, proposal="研究提案", evidence_list=evidence_list)
+    await orch._emit_checkpoint(
+        stage=1, proposal="研究提案", evidence_list=evidence_list, evidence_total=413
+    )
 
     handler.message_sender.send_message.assert_called_once()
     payload = handler.message_sender.send_message.call_args[0][0]
@@ -46,6 +48,25 @@ async def test_emit_checkpoint_includes_evidence_list():
     assert len(payload["evidence_list"]) == 2
     assert payload["evidence_list"][0]["id"] == 1
     assert payload["evidence_list"][0]["source_domain"] == "cna.com.tw"
+    # evidence_total：完整 pool 筆數（顯示子集為 2，總量 413），前端據此標「節選 vs 總量」
+    assert payload["evidence_total"] == 413
+
+
+@pytest.mark.asyncio
+async def test_emit_checkpoint_evidence_total_defaults_to_list_length():
+    """不傳 evidence_total 時，payload evidence_total fallback 為 evidence_list 長度（向後兼容）。"""
+    from reasoning.live_research.orchestrator import LiveResearchOrchestrator
+
+    handler = _make_handler_with_sender()
+    orch = LiveResearchOrchestrator(handler=handler, dry_run=False)
+
+    await orch._emit_checkpoint(
+        stage=1, proposal="x",
+        evidence_list=[{"id": 1}, {"id": 2}, {"id": 3}],
+    )
+
+    payload = handler.message_sender.send_message.call_args[0][0]
+    assert payload["evidence_total"] == 3
 
 
 @pytest.mark.asyncio

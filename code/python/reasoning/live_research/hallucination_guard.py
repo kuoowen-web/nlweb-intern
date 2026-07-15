@@ -142,6 +142,10 @@ def split_and_filter_ungrounded_sentences(
     return "".join(kept_parts), removed, unsafe
 
 
+# G4: 信心降一級對照（避免單一 phantom 直接把整章打到 Low）
+_DOWNGRADE_ONE = {"High": "Medium", "Medium": "Low", "Low": "Low"}
+
+
 def apply_hallucination_guard(
     section: LiveWriterSectionOutput,
     valid_evidence_ids: Set[int],
@@ -213,10 +217,16 @@ def apply_hallucination_guard(
         else f"[自動修正：{reason_str}]"
     ).strip()
 
+    # G4: 依嚴重度決定信心降級，避免「移除單一 phantom → 整章 Low」的過度懲罰。
+    # 嚴重（→ Low）：字面 placeholder（Writer 根本沒照格式寫），或修正後已無任何有效
+    # citation（本章失去引用根基）。其餘（多數 citation 仍有效）只降一級，不打到底。
+    severe = bool(placeholder_hit) or len(corrected_citations) == 0
+    new_confidence = "Low" if severe else _DOWNGRADE_ONE.get(section.confidence_level, "Low")
+
     corrected = section.model_copy(update={
         "sources_used": corrected_sources,
         "citations": corrected_citations,
-        "confidence_level": "Low",
+        "confidence_level": new_confidence,
         "methodology_note": new_note,
     })
 

@@ -1720,8 +1720,11 @@ export async function performDeepResearch(query, skipClarification = false, comp
                             setProcessingState(false);
                             console.log('Deep Research stream complete');
                             return;
-                        } else if (data.message_type === 'error') {
-                            console.error('[Deep Research] SSE error event:', data.error);
+                        } else if (data.message_type === 'error' || data.message_type === 'research_error') {
+                            // W2: 後端背景研究失敗會發 research_error（deep_research.py
+                            // _send_research_error），但前端原本只認 'error'，導致使用者
+                            // 完全看不到後端研究錯誤。一併接住，錯誤才會浮現給使用者。
+                            console.error('[Deep Research] SSE error event:', data.message_type, data.error);
                             closeDRStream();
                             if (loadingState) loadingState.classList.remove('active');
                             setProcessingState(false);

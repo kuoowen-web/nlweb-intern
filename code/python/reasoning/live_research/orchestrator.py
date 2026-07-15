@@ -39,6 +39,7 @@ from reasoning.schemas_live import (
     ContextMapRevisionOperation,
     ContextMapTopic,
     EvidencePoolEntry,
+    GeneratedReportTitle,
     StyleAnalysisOutput,
     StyleInputNotASampleError,
     Stage4Response,
@@ -74,6 +75,12 @@ _PROBLEMATIC_REASON_ZH = {
     "guard_failed": "驗證失敗",
     "critic_rejected": "查核未通過",
 }
+
+# LR 報告標題生成 LLM timeout（秒）。標題不需重推理，短 timeout 即可，
+# 逾時降級 research_question（plan: lr-report-title-generation）。
+_REPORT_TITLE_TIMEOUT = 15
+# 生成標題長度上限（字），超長截斷（AR P2：LLM 可能回超長，schema description 只是軟約束）。
+_REPORT_TITLE_MAX_LEN = 40
 
 
 def _looks_like_confirmation(msg: str) -> bool:
@@ -303,90 +310,69 @@ def _count_chapter_words(content: str) -> int:
     return len(re.sub(r"\{cite:\d+\}", "", content or ""))
 
 
-# 章節 post-process truncate 的省略號（明示節略，no silent fail）。
-# 章節內文走這個獨立切法，**不**複用 lr_copy 的 100 字 _WARN_EXPLANATION_MAX helper
-# （那是 critic warning 說明用、scope 100 字；章節是 800-2000 字級別，且該 helper 已死碼移除）。
-TRUNCATE_ELLIPSIS = "…"
+def _resolve_target_chapter_layer1(target: str, chapter_names):
+    """R2 第一層 code 短路（不另起 LLM call、復用既有 classifier 結果）：只處理「明擺著的」——
+    exact / 唯一 substring / 空。
 
-# 句末邊界字元（中文）。truncate 在 limit 內最後一個句末標點切，避免切句中。
-_SENTENCE_BOUNDARY_CHARS = "。！？；"
+    回傳：
+    - "" → 空 target（= user 明說全章/每章都要，全章注入 sentinel；B2：classifier 只在「明說全章」時填空）
+    - 章名原文 → exact 相等 或 唯一 substring 命中（明確，不採 LLM 語意、不問）
+    - None → 非 exact 非唯一（語意指涉 / 序數 / 多候選 / 對不到）→ **放手交第二層 LLM 判語意**
 
-# should-fix（沿用既有 truncate helper 精神）：limit 內最近的句界若離 limit 太遠
-# （< limit * 此比例），寧可硬切補省略號，也不丟掉大半內容。
-_TRUNCATE_MIN_BOUNDARY_RATIO = 0.6
-
-
-def _truncate_chapter_to_target(content, target: int):
-    """章節 post-process 硬切：實際字數遠超 target 時切到 target 附近、切句界、明示節略。
-
-    bug 2026-06-20：軟約束（prompt ±15% + 旁白）prod 證實壓不住章節字數
-    （target=800 actual=2258）。memory/lessons-live-research.md 記載「字數硬上限
-    prompt 層只能逼近不能精確，要硬切需 post-process truncate」。本函式即該硬切。
-
-    設計：
-    - 字數以 _count_chapter_words 度量（剝 {cite:N} 後字元數），與 target 同尺度。
-    - 在 citation render **之前**呼叫：content 仍是 {cite:N}，切句界天然不會切到半個
-      placeholder（citation 落在標點之前，句末標點是切點）。額外防禦：切後若殘留半個
-      `{cite` 片段（理論上不該發生）退一步到上一個完整 placeholder 之後。
-    - no silent fail：節略一律補 TRUNCATE_ELLIPSIS。
-    - limit 完全參數化（target），無 magic default。target <= 0 → no-op。
-
-    Returns:
-        (new_content, was_truncated)
+    禁 hardcode 章名映射：純比對傳入 chapter_names。序數/語意指涉在此**不猜**，回 None 交 LLM。
     """
-    text = content or ""
-    if not text or target <= 0:
-        return text, False
-    if _count_chapter_words(text) <= target:
-        return text, False
+    s = (target or "").strip()
+    if not s:
+        return ""
+    names = [(n or "").strip() for n in (chapter_names or [])]
+    for n in names:  # exact
+        if n and s == n:
+            return n
+    cands = [n for n in names if n and (s in n or n in s)]  # 唯一 substring
+    if len(cands) == 1:
+        return cands[0]
+    return None  # 交第二層 LLM
 
-    import re
 
-    # 1) 找出原字串中「剝 cite 後字元數」剛好到 target 的原字串切點 raw_cut。
-    #    逐字掃描，跳過 {cite:N} 整段（不計入字數、不可在中間切）。
-    cite_re = re.compile(r"\{cite:\d+\}")
-    counted = 0
-    raw_cut = len(text)
-    i = 0
-    n = len(text)
-    while i < n:
-        m = cite_re.match(text, i)
-        if m:
-            i = m.end()  # 整個 placeholder 跳過
+def _serialize_special_element_for_state(elem):
+    """B3 集中 serializer：所有寫入 state.format_specs["special_elements"] 的路徑一律走此，
+    強制排除 transient 語意判斷欄位，保持持久化標準 shape 與今日一致（OQ-4）。
+
+    **持久化標準 shape（拍板）= 固定三欄** `{type, target_chapter, description}`，
+    缺欄位補空字串（None → ""）。不多欄、不少欄——與今日 special_elements dict shape 逐字一致。
+
+    elem：SpecialElementSpec 或 dict。回持久化用純三欄 dict。
+    """
+    d = elem.model_dump() if hasattr(elem, "model_dump") else dict(elem)
+    return {
+        "type": d.get("type", ""),
+        "target_chapter": d.get("target_chapter", "") or "",
+        "description": d.get("description", "") or "",
+    }
+
+
+def _diagnose_unmatched_special_element_targets(all_special_elements, chapter_titles):
+    """report-level no-silent-fail 後衛：outline 定案後，找出「對不到任何章」的
+    special_element target（exact 比對 finalized 章名）。只在有 outline 時判。
+    Returns：對不到任何章的 target 字串 list（去重保序），供 caller emit 一次 narration。
+    SF2 註：本 helper 只讀 elem["target_chapter"]、回傳字串 list，**不把 elem 傳給下游**，
+    故不需 serializer sanitize（transient 欄位不會外洩到 writer / narration）。
+    """
+    if not all_special_elements or not chapter_titles:
+        return []
+    titles = [(t or "").strip() for t in chapter_titles]
+    unmatched = []
+    seen = set()
+    for elem in all_special_elements:
+        if not isinstance(elem, dict):
             continue
-        counted += 1
-        i += 1
-        if counted >= target:
-            raw_cut = i
-            break
-
-    head = text[:raw_cut]
-
-    # 2) 在 head 內找最後一個句末標點，切在句界。
-    best = -1
-    for ch in _SENTENCE_BOUNDARY_CHARS:
-        idx = head.rfind(ch)
-        if idx > best:
-            best = idx
-
-    if best >= 0 and _count_chapter_words(
-        head[: best + 1]
-    ) >= target * _TRUNCATE_MIN_BOUNDARY_RATIO:
-        # 句界保留標點本身，切到 best+1。
-        body = head[: best + 1]
-    else:
-        # 無句界 / 句界離 limit 太遠（丟太多）→ 寧可硬切（should-fix）。
-        body = head
-
-    # 3) 防禦：逐字掃描已跳過 placeholder，raw_cut 必落在 placeholder 邊界外，
-    #    句界切點亦在標點處（標點不在 {cite:N} 內）。但保險：若末端殘留開頭的
-    #    `{cite` 不完整片段（無對應 '}'），退到上一個 '}' 之後。
-    last_open = body.rfind("{cite")
-    last_close = body.rfind("}")
-    if last_open > last_close:
-        body = body[:last_open]
-
-    return body.rstrip() + TRUNCATE_ELLIPSIS, True
+        target = (elem.get("target_chapter") or "").strip()
+        if not target or target in seen:
+            continue
+        if target not in titles:  # exact 對不到任何 finalized 章名
+            unmatched.append(target)
+            seen.add(target)
+    return unmatched
 
 
 def _is_intro_or_conclusion(book_outline, idx: int) -> bool:
@@ -886,6 +872,8 @@ class LiveResearchOrchestrator(OrchestratorBase):
         # 各 flag 語意不同（GCU 退化 vs guard 其他環節故障 vs 發布審查故障 vs 抽取故障），不可共用。
         self._grounding_unavailable_narrated = False
         self._guard_error_narrated = False
+        # R2（2026-07）：Stage 5 outline 定案後 special_element target 對不到章的 per-run 後衛旁白。
+        self._special_element_unmatched_narrated = False
         # Task 1: 發布審查（第三層 publish gate）自身故障的 degrade-and-narrate per-run dedup。
         self._publish_gate_unavailable_narrated = False
         # Task 3: 抽取層（grounding 第 1 步 candidate 抽取）LLM 故障旁白。
@@ -1535,19 +1523,17 @@ class LiveResearchOrchestrator(OrchestratorBase):
             # 兩條子路徑：clarifying_question 有 → 走澄清 dialog；無 → 既有「沒實質訴求 advance」
             clarifying = (intent.clarifying_question or "").strip()
             if clarifying:
-                # 澄清 dialog 分支（empty-ops clarification dialog plan）
-                # LLM 已生具體問句針對 user reply 追問 — emit narration + 重 emit checkpoint
-                # 保持 reply UI 可用（同 fallback path pattern）
+                # 澄清 dialog 分支（empty-ops clarification dialog plan）—— 收編到共用
+                # _emit_clarification helper（設計文件 §3，行為零漂移）。
+                from reasoning.schemas_live import ClarificationRequest
                 logger.info(
                     f"[LIVE RESEARCH] Stage 1: empty ops + clarifying_question — "
                     f"emit clarification checkpoint (summary='{intent.summary}', "
                     f"question='{clarifying[:60]}')"
                 )
-                await self._emit_narration(clarifying)
-                await self._emit_checkpoint(
-                    stage=1, proposal=state.checkpoint_prompt
+                return await self._emit_clarification(
+                    ClarificationRequest(question=clarifying, stage=1), state
                 )
-                return state
 
             # 模糊但完全無實質訴求（既有 path 保留）
             logger.info(
@@ -1755,12 +1741,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if spec.special_elements:
             state.format_specs = dict(state.format_specs or {})
             state.format_specs["special_elements"] = [
-                {
-                    "type": e.type,
-                    "target_chapter": e.target_chapter,
-                    "description": e.description,
-                }
-                for e in spec.special_elements
+                _serialize_special_element_for_state(e) for e in spec.special_elements
             ]
             logger.info(
                 f"[LIVE RESEARCH] initial format spec: "
@@ -3279,6 +3260,20 @@ class LiveResearchOrchestrator(OrchestratorBase):
           `_handle_pending_reframe`（既有 confirm/cancel/adjust 三分支）
         - 其他訊息 → `_classify_stage_4_response` 解 typed action，按 action 路由
         """
+        # === R7: invariant recovery + special_element pending 短路（全在 auto/blank 之前）===
+        # (0) 互斥 invariant fail-loud recovery（兩個 pending 不得同時非空）。
+        recovered = await self._enforce_pending_exclusivity(state)  # 清 special + SF3b narration，回是否 recover
+        # (1) special_element pending 短路（放在 auto/blank 之前，blank/auto 不會誤 complete_stage）。B-order。
+        if state.pending_special_element_json:
+            return await self._handle_pending_special_element(state, user_message, auto_continue)
+        # (2) SF-order（explicit 版）：雙 pending violation recover 清 special 後，若 reframe 仍
+        #     pending 且本輪是 blank/auto，必須在此強制 route reframe，不落 auto/blank complete_stage
+        #     （否則會把 reframe 也 complete 掉）。一般 reframe 短路仍保留在既有 :3252 原位（零漂移）。
+        if recovered and state.pending_reframe_json:
+            return await self._handle_pending_reframe(
+                state, user_message, target_stage=4
+            )
+
         # === auto_continue / 空訊息 short-circuit（不打 LLM）===
         if auto_continue or not user_message.strip():
             state.format_specs = self._merge_format_specs_default(state.format_specs)
@@ -3370,18 +3365,99 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 )
                 await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
                 return state
+            import json
             state.format_specs = dict(state.format_specs or {})
-            state.format_specs["special_elements"] = [
-                e.model_dump() for e in fc.special_elements
+            # 暫定章名清單（與 classifier 同源 _resolve_chapter_source）
+            try:
+                _cm = ContextMap.model_validate_json(state.context_map_json)
+                _src, _ = self._resolve_chapter_source(_cm, state.format_specs)
+                _chapter_names = [
+                    (c.get("name", "") if isinstance(c, dict) else getattr(c, "name", ""))
+                    for c in _src
+                ]
+            except Exception:
+                _chapter_names = []
+
+            # SF2b（Codex）：既有 list 拷貝時也逐項 serialize（不把舊 session 髒 transient 寫回）
+            resolved_elements = [
+                _serialize_special_element_for_state(e)
+                for e in (state.format_specs.get("special_elements") or [])
+                if isinstance(e, dict) or hasattr(e, "model_dump")
             ]
+            confirm_pending = []   # LLM clear、待 user 確認（完整 element context）
+            clarify_pending = []   # uncertain/對不到，待完整 clarification（完整 element context）
+            for e in fc.special_elements:
+                d = e.model_dump()
+                raw_target = d.get("target_chapter", "")
+                layer1 = _resolve_target_chapter_layer1(raw_target, _chapter_names)
+                if layer1 is not None:
+                    # 第一層命中（exact/唯一/明說全章「」）→ 直接定位、走 serializer 寫入（B3）
+                    d["target_chapter"] = layer1
+                    resolved_elements.append(_serialize_special_element_for_state(d))
+                    continue
+                # 第二層：讀 LLM 語意判斷（classifier 已順帶判、在 d 內）
+                llm_title = (d.get("resolved_chapter_title") or "").strip()
+                conf = d.get("resolution_confidence")
+                pend = {"type": d.get("type", ""), "description": d.get("description", ""),
+                        "raw_target": raw_target, "resolved_title": ""}
+                if conf == "clear" and llm_title and llm_title in _chapter_names:
+                    pend["resolved_title"] = llm_title
+                    confirm_pending.append(pend)      # 待 user 確認（完整存，B1）
+                else:
+                    clarify_pending.append(pend)      # uncertain/對不到（完整存，B4）
+            # resolved 直接寫入（serializer 已 strip transient，B3）
+            state.format_specs["special_elements"] = resolved_elements
+            # 兩個 pending 旗標語意正交（Codex should-fix，明確化）：
+            #  - pending_format_confirmation（既有布林）＝「Stage 4 有格式偏好待 user 於 checkpoint 一併確認」
+            #    的**寬鬆總旗標**，收到 add_special_element 就 True，走既有 stage-4 confirm round。
+            #  - pending_special_element_json（新，本 plan）＝「有 special_element target **落灰區**、
+            #    正等 user 回答一個**具體澄清問句**」的**精確狀態機**。只在 confirm/clarify 分支才寫。
+            # 兩者可並存不衝突：pending_special_element_json 非空時，入口短路**優先**接管
+            # user 下一句（進 _handle_pending_special_element），不會落到泛用 pending_format_confirmation
+            # round；special pending 清空後，才回到既有 format confirmation 流程。
             state.pending_format_confirmation = True
+
+            from reasoning.schemas_live import ClarificationRequest
+            # confirm 優先（clear 單選確認）；有 confirm 則 clarify 併入 pending 下一輪處理
+            if confirm_pending:
+                state.pending_special_element_json = json.dumps({
+                    "kind": "confirm",
+                    "elements": confirm_pending,
+                    "clarify_backlog": clarify_pending,   # confirm 完再處理 clarify
+                    "chapter_names": _chapter_names,
+                }, ensure_ascii=False)
+                await self._persist_checkpoint_boundary(state)   # B4：pending 已完整存好才 persist
+                return await self._emit_clarification(
+                    ClarificationRequest(
+                        question=lr_copy.special_element_confirm_question(
+                            [p["resolved_title"] for p in confirm_pending]
+                        ),
+                        stage=4,
+                    ),
+                    state,
+                )
+            if clarify_pending:
+                # 章名空時仍**無條件存 pending**（不丟 element，no silent fail 新洞，Codex）。
+                # 問句在無章名時降級為「請直接告訴我章名」（不列枚舉）。
+                state.pending_special_element_json = json.dumps({
+                    "kind": "clarify",
+                    "elements": clarify_pending,
+                    "chapter_names": _chapter_names,   # 可能空 list
+                }, ensure_ascii=False)
+                await self._persist_checkpoint_boundary(state)
+                _joined = "、".join(
+                    f"「{p['raw_target'] or '（未指定章節）'}」" for p in clarify_pending)
+                if _chapter_names:
+                    _q = lr_copy.special_element_clarification_question(
+                        [p["raw_target"] or "（未指定章節）" for p in clarify_pending], _chapter_names)
+                else:
+                    _q = (f"你想把特殊格式（如表格）放在哪一章呢？你剛提到的{_joined}我一時對應不準，"
+                          f"目前章節還沒定案。請直接告訴我要放哪一章（章名）。")
+                return await self._emit_clarification(
+                    ClarificationRequest(question=_q, stage=4), state)
             await self._emit_narration(
-                f"已記下 {len(fc.special_elements)} 個格式 element。確認其他格式偏好？"
+                f"已記下 {len(resolved_elements)} 個格式 element。確認其他格式偏好？"
             )
-            # 同源病 root fix：停在 checkpoint 不 advance → 必須重 emit checkpoint。
-            # 前端 continueLiveResearch 已把 _lrAwaitingCheckpointReply 設 false、隱藏
-            # reply UI，narration 不會恢復 reply UI；re-emit 同一 format checkpoint 不
-            # advance（不呼叫 complete_stage），不 regress v8 Bug 2。
             await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
             return state
 
@@ -3400,8 +3476,10 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     state.user_voice.citation_style = fc.citation_style_extracted
                 if fc.special_elements:
                     state.format_specs = dict(state.format_specs or {})
+                    # reframe 帶表格：章名正在被 reframe 改動、暫定章名未穩定，不在此即時判
+                    # target 語意（會白問）；交 Stage 5 後衛兜底。B3：走 serializer strip transient。
                     state.format_specs["special_elements"] = [
-                        e.model_dump() for e in fc.special_elements
+                        _serialize_special_element_for_state(e) for e in fc.special_elements
                     ]
                 # Blocker A (2026-05-19)：mixed structure + format spec 路徑也要
                 # propagate word count（reframe entry 不會自己 propagate）
@@ -3420,17 +3498,241 @@ class LiveResearchOrchestrator(OrchestratorBase):
             return state
 
         if action == Stage4ResponseAction.unclear:
-            # 同源病 root fix（對齊 Stage 1/3/5）：narration 是問句，但前端在
-            # continueLiveResearch 已把 _lrAwaitingCheckpointReply 設 false、隱藏 reply UI，
-            # narration 防呆不會觸發。必須重 emit 既有 Stage 4 format checkpoint，
-            # 讓 showLRCheckpoint 恢復 reply UI（checkpoint_prompt 未被 reframe 污染，
-            # 見 _emit_reframe_proposal 2026-05-18 root-fix）。
-            await self._emit_narration(response.clarifying_question)
-            await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
-            return state
+            from reasoning.schemas_live import ClarificationRequest
+            # 同源病 root fix（對齊 Stage 1/3/5）：re-emit checkpoint 恢復前端 reply UI
+            # （continueLiveResearch 已把 _lrAwaitingCheckpointReply 設 false、隱藏 reply UI；
+            # checkpoint_prompt 未被 reframe 污染，見 _emit_reframe_proposal 2026-05-18 root-fix）。
+            # 收編到共用 _emit_clarification helper（設計文件 §3）。
+            return await self._emit_clarification(
+                ClarificationRequest(question=response.clarifying_question, stage=4), state
+            )
 
         # Unhandled action — 不可 silent fail
         raise ValueError(f"Unhandled Stage4ResponseAction: {action}")
+
+    async def _enforce_pending_exclusivity(self, state) -> bool:
+        """R7 invariant：兩個 pending 不得同時非空。異常時保留 reframe（結構優先）、
+        清 special + user-facing 誠實提示（SF3b：已清資料、不承諾「不漏」）。
+        Returns True 若發生 recovery（caller 應改 route reframe、不再走 auto/blank）。"""
+        if not (state.pending_reframe_json and state.pending_special_element_json):
+            return False
+        logger.error("[LIVE RESEARCH] INVARIANT VIOLATION: reframe + special_element pending both set")
+        state.pending_special_element_json = ""   # 清 special（reframe 優先吃）
+        await self._persist_checkpoint_boundary(state)
+        # SF3b：誠實文案 —— 資料已清（不能承諾「不漏」），請結構確認完後再說一次
+        await self._emit_narration(
+            "為了避免放錯，我先暫停這個表格／圖表設定；等結構這步確認完，"
+            "請再告訴我一次要放哪一章。"
+        )
+        return True
+
+    async def _classify_pending_special_element_reply(self, user_message, chapter_names, pending_summary):
+        """R7：LLM 判 user 對 special_element 澄清問句的回答意圖（不用 substring/regex）。
+        比照 _classify_confirmation_intent 的 LLM classifier pattern（level="low"，LLM fail → 安全 default）。
+
+        Returns dict: {"intent": one of confirm|change_chapter|cancel|unclear,
+                       "target_chapter": <LLM 判 user 想改到的章名原文，僅 change_chapter 有>}
+        - confirm：user 接受 pending 提案（「對/是的/好/就放那章」）→ caller 用 pending 的 resolved_title 定位
+        - change_chapter：user 改章（「不是，我要國外案例」「放結論那章」「第二個」「最後一章」）
+            → LLM 順帶把新 target 語意對應到 chapter_names 裡的某章名（比照 R2 主流程語意判斷）；判不出留空
+        - cancel：user 放棄（「算了/不用了/不要表格了」）→ caller 清 pending 不注入
+        - unclear：判不準 → caller 重問
+        """
+        msg = (user_message or "").strip()
+        if not msg:
+            return {"intent": "unclear", "target_chapter": ""}
+        if self.dry_run:
+            # unit test 加速：只對明顯短句 keyword fallback（production 永遠走 LLM）。
+            # 用 substring 命中（複合短句如「算了不用了」也中），confirm 先判、cancel 後判。
+            low = msg.strip(" .,!?！？。，、~～").lower()
+            if low in {"對", "是", "好", "沒問題", "就這樣", "ok", "確認", "可以"}:
+                return {"intent": "confirm", "target_chapter": ""}
+            if any(kw in low for kw in ("算了", "不用了", "不用", "取消", "不要表格", "cancel")):
+                return {"intent": "cancel", "target_chapter": ""}
+            return {"intent": "unclear", "target_chapter": ""}
+        _opts = "、".join(f"{i+1}）{n}" for i, n in enumerate(chapter_names)) or "（章節尚未定案）"
+        prompt = (
+            "你是意圖分類器。系統剛問使用者一個「表格／圖表要放哪一章」的澄清問句，"
+            f"現在使用者回了一句。目前規劃的章節：{_opts}。\n"
+            f"待確認的內容：{pending_summary}\n\n"
+            f"使用者訊息：\n\"\"\"{msg}\"\"\"\n\n"
+            "判斷意圖並回 JSON：\n"
+            "- intent=\"confirm\"：接受系統提案（「對」「是的」「好就放那章」「沒錯」）。\n"
+            "- intent=\"change_chapter\"：要改放別章（「不是，我要國外案例」「放結論那章」「第二個」「最後一章」）。\n"
+            "  * **章節清單非空時**：target_chapter 填 user 想改到的**上方章節清單裡的章名原文**"
+            "（用你的語意理解對應，「國外案例」→對到清單裡的「國外案例」、「第二個」→第2章名、「最後一章」→末章名）。\n"
+            "  * **章節清單為空（尚未定案）時**：沒有清單可對照 —— 只要 user 給了**具體章名或位置短語**"
+            "（如「結論」「政策建議那章」「最後一章」），就 target_chapter 填 **user 的原話 raw target**"
+            "（照抄「結論」「政策建議那章」，不要留空）；系統之後會用定案章名去對。\n"
+            "  * 只有 user 仍**沒給任何具體 target**（純模糊「隨便」「你決定」）才留空字串。\n"
+            "- intent=\"cancel\"：放棄放這個特殊格式（「算了」「不用了」「不要表格了」）。\n"
+            "- intent=\"unclear\"：判不準 / 模糊 / user 沒給具體 target。\n\n"
+            "只回 JSON。"
+        )
+        schema = {"type": "object", "properties": {
+            "intent": {"type": "string", "enum": ["confirm", "change_chapter", "cancel", "unclear"]},
+            "target_chapter": {"type": "string"},
+        }, "required": ["intent"]}
+        try:
+            resp = await ask_llm(prompt, schema, level="low",
+                                 query_params=getattr(self.handler, "query_params", {}),
+                                 max_length=512)   # SF1：比照 _classify_confirmation_intent
+        except Exception as e:
+            logger.warning(f"[LIVE RESEARCH] pending special_element reply classify fail: {e}")
+            return {"intent": "unclear", "target_chapter": ""}   # 安全 default → 重問，不誤動作
+        if not resp:
+            return {"intent": "unclear", "target_chapter": ""}
+        # SF1：unwrap schema-wrapped response（{type,properties,required} → properties），
+        # 照 _classify_confirmation_intent 的 pattern（wrapped success 誤當 unclear
+        # 會 production 反覆重問）。
+        if "intent" not in resp and "properties" in resp and isinstance(resp["properties"], dict):
+            resp = resp["properties"]
+        intent = resp.get("intent", "unclear")
+        if intent not in ("confirm", "change_chapter", "cancel", "unclear"):
+            logger.warning(f"[LIVE RESEARCH] pending reply unknown intent {intent!r} → unclear")
+            intent = "unclear"   # SF1：unknown intent guard → 安全 default
+        return {"intent": intent,
+                "target_chapter": (resp.get("target_chapter") or "").strip()}
+
+    async def _handle_pending_special_element(self, state, user_message, auto_continue=False):
+        """R7：處理 special_element 澄清 round 的 user reply。意圖分流**全交 LLM**
+        （_classify_pending_special_element_reply），不用 substring/regex。
+        confirm → 用 pending 的 resolved_title 定位；change_chapter → 用 LLM 判的新 target
+        定位；cancel → 清 pending 不注入；unclear → 重問。
+        blank/auto_continue（B-order）→ re-emit clarification，不 finalize、不清 pending。
+        """
+        import json
+        from reasoning.schemas_live import ClarificationRequest
+        # B-order：blank/auto 時保 pending、re-emit 問句，不 advance（不能誤 complete_stage）
+        if auto_continue or not (user_message or "").strip():
+            return await self._reemit_pending_special_clarification(state)
+        try:
+            pend = json.loads(state.pending_special_element_json)
+        except Exception:
+            # malformed → 清空 + persist（防重連反覆進壞 pending）+ 重問（no silent fail）
+            state.pending_special_element_json = ""
+            await self._persist_checkpoint_boundary(state)
+            await self._emit_narration("剛才的表格設定我沒接好，麻煩再說一次要放哪一章？")
+            await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
+            return state
+
+        chapter_names = pend.get("chapter_names") or []
+        elements = pend.get("elements") or []
+        state.format_specs = dict(state.format_specs or {})
+        # B3：讀既有 list 也先 sanitize（舊 session 可能已有髒 transient）
+        cur = [_serialize_special_element_for_state(e) for e in
+               (state.format_specs.get("special_elements") or []) if isinstance(e, dict)]
+
+        _summary = "、".join(
+            f"{el.get('type','')}放「{el.get('resolved_title') or el.get('raw_target') or '未指定'}」"
+            for el in elements)
+        cls = await self._classify_pending_special_element_reply(
+            user_message, chapter_names, _summary)
+        intent = cls["intent"]
+
+        def _finalize(target_for_all=None):
+            """把 pending elements 寫進 special_elements（走 serializer，B3）。
+            target_for_all=None → 各 element 用自己的 resolved_title（confirm path）；
+            否則全用 target_for_all（change_chapter path，多 element 共用新章 —— 見多-element 註）。"""
+            for el in elements:
+                tgt = target_for_all if target_for_all is not None else (el.get("resolved_title") or "")
+                cur.append(_serialize_special_element_for_state({
+                    "type": el.get("type", ""), "target_chapter": tgt,
+                    "description": el.get("description", ""),
+                }))
+            state.format_specs["special_elements"] = cur
+
+        async def _emit_clarify_again():
+            state.pending_special_element_json = json.dumps(
+                {"kind": "clarify", "elements": elements, "chapter_names": chapter_names},
+                ensure_ascii=False)
+            await self._persist_checkpoint_boundary(state)
+            return await self._emit_clarification(ClarificationRequest(
+                question=lr_copy.special_element_clarification_question(
+                    [e.get("raw_target") or "（未指定章節）" for e in elements], chapter_names),
+                stage=4), state)
+
+        if intent == "cancel":
+            state.pending_special_element_json = ""
+            await self._persist_checkpoint_boundary(state)
+            await self._emit_narration("好的，那就不放這個表格／圖表了。確認其他格式偏好？")
+            await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
+            return state
+
+        if intent == "confirm":
+            # confirm 只在 confirm kind（有 resolved_title）合法；clarify kind 沒有 title → 當 unclear 重問
+            if pend.get("kind") == "confirm" and all(el.get("resolved_title") for el in elements):
+                _finalize(target_for_all=None)  # 各用自己的 resolved_title
+                backlog = pend.get("clarify_backlog") or []
+                if backlog:
+                    state.pending_special_element_json = json.dumps(
+                        {"kind": "clarify", "elements": backlog, "chapter_names": chapter_names},
+                        ensure_ascii=False)
+                    await self._persist_checkpoint_boundary(state)
+                    return await self._emit_clarification(ClarificationRequest(
+                        question=lr_copy.special_element_clarification_question(
+                            [b["raw_target"] or "（未指定章節）" for b in backlog], chapter_names),
+                        stage=4), state)
+                state.pending_special_element_json = ""
+                await self._persist_checkpoint_boundary(state)
+                await self._emit_narration("好的，已放進去。確認其他格式偏好？")
+                await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
+                return state
+            return await _emit_clarify_again()
+
+        if intent == "change_chapter":
+            _new_target = cls.get("target_chapter", "")
+            # B-loop 根解（Codex）：章名空（chapter_names=[]）時 layer1 必回 None →
+            # 不能無限重問。此時 user 已給了明確 target（如「結論」）→ 直接寫入 raw target
+            # （走 serializer），交 Stage 5 exact filter / unmatched 後衛兜底（不 silent、不卡死）。
+            if not chapter_names and _new_target:
+                _finalize(target_for_all=_new_target)
+                state.pending_special_element_json = ""
+                await self._persist_checkpoint_boundary(state)
+                await self._emit_narration(
+                    f"好，我先記下放到「{_new_target}」，章節定案後我會對上，"
+                    f"如果對不上會再提醒你。確認其他格式偏好？")
+                await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
+                return state
+            # 有章名 → LLM 判的新 target 過第一層 code 短路確認 exact/唯一命中 chapter_names
+            new_hit = _resolve_target_chapter_layer1(_new_target, chapter_names)
+            if new_hit:  # "" 或 None 都不算命中（"" 是空章名，此處不接受空）
+                _finalize(target_for_all=new_hit)
+                state.pending_special_element_json = ""
+                await self._persist_checkpoint_boundary(state)
+                await self._emit_narration(f"好，改放到「{new_hit}」那章。確認其他格式偏好？")
+                await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
+                return state
+            return await _emit_clarify_again()   # 有章名但 LLM 給的 target 對不到 → 重問
+
+        # unclear
+        return await _emit_clarify_again()
+
+    async def _reemit_pending_special_clarification(self, state):
+        """B-order：pending 非空但 user 送 blank/auto → 從 pending 重建問句 re-emit，
+        不 finalize、不清 pending、不 advance。malformed → 走 handler 的 malformed recovery。"""
+        import json
+        from reasoning.schemas_live import ClarificationRequest
+        try:
+            pend = json.loads(state.pending_special_element_json)
+        except Exception:
+            state.pending_special_element_json = ""
+            await self._persist_checkpoint_boundary(state)
+            await self._emit_narration("剛才的表格設定我沒接好，麻煩再說一次要放哪一章？")
+            await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
+            return state
+        elements = pend.get("elements") or []
+        chapter_names = pend.get("chapter_names") or []
+        if pend.get("kind") == "confirm":
+            _q = lr_copy.special_element_confirm_question(
+                [e.get("resolved_title") for e in elements if e.get("resolved_title")])
+        elif chapter_names:
+            _q = lr_copy.special_element_clarification_question(
+                [e.get("raw_target") or "（未指定章節）" for e in elements], chapter_names)
+        else:
+            _q = ("你想把特殊格式（如表格）放在哪一章呢？目前章節還沒定案，"
+                  "請直接告訴我要放哪一章（章名）。")
+        return await self._emit_clarification(ClarificationRequest(question=_q, stage=4), state)
 
     async def _classify_stage_4_response(
         self,
@@ -3453,10 +3755,21 @@ class LiveResearchOrchestrator(OrchestratorBase):
         from reasoning.prompts.stage4_intent import Stage4IntentPromptBuilder
 
         builder = Stage4IntentPromptBuilder()
+        # R2：取暫定章名清單餵 classifier，讓 LLM 順帶判 special_element target 語意（不另起 call）
+        try:
+            _cm = ContextMap.model_validate_json(state.context_map_json)
+            _src, _ = self._resolve_chapter_source(_cm, state.format_specs)
+            _chapter_names = [
+                (c.get("name", "") if isinstance(c, dict) else getattr(c, "name", ""))
+                for c in _src
+            ]
+        except Exception:
+            _chapter_names = []
         prompt = builder.build_response_classifier_prompt(
             user_message=user_message,
             pending_reframe=bool(state.pending_reframe_json),
             pending_format_confirmation=state.pending_format_confirmation,
+            chapter_names=_chapter_names,
         )
 
         # JSON schema for typed action — instructor backend reject + retry 不合規 output
@@ -3530,6 +3843,12 @@ class LiveResearchOrchestrator(OrchestratorBase):
                                     },
                                     "target_chapter": {"type": "string"},
                                     "description": {"type": "string"},
+                                    # R2 transient 語意判斷（用完即丟，不持久化）
+                                    "resolved_chapter_title": {"type": ["string", "null"]},
+                                    "resolution_confidence": {
+                                        "type": ["string", "null"],
+                                        "enum": ["clear", "uncertain", None],  # None = 允許 null
+                                    },
                                 },
                                 "required": ["type"],
                             },
@@ -3614,7 +3933,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
             if format_content.special_elements:
                 state.format_specs = dict(state.format_specs or {})
                 state.format_specs["special_elements"] = [
-                    e.model_dump() for e in format_content.special_elements
+                    _serialize_special_element_for_state(e) for e in format_content.special_elements
                 ]
             if format_content.format_spec_extracted:
                 state.format_specs = self._merge_format_specs_user(
@@ -3791,8 +4110,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
         merged = dict(existing or {})
         merged["user_specified"] = user_message
         if special_elements:
-            # 非空 list → user 此輪明確提了 element 訴求，覆寫
-            merged["special_elements"] = list(special_elements)
+            # 非空 list → user 此輪明確提了 element 訴求，覆寫。B3：統一走 serializer strip transient。
+            # （caller 傳進來的 [e.model_dump()...] 含 transient，由此處 serializer 統一 strip。）
+            merged["special_elements"] = [
+                _serialize_special_element_for_state(e) for e in special_elements
+            ]
         return merged
 
     # ──── Stage 5: 分段輸出 ────────────────────────────────────
@@ -4066,6 +4388,21 @@ class LiveResearchOrchestrator(OrchestratorBase):
                     )
 
             state.book_outline_json = outline.model_dump_json()
+            # R2 no silent fail 後衛：outline 定案後檢查有無 special_element target
+            # 對不到任何章（reframe 改章名 / Stage 4 未解的殘留）。report-level 跑一次。
+            if not getattr(self, "_special_element_unmatched_narrated", False):
+                _all_se = (state.format_specs or {}).get("special_elements") or []
+                _titles = [getattr(c, "title", "") for c in outline.chapters]
+                _unmatched = _diagnose_unmatched_special_element_targets(_all_se, _titles)
+                if _unmatched:
+                    self._special_element_unmatched_narrated = True
+                    await self._emit_narration(
+                        lr_copy.special_element_target_unmatched_narration(_unmatched)
+                    )
+                    logger.warning(
+                        f"[LIVE RESEARCH] special_element targets 對不到任何章: {_unmatched} "
+                        f"(chapters={_titles})"
+                    )
             # P2 W1（§0 #21，C2/C3）：evidence→章正向回填，涵蓋 LLM plan_outline +
             # skeleton fallback 兩路匯流（此處 outline 是兩路同一變數）。不放在
             # build_skeleton_outline（漏 LLM 主線 → prod 非 dry_run suggested_chapters 恆空）。
@@ -5265,11 +5602,10 @@ class LiveResearchOrchestrator(OrchestratorBase):
             user_spec = format_specs.get("user_specified", format_specs.get("default", "markdown_apa"))
             format_spec = f"格式要求：{user_spec}"
 
-        # spec §4.10：special_elements per-chapter filter
-        # state.format_specs['special_elements'] 是全章 list；對當前 section filter
-        # target_chapter match 的 element 才注入 writer prompt 強制紀律 block。
-        # Match 策略：target_chapter 空字串 → 全章節注入（user 沒指定 → 不 leak）；
-        # 否則 exact match 或雙向 substring 容錯（user 寫「結果」vs topic「結果與討論」）。
+        # spec §4.6.3：special_elements per-chapter filter（R2 澄清機制，2026-07）。
+        # target_chapter 在 Stage 4 已（code 短路 / LLM 判 clear→user 確認 / user 澄清）定位成章名原文
+        # → 此處 exact 命中 section_title 即注入。空 target → 全章注入。
+        # 對不到 → 不注入（Stage 5 後衛 report-level 診斷負責 no silent fail）。
         special_elements_for_chapter: List[Dict[str, str]] = []
         all_special_elements = (
             format_specs.get("special_elements") if format_specs else None
@@ -5278,26 +5614,14 @@ class LiveResearchOrchestrator(OrchestratorBase):
             for elem in all_special_elements:
                 if not isinstance(elem, dict):
                     continue
+                # SF2：讀既有 list 先 sanitize（舊 session 髒 transient 不傳給 writer）——
+                # 與 Step 6 B3「讀既有 list 也 sanitize」宣稱對齊。
+                elem = _serialize_special_element_for_state(elem)
                 target = (elem.get("target_chapter") or "").strip()
                 if not target:
-                    # unspecified → 注入全章節（user 沒明確指定章節，每章都該關注）
-                    special_elements_for_chapter.append(elem)
-                    continue
-                # exact or 雙向 substring match
-                if (
-                    target == section_title
-                    or target in section_title
-                    or section_title in target
-                ):
-                    special_elements_for_chapter.append(elem)
-
-            if not special_elements_for_chapter:
-                # 有 element 但 match 不到當前 section — log warning（不 silent fail）
-                logger.warning(
-                    f"[LIVE RESEARCH] special_elements present but no element "
-                    f"matched section_title={section_title!r}; "
-                    f"targets={[e.get('target_chapter') for e in all_special_elements if isinstance(e, dict)]}"
-                )
+                    special_elements_for_chapter.append(elem)  # 全章注入
+                elif target == section_title:
+                    special_elements_for_chapter.append(elem)  # exact 命中章名
 
         # context_map_summary：整份 ContextMap 摘要
         summary = context_map_to_summary(context_map)
@@ -5735,19 +6059,19 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if _f_was_corrected:
             was_corrected = True
 
-        # 字數 post-process 硬切（bug 2026-06-20）：章節定稿後（所有 guard /
-        # publish gate mutate 完）、citation render 之前處理。此時 content 仍是
-        # {cite:N}，切句界天然不切到半個 placeholder。
-        #
-        # 設計演進：原本只發「超標」軟旁白（_maybe_narrate_word_overshoot，內容照常
-        # 保留）。但 prod 證實軟約束（prompt ±15% + 旁白）壓不住字數（target=800
-        # 實際=2258），CEO/CTO 拍板改 post-process truncate（硬切到 target 附近、
-        # 切句界、補省略號、發「已節略」誠實旁白 no silent fail）。truncate 取代軟旁白：
-        # 過閾值的章直接切並發 truncate 旁白；未過閾值的章不動、不發。
-        # 仍**不**回呼 writer.compose_section（排除字數 auto-rewrite，避免多輪重寫迴圈）。
-        await self._maybe_truncate_chapter(
+        # 字數 post-process：章節定稿後發「比預期長」透明化旁白（content 不動）。硬切會
+        # 截斷正文使用者要不回，2026-07 改回軟約束。僅 user 明確要求字數才發旁白。
+        _uv = getattr(state, "user_voice", None) if state is not None else None
+        _user_specified_wc = bool(
+            _uv is not None and getattr(_uv, "target_word_count", None)
+        ) or self._chapter_has_user_word_target(state, current_chapter_index)
+        await self._maybe_narrate_word_overshoot(
             section_output=section_output,
-            target=self._chapter_target_words(book_outline, current_chapter_index),
+            target=self._resolve_chapter_target_words(
+                book_outline, state, current_chapter_index,
+                user_specified=_user_specified_wc,
+            ),
+            user_specified_word_count=_user_specified_wc,
         )
 
         # TypeAgent Target 3 (2026-05-19, CEO 拍板 OQ-5): typed citations render
@@ -5780,52 +6104,64 @@ class LiveResearchOrchestrator(OrchestratorBase):
             return 0
         return getattr(chapters[current_chapter_index], "target_word_count", 0) or 0
 
-    async def _maybe_truncate_chapter(
-        self, *, section_output, target: int,
-    ) -> bool:
-        """章節 post-process 硬切（bug 2026-06-20）：實際字數明顯超出規劃時，硬切到
-        target 附近、切句界、補省略號，並發一則「已節略」誠實旁白（no silent fail）。
+    @staticmethod
+    def _chapter_has_user_word_target(state, current_chapter_index: int) -> bool:
+        """user 是否對「本章」明確指定字數（format_specs.chapters[i].word_target）。"""
+        if state is None:
+            return False
+        chapters = (getattr(state, "format_specs", {}) or {}).get("chapters") or []
+        if not (0 <= current_chapter_index < len(chapters)):
+            return False
+        ch = chapters[current_chapter_index]
+        wt = ch.get("word_target") if isinstance(ch, dict) else None
+        return isinstance(wt, int) and wt > 0
 
-        背景：軟約束（prompt ±15% + chapter_word_overshoot_narration 旁白）prod 證實
-        壓不住章節字數（target=800 actual=2258）。memory/lessons-live-research.md 記載
-        「字數硬上限 prompt 層只能逼近不能精確，要硬切需 post-process truncate」。
-
-        - target <= 0（未指定字數）→ 跳過（不切）。
-        - status != "drafted"（被 block / critic_rejected / guard_failed，content 已是
-          替換文）→ 跳過（替換文字數無意義，且切替換文會破壞 sentinel）。
-        - 與 overshoot 旁白同閾值（_WORD_OVERSHOOT_RATIO）：超標 30% 才切，正常波動不切。
-        - **在 citation render 之前呼叫**：content 仍是 {cite:N}，切句界天然不切到半個
-          placeholder（_truncate_chapter_to_target 另有防禦）。
-        - 切完直接 mutate section_output.section_content，回傳是否有切。
-
-        Returns:
-            True 若有節略（content 已被切短 + 已發旁白）；False 若未動。
+    def _resolve_chapter_target_words(
+        self, book_outline, state, current_chapter_index: int, *, user_specified: bool
+    ) -> int:
+        """SF1：優先 user 真實 surface form（format_specs.chapters[i].word_target），
+        退回 outline planner 的 book_outline target。避免 outline LLM 漏抄 → no-op。
+        user_specified=True 但仍解出 <=0 → logger.warning（不 silent）。
         """
-        status = getattr(section_output, "status", "drafted")
-        if target <= 0 or status != "drafted":
-            return False
-        actual_before = _count_chapter_words(section_output.section_content)
-        if actual_before <= target * self._WORD_OVERSHOOT_RATIO:
-            return False
+        chapters = (getattr(state, "format_specs", {}) or {}).get("chapters") or [] if state else []
+        if 0 <= current_chapter_index < len(chapters):
+            ch = chapters[current_chapter_index]
+            wt = ch.get("word_target") if isinstance(ch, dict) else None
+            if isinstance(wt, int) and wt > 0:
+                return wt
+        outline_target = self._chapter_target_words(book_outline, current_chapter_index)
+        if user_specified and outline_target <= 0:
+            logger.warning(
+                f"[LIVE RESEARCH] user 指定字數但本章 target 解不出（outline planner 漏抄?）: "
+                f"idx={current_chapter_index}"
+            )
+        return outline_target
 
-        new_content, was_truncated = _truncate_chapter_to_target(
-            section_output.section_content, target,
-        )
-        if not was_truncated:
+    async def _maybe_narrate_word_overshoot(
+        self, *, section_output, target: int, user_specified_word_count: bool,
+    ) -> bool:
+        """章節字數明顯超標時發「本章比預期長、內容照常保留」旁白（不切 content）。
+
+        僅 user 明確要求字數才發；content 一字不動（硬切會截斷正文）。契約見 spec §4.7.9。
+
+        Returns: True 若發了旁白；False 若未發（未指定 / 未過閾值 / 非 drafted）。
+        """
+        if not user_specified_word_count or target <= 0:
+            return False
+        status = getattr(section_output, "status", "drafted")
+        if status != "drafted":
+            return False
+        actual = _count_chapter_words(section_output.section_content)
+        if actual <= target * self._WORD_OVERSHOOT_RATIO:
             return False
 
         chapter_title = getattr(section_output, "section_title", "") or "本章"
         logger.info(
-            f"[LIVE RESEARCH] Chapter word truncate: {chapter_title!r} "
-            f"target={target} actual_before={actual_before} "
-            f"actual_after={_count_chapter_words(new_content)} "
-            f"(ratio={actual_before / max(target, 1):.2f})"
+            f"[LIVE RESEARCH] Chapter word overshoot (content kept): {chapter_title!r} "
+            f"target={target} actual={actual} (ratio={actual / max(target, 1):.2f})"
         )
-        section_output.section_content = new_content
         await self._emit_narration(
-            lr_copy.chapter_word_truncated_narration(
-                chapter_title, target, actual_before
-            )
+            lr_copy.chapter_word_overshoot_narration(chapter_title, target, actual)
         )
         return True
 
@@ -6489,6 +6825,84 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
     # ──── Stage 6: 匯出 ───────────────────────────────────────
 
+    def _sanitize_report_title(self, raw: str) -> str:
+        """AR P2：把 LLM 生成標題正規化成單行 markdown-safe 文字。
+        換行摺空格、剝前導 markdown 標記（# / > / * / -）、collapse 空白、超長截斷。
+        """
+        import re
+        t = re.sub(r"\s+", " ", (raw or "")).strip()
+        # 剝前導 markdown 區塊「語法」標記（標記+空白，如 '# ' '> ' '- '），
+        # 避免生成標題本身帶 '# ' 破壞 H1 結構。
+        # AR R2 nit：只剝「標記+空白」的真前導語法，不誤刪以 '#'/'-' 字面開頭的
+        # 合法標題（如 '#MeToo運動' / '-40%的降幅'）。
+        t = re.sub(r"^(#{1,6}\s+|[>*\-]\s+)+", "", t).strip()
+        if len(t) > _REPORT_TITLE_MAX_LEN:
+            t = t[:_REPORT_TITLE_MAX_LEN].rstrip()
+        return t
+
+    async def _generate_report_title(
+        self, context_map: "ContextMap", written_sections: List[Dict]
+    ) -> tuple:
+        """Stage 6 組 H1 前生成報告標題（CEO 拍板：low-tier LLM）。
+
+        Returns:
+            (title: str, was_generated: bool)
+            - 成功 → (後處理過的生成標題, True)
+            - 失敗 / timeout / 空回應 → (research_question, False) + logger.warning
+              （讀豹鐵律：不可 silent fail；AR R1：降級用顯式 boolean 而非字串相等傳遞）
+
+        input = research_question + 各章標題/摘要。鏡像 loop_engine title backfill 降級 pattern。
+        """
+        research_question = (context_map.research_question or "").strip()
+
+        # 組各章「標題：摘要」清單餵 LLM（有 chapter_summary 用摘要，無則只給標題）
+        chapter_lines = []
+        for s in written_sections:
+            title = str(s.get("title", "") or "").strip()
+            if not title:
+                continue
+            summary = str(s.get("chapter_summary", "") or "").strip()
+            chapter_lines.append(f"- {title}：{summary}" if summary else f"- {title}")
+        chapters_block = "\n".join(chapter_lines) if chapter_lines else "（無章節摘要）"
+
+        prompt = (
+            "以下是一份研究報告的原始研究問題與各章節標題／摘要。\n"
+            "請為整份報告生成一個有質感、具體、有資訊量的繁體中文標題（不超過 40 字），"
+            "概括報告的核心主旨與張力。\n"
+            "禁止用「研究報告」「分析」「探討」「淺談」等泛化空詞當開頭套語，"
+            "直接點出主題。\n\n"
+            f"原始研究問題：{research_question}\n\n"
+            f"各章節：\n{chapters_block}"
+        )
+
+        try:
+            response = await ask_llm(
+                prompt,
+                GeneratedReportTitle.model_json_schema(),
+                level="low",
+                query_params=getattr(self.handler, "query_params", {}),
+                timeout=_REPORT_TITLE_TIMEOUT,
+            )
+            raw = GeneratedReportTitle.model_validate(response).title or ""
+            generated = self._sanitize_report_title(raw)
+            if generated:
+                return (generated, True)
+            # 空回應（含後處理後變空）→ 降級（不 silent fail）
+            logger.warning(
+                "[LIVE RESEARCH] report title LLM returned empty; "
+                "degrading to research_question=%r",
+                research_question,
+            )
+            return (research_question, False)
+        except Exception as e:
+            # 失敗 / timeout → 降級 research_question（不 silent fail）
+            logger.warning(
+                "[LIVE RESEARCH] report title LLM generation failed "
+                "(%s: %s); degrading to research_question=%r",
+                type(e).__name__, e, research_question,
+            )
+            return (research_question, False)
+
     async def _run_stage_6(self, state: LiveResearchStageState) -> LiveResearchStageState:
         """Stage 6: 組合並匯出。"""
         self._maybe_reset_offline_counters(state)  # online substantive advance → reset（plan 3d）
@@ -6571,7 +6985,22 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 f"to final_report ({n} problematic chapters)"
             )
 
-        parts.append(f"# {context_map.research_question}\n")
+        # LR 報告標題生成（plan: lr-report-title-generation）：Stage 6 組 H1 前
+        # low-tier LLM 生成有質感標題（CEO 拍板）。失敗已在 helper 內降級退回
+        # research_question 且 logger.warning（不 silent fail）。
+        # AR R1：helper 回 (title, was_generated)，用顯式 boolean 驅動下游（非字串相等）。
+        _research_question = context_map.research_question
+        title_for_h1, _title_was_generated = await self._generate_report_title(
+            context_map, state.written_sections
+        )
+        # state 持久化：只在「真生成」時存純標題值（降級存空字串，符合 Task 2「空=降級」定義，
+        # 前端 fallback 據此正確分流，不會把降級的 raw query 誤當生成標題）。
+        state.generated_report_title = title_for_h1 if _title_was_generated else ""
+        parts.append(f"# {title_for_h1}\n")
+        # 原始查詢降為副標保留給 user 看他問了什麼（CEO 拍板呈現）。
+        # 只在「真生成」時加副標——降級時 H1 已是原查詢，加副標會冗餘重複（用 boolean 判非字串相等）。
+        if _title_was_generated:
+            parts.append(f"> 原始查詢：{_research_question}\n")
 
         for section in state.written_sections:
             parts.append(f"## {section['title']}\n")
@@ -7122,6 +7551,17 @@ class LiveResearchOrchestrator(OrchestratorBase):
             # Stage 3 風格 checkpoint 才設 True：前端據此顯示「重新提供範本」按鈕。
             "show_new_sample_button": show_new_sample_button,
         })
+
+    async def _emit_clarification(self, req, state):
+        """通用澄清 dispatcher（設計文件 §3）：emit 問句 narration + re-emit 該 stage
+        的 checkpoint（恢復前端 reply UI）+ return state（不 advance）。
+
+        收斂三條同型 spine。前端 continueLiveResearch 已把 _lrAwaitingCheckpointReply
+        設 false、隱藏 reply UI，故必須 re-emit checkpoint 恢復（不能只 narration）。
+        """
+        await self._emit_narration(req.question)
+        await self._emit_checkpoint(stage=req.stage, proposal=state.checkpoint_prompt)
+        return state
 
     async def _emit_section(self, index: int, section: LiveWriterSectionOutput,
                             state: "LiveResearchStageState"):

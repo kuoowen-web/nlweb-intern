@@ -28,8 +28,11 @@ class Stage1FormatExtractPromptBuilder:
   「[1]」「數字編號」「IEEE」→ numeric；「腳註」→ footnote；
   「不要引用」→ none；沒提 → null。
 - special_elements：使用者明說要的表格 / 清單 / 圖表 / 流程圖 / 程式碼區塊。
-  type ∈ table/list/chart/diagram/code_block；
-  若指明放哪一章則填 target_chapter，否則留空字串。沒提 → 空 list。
+  type ∈ table/list/chart/diagram/code_block；沒提 → 空 list。
+  target_chapter：填**章節名稱原文**為主；user 只用序數指涉（「第四章加表格」）而初始委託
+  未列章名 → 保留序數字串「第四章」（系統之後用暫定章名判斷、對不到就問 user）。
+  user **明說每章/全章都要** → 空字串 ""（全章注入）；user **沒指定放哪章** → 填原文非空
+  （讓系統回頭問，**不要**用空字串——空字串專指「明說全章」）。
 
 使用者委託原文：
 \"\"\"

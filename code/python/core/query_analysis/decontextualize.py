@@ -81,7 +81,6 @@ class PrevQueryDecontextualizer(NoOpDecontextualizer):
                 return
         elif (response["requires_decontextualization"] == "True"):
             self.handler.requires_decontextualization = True
-            self.handler.abort_fast_track_event.set()  # Use event instead of flag
             self.handler.decontextualized_query = response["decontextualized_query"]
             await self.handler.state.precheck_step_done(self.STEP_NAME)
             message = {
@@ -141,7 +140,6 @@ class ContextUrlDecontextualizer(PrevQueryDecontextualizer):
             self.handler.context_description = self.context_description
             response = await self.run_prompt(self.DECONTEXTUALIZE_QUERY_PROMPT_NAME, verbose=True)
             self.handler.requires_decontextualization = True
-            self.handler.abort_fast_track_event.set()  # Use event instead of flag
             self.handler.decontextualized_query = response["decontextualized_query"]
             await self.handler.state.precheck_step_done(self.STEP_NAME)
             

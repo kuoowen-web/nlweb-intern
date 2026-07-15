@@ -258,3 +258,112 @@ class TestZeroResultsWebSearch:
 
         with pytest.raises(RuntimeError, match="google client exploded"):
             await _run_helper(orch, state)
+
+
+# === §v5: guardrail 讓位 β-path ===
+
+from reasoning.filters.source_tier import SourceTierFilter, NoValidSourcesError
+
+
+class TestFilterEmptyGuardrailRemoved:
+    def test_empty_items_returns_empty_list_not_raises(self):
+        """Guardrail 讓位：空 items 回空 list（不再 raise NoValidSourcesError），
+        讓 0 筆能自然流到 β-path。"""
+        f = SourceTierFilter({})
+        # 修法前：raise NoValidSourcesError；修法後：回 []
+        assert f.filter_and_enrich([], mode="discovery") == []
+
+    def test_non_empty_items_still_pass_through(self):
+        """回歸：非空 items 仍 pass-through 原樣回傳（guardrail 移除不影響正常路徑）。"""
+        f = SourceTierFilter({})
+        items = [{"url": "u1", "description": "d1"}, {"url": "u2", "description": "d2"}]
+        assert f.filter_and_enrich(items, mode="discovery") == items
+
+
+class TestZeroResultsReachabilityRealPipeline:
+    """反假綠燈：不 mock filter / _filter_and_prepare_sources，用真實管線驗證
+    items=[] 真的能抵達 β-path（v1 六 test 全 mock 掉 filter → reachability 從未真測）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_items_reaches_beta_path_through_real_filter(self):
+        from reasoning.orchestrator import DeepResearchOrchestrator
+        from reasoning.filters.source_tier import SourceTierFilter
+
+        orch = MagicMock()
+        orch.logger = MagicMock()
+        orch.source_map = {}
+        # REAL filter（pass-through，空回空）——不 mock，這是 reachability 的關鍵。
+        orch.source_filter = SourceTierFilter({})
+        # REAL _filter_and_prepare_sources / _format_research_context / _format_context_shared
+        # （綁真方法，讓空 items 真的流過 filter → 空 source_map）。
+        orch._filter_and_prepare_sources = DeepResearchOrchestrator._filter_and_prepare_sources.__get__(orch)
+        orch._format_research_context = DeepResearchOrchestrator._format_research_context.__get__(orch)
+        orch._format_context_shared = DeepResearchOrchestrator._format_context_shared.__get__(orch)
+        # N-3（AR R1）：真 _format_context_shared 會無條件呼叫 _get_current_time_header()
+        # （orchestrator.py:232-234）；orch 是 MagicMock，若不顯式設定會回 MagicMock 物件
+        # 導致 :234 字串拼接爆掉。顯式 mock 回 ""，測試乾淨（β 判定只看 source_map dict，
+        # 與 header 字串無關）。
+        orch._get_current_time_header = MagicMock(return_value="")
+        orch._emit_phase_event = AsyncMock()
+        # 只 mock 最貴的 web 蒐集（raw data 層）；回 False 代表補不到。
+        orch._attempt_zero_results_web_search = AsyncMock(return_value=False)
+        orch._create_no_results_response = MagicMock(return_value=[{"name": "查無相關資料"}])
+
+        state = make_state(items=[], source_map={})
+
+        result = await DeepResearchOrchestrator._phase_filter_and_prepare(orch, state)
+
+        # β-path helper 確實被呼叫（reachability 打通的鐵證）。
+        orch._attempt_zero_results_web_search.assert_awaited_once()
+        # 補不到 → early_return = 誠實 no-results（非英文 error page）。
+        assert result.early_return == [{"name": "查無相關資料"}]
+
+    @pytest.mark.asyncio
+    async def test_empty_items_does_not_raise_no_valid_sources(self):
+        """修法後：真實管線 items=[] 不再拋 NoValidSourcesError（guardrail 讓位驗證）。"""
+        from reasoning.orchestrator import DeepResearchOrchestrator
+        from reasoning.filters.source_tier import SourceTierFilter, NoValidSourcesError
+
+        orch = MagicMock()
+        orch.logger = MagicMock()
+        orch.source_map = {}
+        orch.source_filter = SourceTierFilter({})
+        orch._filter_and_prepare_sources = DeepResearchOrchestrator._filter_and_prepare_sources.__get__(orch)
+        orch._format_research_context = DeepResearchOrchestrator._format_research_context.__get__(orch)
+        orch._format_context_shared = DeepResearchOrchestrator._format_context_shared.__get__(orch)
+        # N-3（AR R1）：mock _get_current_time_header 回 ""，避免真 _format_context_shared
+        # 的 :232-234 對 MagicMock 屬性做字串拼接爆掉（同上一 test 理由）。
+        orch._get_current_time_header = MagicMock(return_value="")
+        orch._emit_phase_event = AsyncMock()
+        orch._attempt_zero_results_web_search = AsyncMock(return_value=False)
+        orch._create_no_results_response = MagicMock(return_value=[{"name": "查無相關資料"}])
+
+        state = make_state(items=[], source_map={})
+
+        # 不拋例外即通過（修法前這裡會拋 NoValidSourcesError）。
+        try:
+            await DeepResearchOrchestrator._phase_filter_and_prepare(orch, state)
+        except NoValidSourcesError:
+            pytest.fail("guardrail 未讓位：items=[] 仍拋 NoValidSourcesError")
+
+
+class TestNoValidSourcesCopyTraditionalChinese:
+    """§v5 文案：外層 NoValidSourcesError catch 的 user-facing 文案改繁中、
+    無內部用詞（mode 名 / discovery / strict）、誠實描述。"""
+
+    def test_error_copy_is_traditional_chinese_no_internal_terms(self):
+        from reasoning.orchestrator import DeepResearchOrchestrator
+
+        orch = MagicMock()
+        # 直接測文案常數（不跑整條 catch）——把 catch 內文案抽成可測。
+        result = DeepResearchOrchestrator._format_error_result(
+            orch, "高端訓", DeepResearchOrchestrator._NO_VALID_SOURCES_MESSAGE
+        )
+        desc = result[0]["description"]
+        # 無內部用詞
+        for banned in ["discovery", "strict", "mode", "No valid sources"]:
+            assert banned not in desc, f"文案洩漏內部用詞：{banned}"
+        # 有繁中誠實描述（AR R1 修訂 1：措辭「沒有可用來源」，不假設 web 已試過）
+        assert "沒有可用來源" in desc or "無法產出" in desc
+        # 不假設 web 已實際搜過（不得宣稱「網路都找不到」等）
+        assert "網路都找不到" not in desc and "網路搜尋都找不到" not in desc

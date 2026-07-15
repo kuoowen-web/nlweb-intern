@@ -51,7 +51,7 @@ import { hydrateFromSoftRefreshInit } from '../features/sessions-list.js';
 // D-V6 import direction OK: page-bootstrap.js depends on features/live-research.js
 // (which depends on core/state-sync.js — no cycle since state-sync.js does not
 // import this module).
-import { isLRInProgress } from '../features/live-research.js?v=20260705c';
+import { isLRInProgress } from '../features/live-research.js?v=20260714a';
 
 /**
  * Trigger B + F (Task 7 + page-load identity guard).

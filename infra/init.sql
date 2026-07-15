@@ -41,20 +41,18 @@ CREATE TABLE chunks (
 -- Indexes
 -- =============================================================================
 
--- Vector search: IVFFlat index on chunk embeddings
--- IVF clusters vectors into lists, only scans nearby clusters at query time
--- lists = sqrt(num_vectors) rule of thumb; 1000 covers up to ~1M vectors
--- Benchmark (118K chunks, 2026-03-05):
---   probes=20: R@10=97.0%, R@50=91.2%, avg 21ms
---   probes=50: R@10=98.7%, R@50=97.1%, avg 29ms  <-- recommended
---   probes=100: R@10=98.7%, R@50=98.2%, avg 31ms
--- Set at query time: SET ivfflat.probes = 50;
--- Note: Do NOT create HNSW index — same size as IVFFlat (~930MB for 118K chunks)
---       and HNSW rebuild requires large shared memory allocation.
-CREATE INDEX idx_chunks_embedding_ivf
+-- Vector search: HNSW index on chunk embeddings
+-- 對齊 prod 現況（2026-06-23 SSH 實查確認）：prod 唯一向量索引為 HNSW
+-- (idx_chunks_embedding_hnsw, m=16, ef_construction=200)，零 IVFFlat。
+-- m=16 / ef_construction=200 為 pgvector 通用平衡參數；查詢時 SET hnsw.ef_search 調 recall。
+-- 歷史紀錄（已棄）：原採 IVFFlat (lists=1000)，2026-03-05 benchmark 於 118K chunks
+--   probes=50 達 R@10=98.7%/R@50=97.1%/29ms。隨資料量增至 5.28M chunks（2026-06），
+--   已改採 HNSW（recall 隨規模更穩定）。此檔先前的「Do NOT create HNSW」註解 +
+--   IVFFlat 定義已與決策(HNSW)及 prod 現況相反，2026-06-23 對齊修正。
+CREATE INDEX idx_chunks_embedding_hnsw
     ON chunks
-    USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 1000);
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 200);
 
 -- Full-text search: pg_bigm GIN index on chunk text
 -- pg_bigm creates 2-gram tokens, works natively with CJK characters

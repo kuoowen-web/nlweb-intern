@@ -164,17 +164,21 @@ PUBLIC_GET_ENDPOINTS = {
 `code/python/webserver/middleware/__init__.py` 定義完整順序（aiohttp outermost-first）：
 
 ```
-1. correlation_middleware   — 為每個請求注入 correlation ID（所有後續 middleware 可用）
-2. error_middleware         — 全域錯誤攔截
-3. csp_middleware           — 生成 nonce，設定 CSP + security headers（在 auth 之前執行）
-4. logging_middleware       — 請求/回應記錄
-5. cors_middleware          — CORS headers
-6. rate_limit_middleware    — 速率限制
-7. auth_middleware          — JWT 驗證（最後防線，在 CSP 之後）
-8. streaming_middleware     — SSE streaming 支援
+1.  correlation_middleware      — 為每個請求注入 correlation ID（所有後續 middleware 可用）
+2.  error_middleware            — 全域錯誤攔截
+3.  csp_middleware              — 生成 nonce，設定 CSP + security headers（在 auth 之前執行）
+4.  logging_middleware          — 請求/回應記錄
+5.  cors_middleware             — CORS headers
+6.  rate_limit_middleware       — 速率限制
+7.  auth_middleware             — JWT 驗證（最後防線，在 CSP 之後）
+8.  upload_rate_limit_middleware — 上傳速率限制（在 auth 之後，`request['user']` 已設定，per-user keying；僅守 POST /api/user/upload，其餘 pass-through）
+9.  streaming_middleware        — SSE streaming 支援
+10. static_no_cache_middleware  — 對 /static/js/ + /static/css/ 發 `Cache-Control: no-cache`（appended last，可覆蓋上游 cache header）
 ```
 
 **CSP 在 auth 之前執行**的原因：即使請求被 auth 拒絕（401），回應仍需包含 CSP header，防止 401 錯誤頁面被 XSS 利用。
+
+> **Reconcile 2026-07-10**：本清單原漏列 `upload_rate_limit_middleware`（#8，auth 之後）與 `static_no_cache_middleware`（#10，最末），已補齊為完整 10 個 middleware，對齊 `webserver/middleware/__init__.py`。
 
 ---
 
@@ -214,7 +218,7 @@ PUBLIC_GET_ENDPOINTS = {
 
 **現況**：`/static/news-search-prototype.html` 在 ZAP scan 時仍有 jsdelivr CDN 引用（dompurify, marked），被 ZAP 回報 Sub Resource Integrity（SRI）missing。
 
-**後續**：這些庫已下載為本地檔案（`/static/dompurify.min.js`、`/static/marked.min.js`），但 HTML 中的 `<script src>` 是否已更新為本地路徑需驗證。
+**後續**：這些庫已下載為本地檔案（`/static/dompurify.min.js`、`/static/marked.min.js`）。~~HTML 中的 `<script src>` 是否已更新為本地路徑需驗證~~ → 已驗證（2026-07-10：`news-search-prototype.html` L951/L954 引用本地路徑，全檔無 jsdelivr/CDN 殘留）。
 
 ---
 
@@ -227,7 +231,7 @@ PUBLIC_GET_ENDPOINTS = {
 | CSP: Failure to Define Directive with No Fallback（frame-ancestors, form-action） | Medium | 已部分修復（form-action, base-uri 已加入；frame-ancestors 由 X-Frame-Options 補） |
 | CSP: style-src unsafe-inline | Medium | 已知，暫時保留 |
 | Missing Anti-clickjacking Header | Medium | 已修復（X-Frame-Options: DENY 已加入） |
-| Sub Resource Integrity Attribute Missing | Medium | CDN 資源已本地化，待確認 HTML 已更新 |
+| Sub Resource Integrity Attribute Missing | Medium | 已修復（CDN 資源已本地化，HTML 引用本地路徑已於 2026-07-10 驗證） |
 | Bypassing 403（x-original-url header） | Medium | 非 CSP 問題，屬 reverse proxy 設定議題 |
 | HTTP Only Site | Medium | 非 CSP 問題，VPS 部署時需加 HTTPS/TLS termination |
 

@@ -160,16 +160,13 @@ def test_build_problematic_chapters_md_one_based():
     assert "第 4 章「結果與討論」" in md and "第 1 章「前言」" in md and "第 0 章" not in md
 
 
-def test_chapter_word_truncated_narration_interpolates():
-    # bug 2026-06-20：軟約束壓不住 → post-process truncate。truncate 後旁白要誠實
-    # 告知「已節略至約 N 字」（no silent fail），不可沿用「內容照常保留」舊文案。
-    n = lr_copy.chapter_word_truncated_narration("國內案例文獻", 800, 2258)
+def test_chapter_word_overshoot_narration_interpolates():
+    # 2026-07 regression 修復：改回軟約束 —— 章節偏長只發旁白、content 照常保留（不節略）。
+    n = lr_copy.chapter_word_overshoot_narration("國內案例文獻", 800, 2258)
     assert "國內案例文獻" in n
-    assert "800" in n  # 規劃字數
-    assert "2258" in n  # 節略前實際字數
-    # 語意：有節略（內容被切過），不是「照常保留」
-    assert "節略" in n
+    assert "800" in n and "2258" in n
+    assert "節略" not in n
+    assert "完整保留" in n or "沒有刪節" in n
     assert "字" in n
-    # 不可洩漏開發術語
     for bad in ("LLM", "token", "target_word_count", "truncate", "overshoot", "guard"):
         assert bad not in n

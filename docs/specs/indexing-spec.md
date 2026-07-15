@@ -534,6 +534,8 @@ python -m indexing.pipeline data/crawler/articles/ltn_*.tsv --site ltn
 
 管理新聞來源的可信度分級。
 
+> **消歧義（2026-07-10）**：本節的 SourceTier（Tier 1-4，indexing 層 `source_manager.py`）**仍存在且被 `pipeline.py` 使用**，僅作品質標記（`config_indexing.yaml` 註明「不再用於分塊閾值」）。它與 2026-06 已徹底廢除的 **reasoning 層來源分級**（Tier 1-5 權威分級 + 「未經證實」警語，現為 pass-through）是兩套不同機制，勿混淆。
+
 ```python
 from indexing import SourceManager, SourceTier
 
@@ -782,6 +784,8 @@ rm.close()
 
 ### 7. Pipeline (`pipeline.py`)
 
+> 🪦 **歷史紀錄（Qdrant 路徑已於 2026-06-22 廢除）**：`pipeline.py` 檔案仍存在（Vault/SQLite pipeline），但其 `--upload`（上傳 Qdrant）與 `--reconcile`（比對 Vault ⇄ Qdrant）能力已隨 `qdrant_uploader.py` 移除而作廢（qdrant import 已從 `pipeline.py` 清除）。**現行主路徑**為 `pg_batch.py`（即時批次）與 `cloud_embed.py` + `bulk_load.py`（全量），見「儲存與 Embedding：單一現役路徑」章。
+
 主流程，整合所有模組。
 
 #### 基本使用
@@ -829,15 +833,17 @@ python -m indexing.pipeline data.tsv --resume
 # 自訂 checkpoint 檔案
 python -m indexing.pipeline data.tsv --checkpoint my_checkpoint.json
 
-# 上傳到 Qdrant
+# 上傳到 Qdrant（🪦 已廢除 2026-06：--upload 隨 qdrant_uploader.py 移除而作廢）
 python -m indexing.pipeline data.tsv --site ltn --upload
 
-# Reconciliation（比對 Vault 與 Qdrant，補上缺失的 chunks）
+# Reconciliation（🪦 已廢除 2026-06：--reconcile 比對對象 Qdrant 已不存在）
 python -m indexing.pipeline --reconcile
 python -m indexing.pipeline --reconcile --site ltn
 ```
 
 #### Reconciliation 工具
+
+> 🪦 歷史紀錄（機制已於 2026-06-22 隨 Qdrant 廢除）：現行為 PostgreSQL 單一儲存，無 Vault ⇄ 向量庫雙層一致性問題。
 
 `pipeline.py --reconcile` 比對 Vault (SQLite) 與 Qdrant 的 chunk 一致性：
 
@@ -853,9 +859,9 @@ print(f"Re-uploaded: {result['missing_fixed']}")
 
 #### Overlap 與 Payload 的關係
 
-- `embedding_text`（含 overlap 30 字）用於 Qdrant 向量生成
-- `full_text`（不含 overlap）用於 Vault 儲存和摘要
-- `summary` 用於 Qdrant payload 的 `name` 欄位
+- `embedding_text`（含 overlap 30 字）用於 embedding 向量生成（現行寫入 PG `chunks.embedding`；🪦 Qdrant 時代同理）
+- `full_text`（不含 overlap）用於原文儲存和摘要（現行 PG `chunks.chunk_text` / `articles.content`；🪦 Qdrant 時代為 Vault）
+- `summary` 用途：🪦 Qdrant payload 的 `name` 欄位（已廢除）
 - `char_start`/`char_end` 記錄原始位置（不含 overlap）
 
 ---
@@ -903,12 +909,13 @@ chunking:
   summary_max_length: 400
   extractive_summary_sentences: 3
 
-# 來源分級
+# 來源分級（indexing 層品質標記；config 註明「不再用於分塊閾值」）
 source_mappings:
+  reuters.com: 1
   cna.com.tw: 1      # 中央社
-  gov.tw: 1          # 政府
   udn.com: 2         # 聯合報
   ltn.com.tw: 2      # 自由時報
+  ithome.com.tw: 3
   # 未列出的來源預設為 3
 
 # Pipeline
@@ -947,7 +954,7 @@ pipeline:
 
 ### Retriever 整合
 
-Qdrant payload 的 `url` 欄位是**文章 URL**（非 chunk_id）。Retriever 的 `_deduplicate_by_url` 方法會自動依文章 URL 合併同篇的多個 chunks（B+ merge 策略）：
+檢索結果的 `url` 欄位是**文章 URL**（非 chunk_id）——現行來自 PostgreSQL `articles.url`（🪦 Qdrant 時代為 payload `url` 欄位，已廢除 2026-06）。Retriever 的 `_deduplicate_by_url` 方法（`core/retriever.py`，仍現役）會自動依文章 URL 合併同篇的多個 chunks（B+ merge 策略）；現役單 endpoint 下主要由 `postgres_client.py` 內部 URL dedup 處理：
 
 ```python
 # 取得原文（使用 chunk_id，非 url）
@@ -1024,12 +1031,12 @@ code/python/indexing/
 ├── pg_batch.py           # 【主路徑】PG 批次 indexer（PGCheckpoint 續傳）
 ├── cloud_embed.py        # 【主路徑】GCP L4 VM：chunking + Qwen3-4B → .jsonl/.npy
 ├── bulk_load.py          # 【主路徑】.jsonl+.npy bulk insert 到 VPS PG（見 bulk-load-spec.md）
-├── dual_storage.py       # 【Qdrant 路徑】雙層儲存（MapPayload + VaultStorage）
-├── embedding.py          # 【Qdrant 路徑】本地 Embedding（bge-m3 / OpenAI）
-├── qdrant_uploader.py    # 【Qdrant 路徑】Qdrant 向量上傳 + reconciliation
+├── dual_storage.py       # 【Qdrant 路徑，檔案仍在】雙層儲存（MapPayload + VaultStorage）
+├── embedding.py          # 【Qdrant 路徑】本地 Embedding（bge-m3 / OpenAI）— 🪦 檔案已刪（2026-06）
+├── qdrant_uploader.py    # 【Qdrant 路徑】Qdrant 向量上傳 + reconciliation — 🪦 檔案已刪（2026-06）
 ├── rollback_manager.py   # 回滾管理
-├── pipeline.py           # 【Qdrant 路徑】主流程 + CLI + reconcile
-├── vault_helpers.py      # 【Qdrant 路徑】Async helpers
+├── pipeline.py           # 【Qdrant 路徑，檔案仍在】Vault pipeline + CLI（--upload/--reconcile 已作廢）
+├── vault_helpers.py      # 【Qdrant 路徑，檔案仍在】Async helpers
 └── poc_*.py              # POC 驗證腳本（保留）
 
 config/
@@ -1046,6 +1053,8 @@ data/
 ---
 
 ## Backfill 與即時更新規劃（2026-02）
+
+> 🪦 **歷史規劃快照（2026-02）**：本章為當時的規劃決策紀錄。其中 Qdrant 相關內容（Hosting 決策、儲存估算、本地啟動）描述的機制已於 2026-06-22 徹底廢除，現役儲存為 PostgreSQL（pgvector + pg_bigm）；「即時更新分級頻率」的 Tier 1-3 為**爬取頻率分級**（非來源可信度分級），屬規劃設計。Crawler 機制段落（404 skip / 多機合併 / AutoThrottle 等）仍為現行實作。
 
 ### 概述
 
@@ -1215,6 +1224,8 @@ python crawler/remote/merge_registry.py <remote-registry.db> data/crawler/crawle
 ---
 
 #### Qdrant 儲存估算
+
+> 🪦 歷史紀錄（Qdrant 已於 2026-06-22 廢除）：現行向量存 PostgreSQL pgvector。
 
 去重後 ~600K 文章，~3 chunks/article = 1.8M 向量：
 - 向量：1.8M × 6 KB (1536d float32) ≈ **10.8 GB**
@@ -1404,6 +1415,8 @@ CREATE INDEX idx_task ON crawled_articles(task_id);
 
 ### 6. 本地 Qdrant 啟動
 
+> 🪦 歷史紀錄（Qdrant 已於 2026-06-22 廢除）：本地不再需要 Qdrant Docker 容器。
+
 ```bash
 docker run -d --name qdrant \
   -p 6333:6333 -p 6334:6334 \
@@ -1539,7 +1552,7 @@ chunks (
 ```
 
 - **去重兩層**：URL 層 `ON CONFLICT (url)`；同篇不同 URL 由 `(title, source)` title dedup（`postgresql_uploader.py` `_insert_article`）。
-- **向量索引**：pgvector IVFFlat（`idx_chunks_embedding_ivf`）。
+- **向量索引**：pgvector HNSW（`idx_chunks_embedding_hnsw`，`m=16`、`ef_construction=200`）。查詢時 `SET hnsw.ef_search` 調 recall。（歷史：原採 IVFFlat `lists=1000`，隨資料量增至 5.28M chunks 後 recall 不穩、查詢退化至 ~190s，2026-03 改 HNSW；見 `infra/init.sql`。）
 - **BM25 / 中文全文**：pg_bigm（bigram）建在 `tsv` 上（`idx_chunks_tsv_bigm`）；`tsv` 內容直接等於 `chunk_text`（不含 overlap）。
 
 ### Embedding 模型（主路徑）

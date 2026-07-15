@@ -1,7 +1,7 @@
 # Organization & Multi-Tenant Specification
 
 > **Owner**: NLWeb Team
-> **Last Updated**: 2026-05-04
+> **Last Updated**: 2026-07-10（spec drift reconcile — §8.2/§8.3 標 `_clearUserScopedStorageIfUserChanged` / `_resetMainUIState` 已 Task 13 移除，現走 `UserStateSync.fullReset`（`core/state-sync.js`）+ `_handleAuthFailure`（`core/auth-manager.js`）；§7.6 前端 render 定位 `news-search.js`→`static/js/features/sessions-list.js` + `sharing.js`）
 > **狀態**: active（核心已實作，部分 gaps 列於 §10）
 > **相關 spec**: `docs/specs/login-spec.md`（Auth 系統，本 spec 的上游）
 
@@ -556,7 +556,7 @@ WHERE id = ? AND org_id = ? AND deleted_at IS NULL
 
 ### 7.6 前端 UI：左 Sidebar 「組織空間」Tab
 
-**檔案**：`static/news-search-prototype.html`（HTML tabs）、`static/news-search.js:10500-10620`（render）
+**檔案**：`static/news-search-prototype.html`（HTML tabs）、`static/js/features/sessions-list.js`（`renderLeftSidebarSessions` / `renderSharedSessions` render；v4.0 從 `news-search.js` 遷出，main.js 以 `window.*` bridge legacy callsite）。visibility toggle 在 `static/js/features/sharing.js`（`toggleSessionSharing`）。下方各 `news-search.js:NNNN` 行號為歷史定位，勿當現況——以 grep marker（函式名）為準。
 
 #### Tab 結構
 
@@ -693,48 +693,50 @@ if (currentLoadedSessionId !== null && !currentEntry) {
 
 **問題**：localStorage 是 origin-scoped 不是 user-scoped。B2B 共用電腦切帳號（admin logout → member login）時，未清理會看到上一個 user 的 sessions / folders。
 
-**修法摘要**（commit `24d39f4`、`e43468d`、`3b9f7d8`、`138ae61`）：
+**修法摘要**（原始 patch commit `24d39f4`、`e43468d`、`3b9f7d8`、`138ae61`；後於 D-2026-05-13 收斂為 `UserStateSync`）：
+
+> ⚠️ **已 superseded by D-2026-05-13 Frontend Init Sync Refactor + v4.0 模組化**。下方流程描述的 `_clearUserScopedStorageIfUserChanged()` / `_resetMainUIState()` 兩個 helper **已完全從 codebase 移除**（Task 13 cleanup）。現況：cross-user 清理由 `UserStateSync.runInitSync`（`static/js/core/state-sync.js`）內部 `fullReset()`（= `clearUserScopedState` + `resetMainUI`）在 trigger A/B/C/D 統一執行，**無條件清**（不再做「同 user 保 cache」的 conditional）。清理範圍語義不變，見 `docs/specs/session-spec.md` §8.3/§8.5、`docs/specs/login-spec.md` §1F-C。
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  (1) login() 偵測 user_id 變化 → _clearUserScopedStorageIfUserChanged()
-│        清 6 keys：                                               │
-│          - taiwanNewsSavedSessions                              │
-│          - taiwanNewsFolders                                    │
-│          - taiwanNewsSourceFolders                              │
-│          - taiwanNewsSessionsMigrated                           │
-│          - 其他 user-scoped keys                                │
+│  現況（D-2026-05-13 後，7-trigger 統一寫入）：                    │
 │                                                                 │
-│  (2) logout() 也清（CEO 拍板：B2B 安全 > 同 user 重登保 cache）   │
+│  (1) Login（trigger A）/ identity change（trigger B）           │
+│        → UserStateSync.runInitSync()                           │
+│          ├─ fullReset()（無條件清 USER_SCOPED_KEYS 6 keys +      │
+│          │    6 個 main-UI globals；device-scoped prefs 不動）   │
+│          └─ fetchInit() + applyInit() 重新 hydrate             │
 │                                                                 │
-│  (3) checkAuthOnLoad 401 path 改呼叫完整 _handleAuthFailure()   │
+│  (2) Logout（trigger C）/ 401·refresh fail（trigger D）          │
+│        → _handleAuthFailure() → UserStateSync.fullReset()      │
+│          （CEO 拍板：B2B 安全 > 同 user 重登保 cache）           │
+│                                                                 │
+│  (3) checkAuthOnLoad 401 path → 完整 _handleAuthFailure()       │
 │        清 _user + localStorage + render 空 sidebar              │
 │                                                                 │
 │  (4) loadSessions logged-in 失敗 → [] + console.error          │
 │        不 fallback localStorage（避免載入舊 user 資料）         │
-│                                                                 │
-│  (5) _resetMainUIState() — 清 6 個 user-scoped main-UI globals  │
-│        在 logout / identity-change 時呼叫                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-詳細見 `memory/lessons-auth.md:110-156`。
+詳細見 `memory/lessons-auth.md`「Cross-User 隔離 / Logout 紀律」段 + `docs/specs/session-spec.md` §8。
 
 ### 8.3 Logout 紀律完整清單
 
-**檔案**：`static/news-search.js`（多處），`docs/decisions.md:629-634`
+**檔案**：`static/js/core/auth-manager.js`（`_handleAuthFailure`，:328-352）+ `static/js/core/state-sync.js`（`UserStateSync`），`docs/decisions.md` D-2026-05-13。
 
-任何 user-scoped state 清理都必須先 cancel pending timer / promise（`memory/lessons-auth.md:138-147`）：
+任何 user-scoped state 清理都必須先 cancel pending timer / promise（`memory/lessons-auth.md`「Debounce timer 跨 auth 邊界」段）：
 
 ```
-_handleAuthFailure() 入口：
-  ├─ SessionManager._cancelPendingSave()  ← 取消 debounced PUT
-  ├─ _resetMainUIState()                   ← 清 main-UI globals
-  ├─ _clearUserScopedStorageIfUserChanged(null)
-  ├─ render 空 sidebar
-  ├─ show login modal
-  └─ hide main UI
+_handleAuthFailure() 入口（現況，D-2026-05-13 後）：
+  └─ UserStateSync.fullReset({ keepInviteToken: false })
+        ├─ _cancelPendingSave()              ← 取消 debounced PUT（state mutation 前先 cancel）
+        ├─ clearUserScopedState()            ← 清 USER_SCOPED_KEYS + 6 個 main-UI globals
+        └─ resetMainUI()                     ← try/catch wrap resetConversation
+  ↳ 收尾：null _accessToken/_user + updateAuthUI() + hideMainUI() + showAuthModal('login')
 ```
+
+> ⚠️ 舊流程列的 `_resetMainUIState()` / `_clearUserScopedStorageIfUserChanged(null)` 兩個 helper **已移除**（Task 13 cleanup），收斂進 `UserStateSync.fullReset`。
 
 通則：
 

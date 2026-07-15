@@ -48,6 +48,38 @@ LOW_RELEVANCE_VECTOR_MAX = 0.55
 KEYWORD_HIT_MIN = 10
 
 
+def _item_vector_score(item) -> float:
+    """Shape-aware 取單筆 item 的向量分數（無真實向量證據 → 回 0.0，呼叫端排除）。
+
+    item 可能形狀（2026-07-05 親讀 postgres_client.py:791-825 + baseHandler.py:597-606 驗）：
+    - dict：內層 _search_docs 的 raw dict → item['vector_score']（Signal A 路徑）。
+    - 6-item list/tuple：search() 轉換後 [url, schema, title, source, vector_or_None,
+      scores_dict]，分數在 index 5 的 scores_dict['vector_score']。
+    - 其他（4/5-tuple legacy、私有檔 4-element list、任何未知）→ 無分數 → 0.0（被排除）。
+    """
+    if isinstance(item, dict):
+        return float(item.get("vector_score") or 0.0)
+    if isinstance(item, (list, tuple)) and len(item) >= 6 and isinstance(item[5], dict):
+        return float(item[5].get("vector_score") or 0.0)
+    return 0.0  # 4/5-tuple、私有檔 4-element、未知形狀：略過
+
+
+def max_real_vector_score(raw_results) -> Optional[float]:
+    """Highest *real* vector score (cosine), excluding 0.0-filled text-path rows.
+
+    純 pg_bigm 命中的 row 沒有 DB 算的向量分數（被 float(... or 0.0) 填 0.0）。
+    這些必須排除，否則會誤報「低關聯」（2026-07-04 commit 358adacc 修過的同型坑）。
+    Shape-aware：吃 raw dict（Signal A）與 search() 轉換後的 6-item list（evidence 路徑）
+    兩種形狀；legacy 4/5-tuple 與私有檔 4-element list 無分數 → 被略過。
+    None = 無任何真實向量證據（純 text-path / 只有無分數形狀 / 空集合），呼叫端應 abstain。
+    """
+    vector_scores = [
+        s for item in raw_results
+        if (s := _item_vector_score(item)) > 0.0
+    ]
+    return max(vector_scores) if vector_scores else None
+
+
 def compute_low_relevance_warning(raw_results):
     """Signal A: True when the highest *real* vector_score is below LOW_RELEVANCE_VECTOR_MAX.
 
@@ -62,13 +94,10 @@ def compute_low_relevance_warning(raw_results):
     judge semantic relevance, and the warning must not fire on keyword-only matches.
     Empty result set -> no warning (emptiness is a separate concern).
     """
-    if not raw_results:
-        return False
-    vector_scores = [s for r in raw_results
-                     if (s := float(r.get('vector_score') or 0.0)) > 0.0]
-    if not vector_scores:
-        return False
-    return max(vector_scores) < LOW_RELEVANCE_VECTOR_MAX
+    top = max_real_vector_score(raw_results)
+    if top is None:
+        return False  # 純 text-path / 空集合：顯式 abstain
+    return top < LOW_RELEVANCE_VECTOR_MAX
 
 
 def compute_low_keyword_match_warning(raw_results):
@@ -432,9 +461,9 @@ class PgVectorClient(RetrievalClientBase):
             query_params: Legacy dict with keys like date_from, date_to, author.
             kwargs_filters: Generic filter list passed via kwargs['filters'], e.g.
                 [{"field": "datePublished", "operator": "gte", "value": "2026-01-01"}]
-                Supported fields: datePublished
-                Supported operators: gte (>=), lte (<=)
-                Unknown fields or operators are silently ignored to prevent SQL injection.
+                Supported fields/operators: datePublished (gte/lte), author (contains).
+                Unknown (field, operator) pairs are dropped with a loud warning
+                (never applied) to prevent SQL injection.
 
         Returns:
             Tuple of (clauses: List[str], params: List[Any])
@@ -459,27 +488,86 @@ class PgVectorClient(RetrievalClientBase):
                 params.append(query_params["date_to"])
 
         # Handle generic kwargs filters (from baseHandler search_filters)
-        _FIELD_MAP = {
-            "datePublished": "a.date_published",
-        }
-        _OP_MAP = {
-            "gte": ">=",
-            "lte": "<=",
+        # Whitelisted (field, operator) pairs -> SQL builder.
+        # Hardcoded SQL fragments + parameterised values: injection-safe.
+        _ALLOWED_FILTERS = {
+            ("datePublished", "gte"): lambda v: ("a.date_published >= %s", v),
+            ("datePublished", "lte"): lambda v: ("a.date_published <= %s", v),
+            # P1-5 (2026-07-08): author filter support. Was silently dropped since
+            # the Qdrant->PG migration, degrading author searches to unfiltered
+            # hybrid search. Semantics mirror the legacy query_params path above.
+            ("author", "contains"): lambda v: ("a.author ILIKE %s", f"%{v}%"),
         }
         if kwargs_filters:
             for f in kwargs_filters:
-                field = f.get("field")
-                operator = f.get("operator")
-                value = f.get("value")
-                if field not in _FIELD_MAP or operator not in _OP_MAP:
-                    logger.debug(f"Ignoring unknown filter field/operator: {field}/{operator}")
+                key = (f.get("field"), f.get("operator"))
+                if key not in _ALLOWED_FILTERS:
+                    # Fail-loud (no-silent-fail): a dropped filter means the caller's
+                    # constraint is NOT applied — that must be visible in logs.
+                    logger.warning(
+                        f"[FILTER] Dropping unsupported filter {key} — "
+                        f"results will NOT be filtered by it")
                     continue
-                sql_col = _FIELD_MAP[field]
-                sql_op = _OP_MAP[operator]
-                clauses.append(f"{sql_col} {sql_op} %s")
-                params.append(value)
+                clause, param = _ALLOWED_FILTERS[key](f.get("value"))
+                clauses.append(clause)
+                params.append(param)
 
         return clauses, params
+
+    async def _author_only_docs(self, conn, author_name, sites, query_params,
+                                kwargs_filters, num_results, include_vectors):
+        """Author-existence fallback (P1-5, 2026-07-08).
+
+        The main hybrid query gates rows on vector/text thresholds; an author's
+        articles are usually NOT semantically similar to the query string
+        ("幫我找記者X寫的文章"), so a legitimate author can come back empty there.
+        This fallback fetches the author's articles directly — an author-field
+        match is itself the relevance signal for an author search. One row per
+        article (DISTINCT ON url, first chunk), newest first.
+        """
+        non_author = [f for f in (kwargs_filters or []) if f.get('field') != 'author']
+        clauses, params = self._build_filters(sites, query_params, kwargs_filters=non_author)
+        clauses = ["a.author ILIKE %s"] + clauses
+        params = [f"%{author_name}%"] + params
+        embedding_col = ", c.embedding" if include_vectors else ""
+        sql = f"""
+            SELECT * FROM (
+                SELECT DISTINCT ON (a.url) c.id AS chunk_id, c.article_id, c.chunk_text,
+                       a.url, a.title, a.author, a.source, a.date_published, a.metadata{embedding_col}
+                FROM chunks c
+                JOIN articles a ON a.id = c.article_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY a.url, c.id
+            ) sub
+            ORDER BY sub.date_published DESC NULLS LAST
+            LIMIT %s
+        """
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(sql, params + [num_results])
+            rows = await cur.fetchall()
+
+        results = []
+        for row in rows:
+            item = {
+                'url': row["url"],
+                'schema_str': self._build_schema_json(row),
+                'title': row["title"],
+                'source': row["source"],
+                'author': row.get("author") or "",
+                'date_published': row["date_published"].isoformat() if row.get("date_published") else "",
+                'vector_score': 0.0,
+                'text_score': 0.0,
+                # Author-field match is literal keyword evidence for this search.
+                'keyword_hit': True,
+            }
+            if include_vectors:
+                emb = row.get("embedding")
+                if emb is not None:
+                    item['vector'] = emb.tolist() if hasattr(emb, 'tolist') else [float(v) for v in emb]
+                else:
+                    item['vector'] = None
+            results.append(item)
+        return results
 
     def _build_schema_json(self, row):
         chunk = row.get("chunk_text", "") or ""
@@ -688,7 +776,17 @@ class PgVectorClient(RetrievalClientBase):
             has_date_filter = kwargs_filters and any(
                 f.get('field') == 'datePublished' for f in kwargs_filters
             )
-            if not raw_results and has_date_filter:
+            author_filter = next(
+                (f for f in (kwargs_filters or [])
+                 if f.get('field') == 'author' and f.get('operator') == 'contains'),
+                None)
+            author_fallback_used = False
+            # Author searches take the author fallback chain below instead:
+            # the legacy date-relax sets time_filter_relaxed unconditionally
+            # (even when the retry finds nothing), which for author+date queries
+            # produces a stale flag -> false "date range widened" banner or a
+            # double banner alongside the author-not-found notice (AR R1).
+            if not raw_results and has_date_filter and author_filter is None:
                 logger.warning(
                     "[FILTER] PG date filter returned 0 results — retrying without date filter"
                 )
@@ -720,12 +818,60 @@ class PgVectorClient(RetrievalClientBase):
                     # Error is logged above via logger.exception
             # --- End date filter fallback ---
 
+            # --- Author-search honest fallback chain (P1-5, 2026-07-08) ---
+            # Hybrid query found nothing under the author clause. Distinguish
+            # "author exists but articles not similar to the query" from
+            # "author absent from corpus" (D4). time_filter_relaxed is set
+            # ONLY when the returned rows actually come from a no-date query
+            # (step 3), so a stale flag is structurally impossible.
+            if not raw_results and author_filter is not None:
+                author_name = author_filter.get('value') or ''
+                try:
+                    # Step 2: author-only, keep date filter
+                    author_rows = await self._execute_with_retry(
+                        lambda conn: self._author_only_docs(
+                            conn, author_name, sites, query_params,
+                            kwargs_filters, num_results, include_vectors))
+                    if not author_rows and has_date_filter:
+                        # Step 3: author-only, drop date — only a hit HERE
+                        # means the date range was actually widened.
+                        relaxed = [f for f in kwargs_filters
+                                   if f.get('field') != 'datePublished']
+                        author_rows = await self._execute_with_retry(
+                            lambda conn: self._author_only_docs(
+                                conn, author_name, sites, query_params,
+                                relaxed, num_results, include_vectors))
+                        if author_rows and handler is not None:
+                            handler.time_filter_relaxed = True
+                            logger.info("[AUTHOR] date filter relaxed in author-only fallback")
+                    if author_rows:
+                        raw_results = author_rows
+                        author_fallback_used = True
+                        logger.info(
+                            f"[AUTHOR] author-only fallback returned {len(author_rows)} "
+                            f"articles for '{author_name}'")
+                    else:
+                        # Step 4: author truly absent -> strict empty + honest flag
+                        # (D1). time_filter_relaxed was never set on this path,
+                        # so the author notice cannot co-fire with the date banner.
+                        if handler is not None:
+                            handler.author_search_no_results = True
+                        logger.warning(
+                            f"[AUTHOR] no articles for author '{author_name}' — "
+                            f"strict empty result (author_search_no_results set)")
+                except Exception as author_err:
+                    # Never silent: fallback failure degrades to the original empty
+                    # list, which the honest-empty notice downstream will surface.
+                    logger.exception(f"[AUTHOR] author-only fallback failed: {author_err}")
+            # --- End author fallback chain ---
+
             # --- Low-relevance / low-keyword-match warning signals ---
             # Computed here while raw_results still carries vector_score/text_score
             # (these are dropped at the tuple conversion in search()). Sets handler flags;
             # baseHandler.prepare() consumes them and emits SSE (mirrors time_filter_relaxed).
             # Does NOT alter raw_results — warning only, never blocks.
-            if handler is not None:
+            # D5: author-only fallback rows carry no scores — signals would false-positive.
+            if handler is not None and not author_fallback_used:
                 try:
                     if compute_low_relevance_warning(raw_results):
                         handler.low_relevance_warning = True

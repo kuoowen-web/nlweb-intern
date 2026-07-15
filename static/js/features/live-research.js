@@ -69,7 +69,7 @@
 //   saveCurrentSession invoked via window bridge (KEEP-in-place until commit 25 sweep).
 
 import { injectStateSyncBackref } from '../core/state-sync.js';
-import { setProcessingState, pushConversationHistory, setCurrentConversationId, escapeHTML } from './search.js?v=20260705c';
+import { setProcessingState, pushConversationHistory, setCurrentConversationId, escapeHTML } from './search.js?v=20260714a';
 import { getSelectedSitesParam } from './source-filters.js';
 import { markSessionDirty } from './session-manager.js';
 import { getCurrentSessionId } from '../utils/analytics.js';
@@ -1584,7 +1584,7 @@ function _addLRToggleAllToolbar(sectionsEl) {
 // D-CEO-Q1 LOCKED Option (a): 複用 DR displayKnowledgeGraph + prefix 化
 // D-CEO-Q4 LOCKED Option (β): LR 獨立 #lrKGDisplayContainer + DR module 參數化
 // (D2a placeholder DOM list 已刪除, displayLRKnowledgeGraph 被取代)
-import { displayKnowledgeGraph } from './knowledge-graph.js?v=20260705c';
+import { displayKnowledgeGraph } from './knowledge-graph.js?v=20260714a';
 
 // Track D D2b Step 1b (sprint 2026-05-28, fix-up round 1 C-2 / R2-I2):
 // 移植 DR initKGVisibilityToggle IIFE 到 LR (來源 static/news-search.js:3285-3323)
@@ -1803,7 +1803,21 @@ function renderLRReviewReport(lrState) {
         return;
     }
     const parts = [];
-    if (researchQuestion) parts.push(`# ${researchQuestion}`, '');
+    // plan: lr-report-title-generation — fallback 路徑鏡像後端 H1/副標結構。
+    // AR R1：後端降級時 generated_report_title 存空字串（非 raw query），故前端純以
+    // 「空/非空」分流即可，不需字串比較（P1-2：字串比較對空白/同文字會誤判）：
+    //   非空（真生成標題）→ 用它當 H1 + 原始查詢副標；
+    //   空（欄位上線前舊 session / 生成失敗已降級）→ 沿用 research_question 當 H1（無副標）。
+    const generatedTitle = (lrState && typeof lrState.generated_report_title === 'string')
+        ? lrState.generated_report_title.trim() : '';
+    if (generatedTitle) {
+        parts.push(`# ${generatedTitle}`, '');
+        if (researchQuestion) {
+            parts.push(`> 原始查詢：${researchQuestion}`, '');
+        }
+    } else if (researchQuestion) {
+        parts.push(`# ${researchQuestion}`, '');
+    }
     sections.forEach((s, i) => {
         const title = String(s.title || `第 ${i + 1} 段`);
         parts.push(`## ${title}`, '', String(s.content || ''), '');

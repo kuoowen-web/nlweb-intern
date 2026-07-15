@@ -71,19 +71,22 @@ import {
     pushConversationHistory,
     setCurrentConversationId, getCurrentConversationId,
     setCurrentDeepResearchAbortController, getCurrentDeepResearchAbortController
-} from './search.js?v=20260705c';
+} from './search.js?v=20260714a';
 import {
     setResearchReport, getResearchReport,
     setArgumentGraph, getArgumentGraph,
-    setChainAnalysis, getChainAnalysis
+    setChainAnalysis, getChainAnalysis,
+    clearArgumentGraph, clearChainAnalysis
 } from './research.js';
+// [R10] Step 0c 的 graph/KG 判準委給獨立無副作用 module（node:test 可直測、與 production 同一 pure 函式，不 drift）。
+import { hasValidArgGraph, hasValidKG } from './dr-stale-reset.js';
 import { getSessionHistory, getCurrentLoadedSessionId, getSavedSessions } from './sessions-list.js';
 import { setShareContentOverride } from './sharing.js';
 import { getSelectedSitesParam, getIncludePrivateSources } from './source-filters.js';
 import { markSessionDirty } from './session-manager.js';
 import { getCurrentMode } from './mode.js';
 import { getCurrentSessionId } from '../utils/analytics.js';
-import { getConversationHistory } from './search.js?v=20260705c';
+import { getConversationHistory } from './search.js?v=20260714a';
 
 // ============================================================================
 // Owned state (was: news-search.js line 1676)
@@ -1513,6 +1516,14 @@ export async function performDeepResearch(query, skipClarification = false, comp
 
         deepResearchUrl.searchParams.append('session_id', getCurrentSessionId());
 
+        // [R2] B5：帶當前已載入 session 的真 PG UUID，讓 server 把 DR 報告寫進當前 session（不另建 row）。
+        // 全新未存過的 session 時為 null（F27 邊界）→ 不 append，server fallback 建新。
+        // 參數名用 loaded_session_id（不覆蓋 session_id——後者保留原 rate-limit 語意）。
+        const loadedSid = getCurrentLoadedSessionId();
+        if (loadedSid) {
+            deepResearchUrl.searchParams.append('loaded_session_id', loadedSid);
+        }
+
         const _convId = getCurrentConversationId();
         if (_convId) {
             deepResearchUrl.searchParams.append('conversation_id', _convId);
@@ -1657,6 +1668,27 @@ export async function performDeepResearch(query, skipClarification = false, comp
                             updateReasoningProgress(data);
                         } else if (data.message_type === 'research_phase') {
                             console.log('[Deep Research] research_phase event (ignored in DR):', data.phase, data.status);
+                        } else if (data.message_type === 'deep_research_session_created') {
+                            // [R4 C2 / R5 行號更正] INVARIANT：此 adopt 依賴 DR 前已建 local entry（getCurrentLoadedSessionId() 非 null）。
+                            // 前置由「首次進入 DR」的 performDeepResearch 開頭 !skipClarification pre-save 建立
+                            // （deep-research.js:1441-1444，search.js:1443 用預設 skipClarification=false 觸發），非 DR start、非 :1061。
+                            // clarification 重入走 skipClarification=true（:1420）跳過 :1441，但 entry 已在首次進入時建好。
+                            // verified 邊界：現況無「不經首次 skipClarification=false 的孤立 skipClarification=true」路徑 → 前置無破口。
+                            // 若前置破壞（currentLoadedSessionId===null），adoptLRServerSession 會 early-return（session-coordinator.js:222）
+                            // → server UUID 未採用 → final_result 的 saveSession 走 POST 建 row B（B5 復發）。
+                            // E2E（Task 9 Step 1b）必驗此 invariant：開 DR 前 getCurrentLoadedSessionId() 已非 null。
+                            //
+                            // [R3] BLOCKER 修：反向 handshake——server 新建 row 時 run 前推來的 PG UUID，
+                            // 前端必須採用它（對齊 entry.id/_serverId/currentLoadedSessionId），
+                            // 否則 final_result 的 saveCurrentSession 仍用舊 local id → POST 建 row B（B5 復發）。
+                            // 復用 LR 的泛用 session 收斂（F28：邏輯泛用、已掛 window、零重造）。
+                            if (typeof window.adoptLRServerSession === 'function') {
+                                window.adoptLRServerSession(data.session_id);
+                            } else {
+                                // no-silent-fail：未掛載則明示 warn（收斂失效、可能 spawn row B）
+                                console.warn('[Deep Research] window.adoptLRServerSession 未掛載，'
+                                    + '無法採用 server session UUID，可能側欄分裂。session_id=', data.session_id);
+                            }
                         } else if (data.message_type === 'final_result') {
                             fullReport = data.final_report || '';
 
@@ -1666,6 +1698,28 @@ export async function performDeepResearch(query, skipClarification = false, comp
                             setProcessingState(false);
 
                             displayDeepResearchResults(fullReport, data, savedQuery);
+
+                            // [R7 should-fix / R8 BLOCKER1 修正 / R9 BLOCKER / R10 委給 helper] push snapshot 前清 stale graph/chain/KG state：
+                            //   displayReasoningChainInContainer（:316）缺 graph 時 early-return 不清舊 state、
+                            //   KG display 缺 KG 時 _currentKGData 留 stale → 否則本次 snapshot（:1684-1686）會帶到上次 DR 的 stale graph/KG。
+                            //   [R8 verified] 判準來源 = final_result SSE envelope 的 **top-level snake_case**（data.argument_graph /
+                            //   data.knowledge_graph，api.py 從 items[0].schema_object 提取後平鋪，final envelope 沒送 data.results/data.schema_object）。
+                            //   [R10] graph/KG 判準委給獨立無副作用 helper（dr-stale-reset.js）——Step 0c 消費的 hasValidArgGraph/hasValidKG
+                            //   就是 node:test 測的同一個 pure 函式（非平行內聯實作，杜絕 test/production drift）。
+                            if (!hasValidArgGraph(data)) {
+                                // [R8] clearArgumentGraph/clearChainAnalysis 已補 import（研究 state 清理）。
+                                clearArgumentGraph();
+                                clearChainAnalysis();
+                            }
+                            if (!hasValidKG(data)) {
+                                // [R7] 清 stale _currentKGData 用既有 resetKGState()（displayKnowledgeGraph(null) 不清 _currentKGData）。
+                                //   經 news-search.js 掛的 window.__resetKGState bridge 呼叫。
+                                if (typeof window.__resetKGState === 'function') {
+                                    window.__resetKGState();
+                                } else {
+                                    console.warn('[Deep Research][R7] window.__resetKGState 未掛載，無法清 stale KG state');
+                                }
+                            }
 
                             // currentKGData still in news-search.js until commit 17 batch 6''
                             //   — reach via window.__getCurrentKGData bridge to serialize into
@@ -1689,6 +1743,12 @@ export async function performDeepResearch(query, skipClarification = false, comp
 
                             window.renderConversationHistory?.();
 
+                            // 2026-07-13 regression fix: displayDeepResearchResults (:1668) saved
+                            // and cleared the dirty flag BEFORE the sessionHistory entry above was
+                            // pushed — without re-marking, this save is silently swallowed by the
+                            // dirty-gate (session-coordinator.js:70) and the DR final entry never
+                            // persists (flushPendingSave below then flushes a stale snapshot).
+                            markSessionDirty();
                             window.saveCurrentSession?.();
                             // v4.0 Commit 30 (2026-05-25, regression fix):
                             // DR final_result carries the heaviest payload
@@ -1720,12 +1780,26 @@ export async function performDeepResearch(query, skipClarification = false, comp
                             setProcessingState(false);
                             console.log('Deep Research stream complete');
                             return;
-                        } else if (data.message_type === 'error') {
-                            console.error('[Deep Research] SSE error event:', data.error);
+                        } else if (data.message_type === 'error' || data.message_type === 'research_error') {
+                            // W2: 後端背景研究失敗會發 research_error（deep_research.py
+                            // _send_research_error），但前端原本只認 'error'，導致使用者
+                            // 完全看不到後端研究錯誤。一併接住，錯誤才會浮現給使用者。
+                            console.error('[Deep Research] SSE error event:', data.message_type, data.error);
                             closeDRStream();
                             if (loadingState) loadingState.classList.remove('active');
                             setProcessingState(false);
                             showDRError(data.error || 'Deep Research 發生錯誤');
+                            return;
+                        } else if (data.message_type === 'research_interrupted') {
+                            // W1（AR R2）：後端 DR 中斷時發 research_interrupted（deep_research.py
+                            // _send_research_interrupted）。原本前端無此分支，soft-interrupt（連線還活）
+                            // 時使用者只看到畫面卡 loading、無回饋（silent fail 的 UI 版）。此處比照 error
+                            // 分支收尾：關 stream、清 loading/processing、顯示「已中斷、無報告」提示。
+                            console.log('[Deep Research] SSE research_interrupted:', data.message);
+                            closeDRStream();
+                            if (loadingState) loadingState.classList.remove('active');
+                            setProcessingState(false);
+                            showDRError(data.message || 'Deep Research 已中斷，未產生完整報告。');
                             return;
                         }
                     }

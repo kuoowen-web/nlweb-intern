@@ -96,12 +96,12 @@ class AuthService:
 
         email = email.strip().lower()
         if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
-            raise ValueError("Invalid email format")
+            raise ValueError("電子郵件格式不正確")
         self._validate_password(password)
 
         existing = await self.db.fetchone("SELECT id FROM users WHERE email = ?", (email,))
         if existing:
-            raise ValueError("Email already registered")
+            raise ValueError("此電子郵件已被註冊")
 
         user_id = str(uuid.uuid4())
         password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -161,7 +161,7 @@ class AuthService:
         """Admin creates a user in their org. Employee gets activation email."""
         email = email.strip().lower()
         if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
-            raise ValueError("Invalid email format")
+            raise ValueError("電子郵件格式不正確")
 
         # Verify admin has permission
         membership = await self.db.fetchone(
@@ -169,7 +169,7 @@ class AuthService:
             (admin_user_id, org_id)
         )
         if not membership or membership['role'] != 'admin':
-            raise ValueError("Only admins can create users")
+            raise ValueError("只有管理員可以建立使用者")
 
         # Check org member limit
         org = await self.db.fetchone("SELECT max_members, name FROM organizations WHERE id = ?", (org_id,))
@@ -181,11 +181,11 @@ class AuthService:
             (org_id,)
         )
         if member_count['cnt'] >= org['max_members']:
-            raise ValueError("Organization member limit reached")
+            raise ValueError("組織成員數已達上限")
 
         existing = await self.db.fetchone("SELECT id FROM users WHERE email = ?", (email,))
         if existing:
-            raise ValueError("Email already registered")
+            raise ValueError("此電子郵件已被註冊")
 
         user_id = str(uuid.uuid4())
         activation_token = secrets.token_urlsafe(32)
@@ -235,23 +235,23 @@ class AuthService:
             (token,)
         )
         if not token_row:
-            raise ValueError("Invalid activation token")
+            raise ValueError("啟用連結無效")
 
         is_active = token_row['is_active']
         if self.db.db_type == 'sqlite':
             is_active = bool(is_active)
         if not is_active:
-            raise ValueError("Account is deactivated. Please contact your administrator.")
+            raise ValueError("帳號已停用，請聯絡您的管理員。")
 
         if token_row['password_hash'] is not None:
             logger.warning(f"Activation attempted on already-activated account: {token_row['email']}")
-            raise ValueError("Account is already activated. Please log in.")
+            raise ValueError("帳號已啟用，請直接登入。")
 
         user = token_row
 
         # BP-3: Check token expiry
         if user.get('email_verification_expires') and user['email_verification_expires'] < time.time():
-            raise ValueError("Activation token expired. Please contact your administrator.")
+            raise ValueError("啟用連結已過期，請聯絡您的管理員。")
 
         password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
@@ -297,11 +297,11 @@ class AuthService:
             (token, True)
         )
         if not user:
-            raise ValueError("Invalid or expired verification token")
+            raise ValueError("驗證連結無效或已過期")
 
         # BP-3: Check token expiry (NULL expires = legacy token, still valid)
         if user.get('email_verification_expires') and user['email_verification_expires'] < time.time():
-            raise ValueError("Verification token expired. Please request a new one.")
+            raise ValueError("驗證連結已過期，請重新申請一封。")
 
         await self.db.execute(
             "UPDATE users SET email_verified = ?, email_verification_token = NULL, "
@@ -330,20 +330,20 @@ class AuthService:
         valid_password = bcrypt.checkpw(password.encode('utf-8'), hash_to_check.encode('utf-8'))
         if not user or not valid_password:
             await self._record_login_attempt(email, ip, success=False)
-            raise ValueError("Invalid email or password")
+            raise ValueError("電子郵件或密碼錯誤")
 
         is_active = user['is_active']
         if self.db.db_type == 'sqlite':
             is_active = bool(is_active)
         if not is_active:
             await self._record_login_attempt(email, ip, success=False)
-            raise ValueError("Account is deactivated. Please contact your administrator.")
+            raise ValueError("帳號已停用，請聯絡您的管理員。")
 
         email_verified = user['email_verified']
         if self.db.db_type == 'sqlite':
             email_verified = bool(email_verified)
         if not email_verified:
-            raise ValueError("Email not verified. Please check your email for a verification link.")
+            raise ValueError("電子郵件尚未驗證，請至信箱點擊驗證連結。")
 
         await self._record_login_attempt(email, ip, success=True)
 
@@ -481,7 +481,7 @@ class AuthService:
             (token, time.time(), True)
         )
         if not user:
-            raise ValueError("Invalid or expired reset token")
+            raise ValueError("重設密碼連結無效或已過期")
 
         password_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
@@ -514,7 +514,7 @@ class AuthService:
 
         valid = bcrypt.checkpw(current_password.encode('utf-8'), user['password_hash'].encode('utf-8'))
         if not valid:
-            raise ValueError("Current password is incorrect")
+            raise ValueError("目前密碼不正確")
 
         new_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         await self.db.execute(
@@ -548,14 +548,14 @@ class AuthService:
                                admin_user_id: str, org_id: str) -> bool:
         """Admin activates or deactivates a user. Deactivation also revokes all tokens."""
         if target_user_id == admin_user_id:
-            raise PermissionError("Cannot deactivate your own account")
+            raise PermissionError("無法停用您自己的帳號")
 
         membership = await self.db.fetchone(
             "SELECT role FROM org_memberships WHERE user_id = ? AND org_id = ? AND status = 'active'",
             (admin_user_id, org_id)
         )
         if not membership or membership['role'] != 'admin':
-            raise PermissionError("Only admins can change user status")
+            raise PermissionError("只有管理員可以變更使用者狀態")
 
         # Verify target is in same org
         target_membership = await self.db.fetchone(
@@ -585,14 +585,14 @@ class AuthService:
     async def delete_user(self, target_user_id: str, admin_user_id: str, org_id: str) -> bool:
         """Hard-delete a user: revoke tokens, clean up all associated data, delete record."""
         if target_user_id == admin_user_id:
-            raise PermissionError("Cannot delete your own account")
+            raise PermissionError("無法刪除您自己的帳號")
 
         membership = await self.db.fetchone(
             "SELECT role FROM org_memberships WHERE user_id = ? AND org_id = ? AND status = 'active'",
             (admin_user_id, org_id)
         )
         if not membership or membership['role'] != 'admin':
-            raise PermissionError("Only admins can delete users")
+            raise PermissionError("只有管理員可以刪除使用者")
 
         target_membership = await self.db.fetchone(
             "SELECT id FROM org_memberships WHERE user_id = ? AND org_id = ? AND status = 'active'",
@@ -646,7 +646,7 @@ class AuthService:
                                   new_role: str, admin_user_id: str) -> bool:
         """Change a member's role in an organization."""
         if target_user_id == admin_user_id:
-            raise PermissionError("Cannot change your own role")
+            raise PermissionError("無法變更您自己的角色")
 
         if new_role not in ('admin', 'member'):
             raise ValueError("role must be 'admin' or 'member'")
@@ -656,7 +656,7 @@ class AuthService:
             (admin_user_id, org_id)
         )
         if not membership or membership['role'] != 'admin':
-            raise PermissionError("Only admins can change member roles")
+            raise PermissionError("只有管理員可以變更成員角色")
 
         target_membership = await self.db.fetchone(
             "SELECT id FROM org_memberships WHERE user_id = ? AND org_id = ? AND status = 'active'",
@@ -709,7 +709,7 @@ class AuthService:
             (invited_by, org_id)
         )
         if not membership or membership['role'] != 'admin':
-            raise ValueError("Only admins can invite members")
+            raise ValueError("只有管理員可以邀請成員")
 
         org = await self.db.fetchone("SELECT max_members FROM organizations WHERE id = ?", (org_id,))
         if not org:
@@ -720,7 +720,7 @@ class AuthService:
             (org_id,)
         )
         if member_count_row['cnt'] >= org['max_members']:
-            raise ValueError("Organization member limit reached")
+            raise ValueError("組織成員數已達上限")
 
         invitation_id = str(uuid.uuid4())
         token = secrets.token_urlsafe(32)
@@ -757,11 +757,11 @@ class AuthService:
             (token, time.time())
         )
         if not invitation:
-            raise ValueError("Invalid or expired invitation")
+            raise ValueError("邀請連結無效或已過期")
 
         user = await self.db.fetchone("SELECT email FROM users WHERE id = ?", (user_id,))
         if not user or user['email'] != invitation['email']:
-            raise ValueError("This invitation is for a different email address")
+            raise ValueError("此邀請是寄給另一個電子郵件地址的")
 
         now = time.time()
 
@@ -829,7 +829,7 @@ class AuthService:
             (admin_user_id, org_id)
         )
         if not admin_membership or admin_membership['role'] != 'admin':
-            raise PermissionError("Only admins can resend activation")
+            raise PermissionError("只有管理員可以重寄啟用信")
 
         # 確認 target user 在同一個 org
         target_membership = await self.db.fetchone(
@@ -850,11 +850,11 @@ class AuthService:
         # Boolean 正規化（SQLite = 0/1, PG = bool）
         is_active = bool(user['is_active'])
         if not is_active:
-            raise ValueError("Cannot resend activation to a deactivated account")
+            raise ValueError("無法對已停用的帳號重寄啟用信")
 
         # 已啟用（已設密碼）→ 拒絕
         if user['password_hash'] is not None:
-            raise ValueError("User account is already activated")
+            raise ValueError("此使用者帳號已啟用")
 
         # 取得 org 名稱（email template 需要）
         org = await self.db.fetchone(
@@ -891,10 +891,10 @@ class AuthService:
             (requester_user_id, org_id)
         )
         if not membership or membership['role'] != 'admin':
-            raise ValueError("Only admins can remove members")
+            raise ValueError("只有管理員可以移除成員")
 
         if target_user_id == requester_user_id:
-            raise ValueError("Cannot remove yourself from the organization")
+            raise ValueError("無法將您自己從組織中移除")
 
         await self.db.execute(
             "UPDATE org_memberships SET status = 'removed' WHERE user_id = ? AND org_id = ? AND status = 'active'",
@@ -928,11 +928,11 @@ class AuthService:
     def _validate_password(self, password: str):
         """Validate password strength."""
         if len(password) < 8:
-            raise ValueError("Password must be at least 8 characters")
+            raise ValueError("密碼長度至少須 8 個字元")
         if not any(c.isupper() for c in password):
-            raise ValueError("Password must contain at least one uppercase letter")
+            raise ValueError("密碼須包含至少一個大寫字母")
         if not any(c.isdigit() for c in password):
-            raise ValueError("Password must contain at least one digit")
+            raise ValueError("密碼須包含至少一個數字")
 
     def _create_access_token(self, user_id: str, email: str, name: str,
                               org_id: Optional[str], role: Optional[str]) -> str:
@@ -977,7 +977,7 @@ class AuthService:
             (email, False, cutoff)
         )
         if row and row['cnt'] >= BRUTE_FORCE_MAX_ATTEMPTS:
-            raise ValueError("Too many failed login attempts. Please try again in 15 minutes.")
+            raise ValueError("登入失敗次數過多，請於 15 分鐘後再試。")
 
     async def _record_login_attempt(self, email: str, ip: str = None, success: bool = False):
         """Record a login attempt. Sends lockout notification when threshold is first hit."""

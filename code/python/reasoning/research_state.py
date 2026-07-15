@@ -47,6 +47,7 @@ class ResearchState:
     reject_count: int = 0
     seen_citation_ids: set = field(default_factory=set)
     analyst_citations: List[int] = field(default_factory=list)
+    pending_web_formatted: Optional[str] = None  # SF1: web gap re-format 暫存，loop 內消費即清
 
     # === Phase 3 output: Writer ===
     final_report: Optional[Any] = None

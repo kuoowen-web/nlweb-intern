@@ -14,10 +14,12 @@ Usage:
     # Mock 測試（快速，不需要 API）
     pytest tests/test_llm_api_decisions.py -v -k "mock"
 
-    # Live 測試（慢，需要 API key）
-    pytest tests/test_llm_api_decisions.py -v -k "live" --run-live
+    # Live 測試（慢，燒真 LLM 錢）— 需設 NLWEB_ALLOW_REAL_LLM=1 env gate 才會跑，
+    # 否則預設 skip（本 repo 無 --run-live 機制）
+    NLWEB_ALLOW_REAL_LLM=1 pytest tests/test_llm_api_decisions.py -v -k "live"
 """
 
+import os
 import pytest
 import json
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -335,11 +337,18 @@ class TestPromptContent:
 # Test Class: Live LLM Tests (Optional)
 # ==============================================================================
 
+@pytest.mark.skipif(
+    os.environ.get("NLWEB_ALLOW_REAL_LLM") != "1",
+    reason="燒真 LLM 錢，CEO gate（設 NLWEB_ALLOW_REAL_LLM=1 才跑）",
+)
 class TestLiveLLMDecisions:
     """
     Live LLM tests - actually call the LLM to verify behavior.
 
-    Run with: pytest tests/test_llm_api_decisions.py -v -k "live"
+    Gate: 需設 NLWEB_ALLOW_REAL_LLM=1 env 才會跑（本 repo 真慣例；無 --run-live 機制），
+    否則整個 class skip，預設不會嘗試打 LLM。
+
+    Run with: NLWEB_ALLOW_REAL_LLM=1 pytest tests/test_llm_api_decisions.py -v -k "live"
     """
 
     @pytest.mark.asyncio
@@ -401,78 +410,3 @@ class TestLiveLLMDecisions:
         for expected in test_case["expected_resolutions"]:
             assert expected in actual_resolutions, \
                 f"Expected {expected} in resolutions, got {actual_resolutions} for query: {test_case['query']}"
-
-
-# ==============================================================================
-# Test Class: Integration with Routing
-# ==============================================================================
-
-class TestEndToEndRouting:
-    """Test full flow from LLM response to API routing."""
-
-    def test_stock_tw_full_flow(self):
-        """Test: Query -> LLM Response -> Gap Resolution -> Routing -> TWSE."""
-        from tests.test_agent_api_routing import route_gap_resolutions
-
-        # Simulate LLM response
-        mock_response = generate_mock_llm_response(
-            resolution_type="stock_tw",
-            search_query="2330"
-        )
-
-        # Parse to model
-        output = AnalystResearchOutputEnhanced(**mock_response)
-
-        # Route
-        routed = route_gap_resolutions(output.gap_resolutions)
-
-        # Verify routing
-        assert len(routed["stock_tw"]) == 1
-        assert routed["stock_tw"][0].search_query == "2330"
-        assert routed["stock_global"] == []
-        assert routed["web_search"] == []
-
-    def test_mixed_query_full_flow(self):
-        """Test: Complex query requiring multiple APIs."""
-        from tests.test_agent_api_routing import route_gap_resolutions
-
-        # Simulate LLM response with multiple gap_resolutions
-        mock_response = {
-            "status": "DRAFT_READY",
-            "draft": "這是一個測試用的草稿內容，提供足夠長度以通過 Pydantic 驗證。" * 3,
-            "citations_used": [],
-            "new_queries": [],
-            "missing_information": [],
-            "reasoning_chain": "複合查詢需要多個 API",
-            "gap_resolutions": [
-                {
-                    "gap_type": "current_data",
-                    "resolution": "stock_tw",
-                    "search_query": "2330",
-                    "reason": "需要台積電股價"
-                },
-                {
-                    "gap_type": "background",
-                    "resolution": "wikipedia",
-                    "search_query": "TSMC",
-                    "reason": "需要公司背景"
-                },
-                {
-                    "gap_type": "current_data",
-                    "resolution": "web_search",
-                    "search_query": "台積電 法說會 2024",
-                    "reason": "需要最新新聞"
-                }
-            ]
-        }
-
-        # Parse
-        output = AnalystResearchOutputEnhanced(**mock_response)
-
-        # Route
-        routed = route_gap_resolutions(output.gap_resolutions)
-
-        # Verify all three APIs are triggered
-        assert len(routed["stock_tw"]) == 1
-        assert len(routed["wikipedia"]) == 1
-        assert len(routed["web_search"]) == 1

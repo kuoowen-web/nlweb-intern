@@ -280,7 +280,7 @@ vps_ssh "
     docker exec nlweb-postgres psql -U $VPS_PG_USER -d $VPS_PG_DB -c \
         \"SELECT setval('articles_id_seq', (SELECT COALESCE(MAX(id),0) FROM articles));\"
     python3 /data/bulk_load.py /data/embed_weekly/ \
-        --pg-dsn postgresql://$VPS_PG_USER:nlweb_dev@$VPS_PG_IP:5432/$VPS_PG_DB
+        --pg-dsn postgresql://$VPS_PG_USER:YOUR_DB_PASSWORD@$VPS_PG_IP:5432/$VPS_PG_DB
     rm -rf /data/embed_weekly
 "
 

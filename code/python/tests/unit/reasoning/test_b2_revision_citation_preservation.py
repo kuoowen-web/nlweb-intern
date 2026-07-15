@@ -68,7 +68,7 @@ async def test_b2_revise_chapter_override_index_gt0_uses_prior_sources():
     handler.query_params = {}
     handler.message_sender = None
     handler.connection_alive_event = None
-    handler.request_handler = None
+    handler.http_handler = None
 
     with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
         # dry_run=True：C-1 gate 通過後走 dry_run 分支（無需 LLM）
@@ -117,7 +117,7 @@ async def test_b2_revise_empty_prior_sources_blocked():
     handler.query_params = {}
     handler.message_sender = None
     handler.connection_alive_event = None
-    handler.request_handler = None
+    handler.http_handler = None
 
     with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
         orch = LiveResearchOrchestrator(handler=handler, dry_run=True)
@@ -159,7 +159,7 @@ async def test_b2_non_revise_path_still_blocked():
     handler.query_params = {}
     handler.message_sender = None
     handler.connection_alive_event = None
-    handler.request_handler = None
+    handler.http_handler = None
 
     with patch("reasoning.live_research.orchestrator.AssociatorAgent"):
         orch = LiveResearchOrchestrator(handler=handler, dry_run=True)

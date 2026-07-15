@@ -73,31 +73,24 @@ elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
     fi
 fi
 
-# --- 3. Create virtual environment ---
-VENV_DIR="venv"
-if [ -d "$VENV_DIR" ]; then
-    echo "[3/5] Virtual environment: already exists"
+# --- 3. Install uv ---
+if ! command -v uv >/dev/null 2>&1; then
+    echo "[3/5] Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
 else
-    echo "[3/5] Creating virtual environment..."
-    $PYTHON_CMD -m venv "$VENV_DIR"
+    echo "[3/5] uv: $(uv --version)"
 fi
 
-# Activate
-if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
-    source "$VENV_DIR/Scripts/activate"
-else
-    source "$VENV_DIR/bin/activate"
-fi
-echo "       Activated: $(python --version) at $(which python)"
-
-# --- 4. Install dependencies ---
-echo "[4/5] Installing dependencies (first run may take several minutes)..."
-pip install --upgrade pip --quiet 2>&1 | tail -1
-if pip install -r requirements.txt 2>&1 | tail -5; then
+# --- 4. Install dependencies via uv sync ---
+echo "[4/5] Installing dependencies via uv sync (first run may take several minutes)..."
+cd "$(dirname "$0")/../code/python" || exit 1
+if uv sync; then
     echo "       All dependencies installed."
+    echo "       (optional provider: uv sync --extra anthropic  或  --extra gemini)"
 else
     echo ""
-    echo "ERROR: pip install failed."
+    echo "ERROR: uv sync failed."
     if [[ "$OSTYPE" == "darwin"* ]]; then
         echo "  Try: xcode-select --install"
     elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
@@ -106,6 +99,7 @@ else
     fi
     exit 1
 fi
+cd - >/dev/null || exit 1
 
 # --- 5. Setup .env ---
 if [ ! -f .env ]; then
@@ -115,8 +109,8 @@ if [ ! -f .env ]; then
         echo ""
         echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
         echo "  !! 請編輯 .env 填入 API keys（找專案負責人拿）  !!"
-        echo "  !! 至少需要: OPENAI_API_KEY, QDRANT_URL,        !!"
-        echo "  !!          QDRANT_API_KEY                       !!"
+        echo "  !! 至少需要: OPENAI_API_KEY                      !!"
+        echo "  !!          POSTGRES_CONNECTION_STRING           !!"
         echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     else
         echo "[5/5] WARNING: .env.example not found. Create .env manually."
@@ -130,12 +124,7 @@ echo "=== Setup Complete ==="
 echo ""
 echo "啟動 server："
 echo ""
-if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
-    echo "  source venv/Scripts/activate"
-else
-    echo "  source venv/bin/activate"
-fi
 echo "  cd code/python"
-echo "  python app-file.py"
+echo "  uv run python app-aiohttp.py"
 echo ""
 echo "然後打開 http://localhost:8000"

@@ -1,181 +1,148 @@
 # 使用者流程與 UX
 
-## 主要使用路徑
-
-### 1. 首次使用者
-```
-首頁 → 置中輸入框 → 輸入查詢 → 查看結果 → 探索
-```
-
-**步驟**：
-1. 使用者進入首頁
-2. 看到置中輸入框（placeholder: "Ask"）
-3. 選擇網站（可選，預設 "all"）
-4. 選擇模式（list/summarize/generate）
-5. 輸入自然語言查詢
-6. 按 Enter 或點擊發送
-7. 即時查看串流結果
-8. 繼續對話或開始新查詢
-
-### 2. 已認證使用者
-```
-登入 → OAuth → 返回 → 對話同步 → 增強體驗
-```
-
-**步驟**：
-1. 點擊「登入」按鈕
-2. 選擇 OAuth 提供者（Google/Facebook/Microsoft/GitHub）
-3. 完成認證
-4. 返回應用程式
-5. 先前對話載入至側邊欄
-6. 對話自動儲存至伺服器
+> **2026-07-11 對 code 現況重寫**（前版 2026-01-19 描述 OAuth 四 provider 與 list/summarize/generate 三模式，均已過時）。
+> 權威細節：登入/session 流程見 `docs/specs/login-spec.md`；前端模組與 UI 細節見 `docs/specs/frontend-spec.md`；端點清單見 `docs/reference/api-endpoints.md`。
 
 ---
 
-## 搜尋模式
+## 主要使用路徑
 
-### List 模式（預設）
-```
-查詢 → 結果列表 → 點擊項目 → 開啟來源
-```
-- 結果按相關性排序
-- 富文字摘要
-- 外部連結於新分頁開啟
+### 1. 首次使用者（B2B onboarding，不開放自助註冊）
 
-### Summarize 模式
+**客戶 admin**：
 ```
-查詢 → 摘要文字 → 支援結果 → 探索來源
+收到 /setup?token=xxx 連結 → 填組織名稱 + 管理員帳密 → 建立組織 → 自動發 cookie 直接進站
 ```
-- AI 生成摘要優先顯示
-- 相關結果列於下方
-- 引用連結至來源
 
-### Generate 模式
+**組織員工**：
 ```
-查詢 → AI 回應 → 參考項目 → 深度探索
+admin 建帳號 → 收啟用信 → /api/auth/activate?token=xxx 設密碼 → 自動發 cookie 直接進站
 ```
-- 完整 AI 生成答案
-- 列出用於生成的項目
-- 支援後續問題
+
+匿名使用者無法搜尋（`/ask` 需 JWT）；未登入進站會看到 login modal。
+
+### 2. 登入使用者（Email/Password + JWT）
+
+```
+登入 → access(15 分)/refresh(7 天) httpOnly cookie → Init Sync → 進入工作區
+```
+
+**步驟**：
+1. Login modal 輸入 email/password（同 email 15 分鐘內錯 5 次鎖定）
+2. 登入成功觸發 **UserStateSync trigger A**：清空前一使用者殘留 state → `GET /api/user/init` 一次拉回 user/org/role/sessions/shared_sessions/preferences → hydrate UI
+3. 左側邊欄載入個人 sessions + 組織空間分享 sessions
+4. 之後 session 內容自動存 server（PostgreSQL），跨裝置同步
+
+### 3. 查詢流程
+
+```
+選模式 → 輸入自然語言查詢 → Enter 送出 → SSE 串流漸進渲染 → 追問或開新對話
+```
+
+---
+
+## 搜尋模式（三模式 + Live Research）
+
+前端 `currentMode` 對應（`frontend-spec.md` §4.1）：
+
+### 新聞搜尋（search）
+```
+查詢 → SSE /ask → 文章卡片 + AI 摘要漸進渲染 → 點卡片開啟來源
+```
+- 結果依 ranking pipeline 排序（LLM + XGBoost shadow + MMR）
+- unified 模式單一 SSE 流回傳文章 + 摘要 + AI 回答
+
+### 進階搜尋（deep_research）
+```
+查詢 → SSE /api/deep_research →（必要時澄清問題）→ 研究進度 → 報告 + 知識圖譜 + 推論鏈
+```
+- 報告含信心度、參考資料來源；知識圖譜可編輯後經 `/api/research/rerun` 選擇性重跑
+- 同時只能進行一個 DR（併發限制，超限 429）
+
+### 自由對話（chat）
+```
+訊息 → POST /ask（帶 research context）→ 多輪對話
+```
+- Deep Research 完成後可就報告內容追問
+
+### Live Research（feature flag `live_research`）
+```
+查詢 → SSE /api/live_research → 6 階段對話式研究（結構提案 → 資料蒐集 → 風格 → 格式 → 撰寫 → 匯出）
+     → 每階段 checkpoint 停下等使用者確認 → /api/live_research/continue 續跑（可回上一步/重來）
+```
 
 ---
 
 ## 介面狀態
 
-### 載入狀態
+### 載入與串流
 | 狀態 | 顯示 |
 |------|------|
-| 初始查詢 | 三點動畫 |
-| 串流中 | 結果逐一出現 |
-| 圖片 | 延遲載入佔位符 |
-| 地圖 | "載入地圖..." |
+| 查詢處理中 | 處理中狀態（`setProcessingState`） |
+| SSE 串流中 | 結果漸進出現（骨架屏 + 逐批渲染） |
+| DR 進行中 | 「深度研究進行中」+ 階段名稱（不露技術細節） |
+| LR 進行中 | 讀豹敘事訊息（narration）逐則推入對話 |
 
-### 錯誤狀態
-| 錯誤 | 訊息 | 動作 |
-|------|------|------|
-| 無結果 | "未找到結果" | 建議精煉查詢 |
-| 連線錯誤 | "無法連線至伺服器" | 重試按鈕 |
-| 認證錯誤 | "認證失敗" | 導向登入 |
-| 速率限制 | "請求過多" | 倒數計時 |
-
-### 空狀態
-| 情況 | 處理 |
-|------|------|
-| 無對話 | 顯示「開始新對話」提示 |
-| 無可用網站 | 預設為 "all" |
-| 無記憶項目 | 隱藏該區塊 |
+### 錯誤狀態（對齊 server 實際回應）
+| 情況 | Server 回應 | 前端行為 |
+|------|------------|---------|
+| 未登入 / token 失效 | 401（`token_expired` / `invalid_token`） | 先 refresh；失敗走 trigger D：清 state + 回 login modal |
+| 查詢過長 | 400「查詢過長，請縮短至 500 字元以內」 | 顯示訊息 |
+| 併發超限 | 429「目前查詢量過大」/「Deep Research 同時只能進行一個」 | 顯示訊息 + retry_after 30s |
+| DR/LR 功能關閉 | 503（kill switch / feature flag） | 顯示「功能暫時關閉/尚未啟用」 |
+| auth rate limit | 429（login 10/min 等） | 顯示訊息 |
 
 ---
 
 ## 失敗復原
 
-### 網路失敗
-```
-請求失敗 → 重試邏輯 → 使用者回饋 → 備用選項
-```
-1. 指數退避自動重試
-2. 顯示使用者友善錯誤訊息
-3. 保留部分結果（如有）
-4. 允許手動重試
-5. 本地快取結果
-
-### 串流中斷
-```
-串流中斷 → 重連嘗試 → 恢復或顯示部分
-```
-1. EventSource 錯誤觸發重連
-2. 最多 3 次重試
-3. 顯示已接收的部分結果
-4. 提供「載入更多」選項
+### SSE 串流中斷
+- 當前 SSE 走 **POST fetch reader**（`handlePostStreamingRequest`；舊 EventSource GET 路徑已 deprecated 無 caller）
+- **Deep Research**：client 斷線 → server 取消背景 research task
+- **Live Research**：client 斷線**不取消** — server 把當前 stage 跑到下個 checkpoint 存檔（防呆燒錢上限由 orchestrator enforce），重連後可續跑（lr-sse-reconnect-resume）
 
 ### 認證失敗
 ```
-OAuth 失敗 → 清除狀態 → 顯示錯誤 → 保持匿名
+401 → refresh token → 成功則重試原請求；失敗 → UserStateSync fullReset → login modal
 ```
-- 彈出視窗被阻擋：指示允許彈出視窗
-- 提供者錯誤：返回提供者選擇
-- Token 無效：清除並重新認證
+- 所有 auth failure path 走同一 cleanup（trigger C/D），不分支實作
+- 快速連搜的主動取消（AbortError）不觸發 auth failure（是正常取消，見 login-spec §1F-C trigger D）
+
+### 跨使用者身分保護（B2B 共用電腦）
+- 核心 invariant：`cache.user_id == JWT.user_id`，由 7 個 sync trigger 維護（login-spec §1F-C）
+- SSE envelope 帶 `user_id` stamp，mismatch 即 abort stream 並重新同步（trigger G）
+- logout 無條件清 6 個 user-scoped localStorage keys；device-scoped UI 偏好（大字體等）保留
 
 ---
 
-## 無障礙考量
+## 可及性與操作
 
-### 鍵盤導航
-- Tab 瀏覽所有互動元素
-- Enter 發送訊息
-- Escape 關閉下拉選單
-- 方向鍵於下拉列表
+### 鍵盤
+| 快捷鍵 | 功能 |
+|--------|------|
+| `Enter` | 送出搜尋 |
+| `Shift + Enter` | 換行 |
+| `Escape` | 關閉 popup / 取消搜尋 |
 
-### 螢幕閱讀器
-- ARIA 標籤
-- 圖片替代文字
-- 語意 HTML
-- 載入狀態公告
+### 顯示
+- 大字體模式（`body.large-font`，搜尋框右上切換，device-scoped 偏好跨登入保留）
+- 響應式斷點：>1200px 三欄；768-1200px 隱藏左側邊欄；<768px 單欄
 
-### 視覺無障礙
-- 高對比文字
-- 焦點指示器
-- 足夠觸控目標（44x44px）
-- 響應式文字大小
-
----
-
-## 效能優化
-
-### 初始載入
-1. 關鍵 CSS 內嵌
-2. JavaScript 延遲載入
-3. 字型非同步載入
-4. 圖片延遲載入
-
-### 執行時效能
-1. 長結果列表虛擬滾動
-2. 搜尋輸入防抖
-3. 結果去重
-4. 舊訊息記憶體清理
-
-### 行動裝置優化
-1. 側邊欄預設收合
-2. 觸控優化控制項
-3. 低階裝置減少動畫
-4. 離線偵測與訊息
+### 效能
+- 漸進式渲染（`requestAnimationFrame` 逐批渲染文章卡片）
+- 搜尋取消機制（`searchGenerationId` + AbortController；新查詢自動取消前一請求）
+- `/sites_config` server 端 5 分鐘 cache
 
 ---
 
 ## 隱私與安全
 
-### 資料處理
-1. 匿名使用者使用本地儲存
-2. 認證使用者使用伺服器儲存
-3. 設定中提供清除資料選項
-4. 未經同意不追蹤
-
-### 安全通訊
-1. 強制 HTTPS
-2. OAuth token 於 Authorization header
-3. 渲染時 XSS 防護
-4. Content Security Policy headers
+1. Token 存放：httpOnly + Secure + SameSite=Lax cookie（不放 localStorage，BP-1）
+2. 資料隔離：所有 session/文件/偏好查詢帶 `org_id` filter（multi-tenant）
+3. 上傳配額：org 儲存空間上限（超限 413），檔案處理狀態可追蹤
+4. CSP / CORS / rate limit / prompt guardrails middleware 全鏈啟用
+5. 稽核：登入、session 操作、admin 操作寫 `audit_logs`（fire-and-forget）
 
 ---
 
-*更新：2026-01-19*
+*更新：2026-07-11（對齊 login-spec / frontend-spec / webserver routes 現況；移除 OAuth 與 list/summarize/generate 過時描述）*

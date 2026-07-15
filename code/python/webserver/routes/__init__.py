@@ -25,8 +25,8 @@ def setup_routes(app):
     setup_static_routes(app)
     setup_api_routes(app)
     setup_health_routes(app)
-    setup_mcp_routes(app)
-    setup_a2a_routes(app)
+    # MCP/A2A route 卸載（拍板 3）：對外零 caller，關閉攻擊面。
+    # import 保留於檔頭；未來 agent 整合時加回 setup_mcp_routes(app)+setup_a2a_routes(app) 即復活。
     setup_user_data_routes(app)
     setup_auth_routes(app)
     setup_session_routes(app)

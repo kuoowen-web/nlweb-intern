@@ -96,10 +96,10 @@ import {
     setAccumulatedArticles,
     cancelActiveSearch,
     clearCurrentConversationId
-} from './search.js?v=20260705c';
-import { setChatHistory, getChatHistory } from './chat.js?v=20260705c';
+} from './search.js?v=20260714a';
+import { setChatHistory, getChatHistory } from './chat.js?v=20260714a';
 import { setPinnedMessages, setPinnedNewsCards } from './pins.js';
-import { clearCurrentResearchQueryId } from './deep-research.js?v=20260705c';
+import { clearCurrentResearchQueryId } from './deep-research.js?v=20260715b';
 import { markSessionDirty } from './session-manager.js';
 // Post-refactor regression fix (2026-05-25): commit 11 removed window.UserStateSync*
 // bridges, but this module still referenced them at line 297-301 (session click

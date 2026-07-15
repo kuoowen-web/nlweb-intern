@@ -64,8 +64,8 @@ def _phase3_engine_fixture(search_result, mini_ok):
     handler.message_sender.send_message = record_send
     handler.connection_alive_event = MagicMock()
     handler.connection_alive_event.is_set = MagicMock(return_value=True)
-    handler.request_handler = MagicMock()
-    handler.request_handler.connection_alive = True
+    handler.http_handler = MagicMock()
+    handler.http_handler.connection_alive = True
     handler._soft_interrupt_event = None
     handler.query_params = {}
     handler.site = 'all'

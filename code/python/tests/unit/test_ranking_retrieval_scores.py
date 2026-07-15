@@ -23,8 +23,7 @@ from core.ranking import Ranking
 
 
 class _State:
-    def should_abort_fast_track(self):
-        return False
+    pass
 
 
 class _Handler:

@@ -1629,7 +1629,7 @@ class BABLoopEngine:
         """
         from reasoning.orchestrator_base import ResearchCancelledError
 
-        wrapper = getattr(self.handler, 'request_handler', None)
+        wrapper = getattr(self.handler, 'http_handler', None)
         event = getattr(self.handler, 'connection_alive_event', None)
 
         # Signal 1: wrapper connection_alive flag

@@ -35,6 +35,15 @@ class SummarizeResults(PromptRunner):
         super().__init__(handler)
 
     async def do(self):
+        # P1-5 honest guard (2026-07-08): with zero ranked answers there is
+        # nothing to summarize — feeding an empty list to the LLM invites it
+        # to stitch an answer out of thin air (fabrication inlet). Explicit
+        # degradation, never silent. Mirrors the existing empty-response
+        # early-return below (no precheck_step_done), so state semantics
+        # are unchanged.
+        if not getattr(self.handler, 'final_ranked_answers', None):
+            logger.warning("[SUMMARIZE] Skipped: no ranked answers to summarize (empty result set)")
+            return
         # MMR diversity re-ranking is already done in ranking.py, no need to apply again
         response = await self.run_prompt(self.SUMMARIZE_RESULTS_PROMPT_NAME, timeout=20, max_length=1024)
         if (not response):

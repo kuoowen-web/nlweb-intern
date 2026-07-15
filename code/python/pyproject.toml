@@ -81,6 +81,29 @@ dev = [
     # actually runs inside uv's clean .venv — otherwise half the gate silently no-ops
     # (violates the "no silent fail" rule).
     "ruff>=0.5.0",
+    # tests/test_tier6_api_clients.py 的 mock 依賴 — 2026-06-22 UV 遷移漏宣告，
+    # 2026-07-06 health check 抓到（該檔 collection 因此炸整個 tests/ 收集）。
+    "aioresponses>=0.7",
+    # 兩段式 Agent E2E（two-stage-e2e-plan.md）：蒸餾段 Playwright 回歸腳本。
+    "playwright>=1.45.0",
+    "pytest-playwright>=0.5.0",
+]
+
+[tool.pytest.ini_options]
+# 白名單制收集面。新增測試目錄時必須同步此列表（刻意取捨：防裸跑誤收
+# 手動腳本 / legacy testing/ / 未入版控的 crawler/tests——後者見 status.md
+# 「crawler/tests 入版控+修復」backlog 票，修完才納入）。
+testpaths = ["tests"]
+# 雙保險：即使有人用目錄參數跑（如 `pytest .`），也不遞迴進 legacy testing/。
+# ⚠ 此鍵「取代」pytest 預設值（不是追加），必須複列預設排除——只寫 ["testing"]
+# 會讓 .venv 等 dot-dir 失去預設保護（2026-07-06 AR 對照實驗實證）。
+# "e2e"：兩段式 E2E 腳本只可顯式指定路徑執行（pytest code/python/tests/e2e/），
+# 裸 pytest 不收——playwright import 不發生，見 two-stage-e2e-plan.md Task 1。
+norecursedirs = ["testing", "*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "e2e"]
+markers = [
+    "llm: tests that hit real LLM endpoints (skipped without env gate like NLWEB_ALLOW_REAL_LLM=1)",
+    "contract: contract tests pinning cross-module data shapes",
+    "unit: plain unit tests (organizational tag)",
 ]
 
 [tool.uv]

@@ -71,22 +71,20 @@ GROUNDING_UNAVAILABLE_NARRATION = (
     "會直接在該章標示，不再重複提醒。"
 )
 
-# --- 章節字數明顯超標、已 post-process 節略到規劃字數附近的旁白（bug 2026-06-20）---
-# 軟約束（prompt ±15% + 上面那則「照常保留」旁白）prod 證實壓不住字數，CEO/CTO 拍板
-# 改用 post-process truncate（硬切到 target 附近、切句界、補省略號明示）。
-# no silent fail：truncate 一定要讓 user 知道內容被切過，不可悄悄砍掉。
-# 語意：誠實告知「本章太長、已節略到規劃字數附近」，與上面「照常保留」舊文案區隔
-# （那則用在「超標但未切」，本則用在「已切」）。純白話、零開發術語（AST guard 掃描）。
+# --- 章節字數明顯超標、內容照常保留的透明化旁白（2026-07 regression 修復，改回軟約束）---
+# 硬切會截斷正文使用者要不回（CEO「切掉就不能用了」），改回「只透明化、不砍 content」。
+# no silent fail：仍誠實告知 user「本章比預期長」，但明說內容完整保留。
+# 純白話、零開發術語（lr_copy 全檔 AST jargon guard + 本函式 per-function forbidden 掃描）。
 
 
-def chapter_word_truncated_narration(
-    chapter_title: str, target: int, actual_before: int
+def chapter_word_overshoot_narration(
+    chapter_title: str, target: int, actual: int
 ) -> str:
-    """字數節略旁白。target=規劃字數，actual_before=節略前的實際字數（已剝引用標記）。"""
+    """章節偏長旁白（內容照常保留，不切）。target=規劃字數，actual=實際字數（已剝引用標記）。"""
     return (
-        f"提醒：「{chapter_title}」這一章原本寫成約 {actual_before} 字，"
-        f"明顯超過規劃的約 {target} 字，已自動節略到規劃字數附近，"
-        f"結尾以刪節號標示。如果想保留完整內容，可以告訴我「這章不要節略」。"
+        f"提醒：「{chapter_title}」這一章寫成約 {actual} 字，"
+        f"比規劃的約 {target} 字長一些，內容我完整保留、沒有刪節。"
+        f"如果你希望更精簡，可以告訴我「這章縮短一點」，我再幫你改寫。"
     )
 
 
@@ -455,4 +453,40 @@ def reference_missing_entry(eid) -> str:
     return (
         f"[{eid}] *（{REFERENCE_MISSING_SENTINEL}：報告引用了編號 {eid}，"
         f"但系統來源庫中找不到對應資料）*"
+    )
+
+
+# --- R2 表格章節指涉澄清問句（2026-07，雙層 clarification 機制）---
+# 純白話、零開發術語（lr_copy 全檔 AST jargon guard）。
+
+
+def special_element_confirm_question(resolved_titles) -> str:
+    """LLM 語意判 clear 時的確認式問句（接住 confident-wrong，friction 極低）。
+    resolved_titles：LLM 判到的章名 list（一或多個，合併成一句）。"""
+    if isinstance(resolved_titles, str):
+        resolved_titles = [resolved_titles]
+    joined = "、".join(f"「{t}」" for t in resolved_titles)
+    return (
+        f"我理解你想把特殊格式（表格／圖表）放在 {joined} 這（幾）章，對嗎？"
+        f"如果是，回覆「對」我就放進去，如果想換一章，直接告訴我章名。"
+    )
+
+
+def special_element_clarification_question(unresolved_targets, chapter_names) -> str:
+    """LLM 判 uncertain / 對不到時的完整枚舉問句（列暫定章名請 user 選，no silent fail）。"""
+    joined = "、".join(f"「{t}」" for t in unresolved_targets)
+    options = "、".join(f"{i + 1}）{n}" for i, n in enumerate(chapter_names))
+    return (
+        f"你想把特殊格式（如表格）放在哪一章呢？你剛提到的{joined}我一時對應不準。"
+        f"目前規劃的章節有：{options}。請回覆章名或第幾個，我就放進去。"
+    )
+
+
+def special_element_target_unmatched_narration(unmatched_targets) -> str:
+    """outline 定案後 target 對不到任何章的誠實旁白（no silent fail）。
+    時點在寫章節前、已知會 filter 掉 → 語意要準（「不會自動放進」而非「可能沒放」）。"""
+    joined = "、".join(f"「{t}」" for t in unmatched_targets)
+    return (
+        f"提醒：你指定要放表格／圖表的章節（{joined}）我對應不到最終章節，"
+        f"因此不會自動放進報告。如果還需要，請用明確的章名再告訴我一次。"
     )

@@ -42,17 +42,17 @@ import {
     getConversationHistory,
     getAccumulatedArticles,
     getCurrentConversationId,
-} from '../features/search.js?v=20260705c';
-import { getChatHistory } from '../features/chat.js?v=20260705c';
+} from '../features/search.js?v=20260714a';
+import { getChatHistory } from '../features/chat.js?v=20260714a';
 import { getPinnedMessages, getPinnedNewsCards } from '../features/pins.js';
 import {
     getResearchReport,
     getArgumentGraph,
     getChainAnalysis,
 } from '../features/research.js';
-import { getCurrentKGData } from '../features/knowledge-graph.js?v=20260705c';
+import { getCurrentKGData } from '../features/knowledge-graph.js?v=20260714a';
 import { getCurrentMode } from '../features/mode.js';
-import { getCurrentResearchQueryId } from '../features/deep-research.js?v=20260705c';
+import { getCurrentResearchQueryId } from '../features/deep-research.js?v=20260715b';
 import {
     isSessionDirty,
     clearSessionDirty,

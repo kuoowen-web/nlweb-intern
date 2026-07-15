@@ -259,6 +259,10 @@ def search_files(conn: sqlite3.Connection, query: str, limit: int = 20) -> list:
     """使用 FTS5 搜尋檔案"""
     cursor = conn.cursor()
 
+    # 將整個查詢詞包成 FTS5 phrase：連字號 / 點號等字元否則會被當運算子（如 - = NOT）導致 syntax error。
+    # 內部雙引號 escape 成 ""，符合 FTS5 phrase 語法。
+    fts_query = '"' + query.replace('"', '""') + '"'
+
     # 使用 FTS5 搜尋
     cursor.execute("""
         SELECT
@@ -271,7 +275,7 @@ def search_files(conn: sqlite3.Connection, query: str, limit: int = 20) -> list:
         WHERE files_fts MATCH ?
         ORDER BY rank
         LIMIT ?
-    """, (query, limit))
+    """, (fts_query, limit))
 
     return cursor.fetchall()
 

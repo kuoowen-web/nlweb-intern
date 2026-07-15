@@ -44,17 +44,91 @@ class QueryUnderstanding(PromptRunner):
         'month_period_zh': r'(\d{1,2})月[中初底末]',
     }
 
+    # 時間修飾中綴（封閉集）：「記者王家瑜最近寫的」「記者X在2020年1月寫的」的
+    # 名字與 possessive 尾之間允許的修飾段。設計要點（AR R3）：
+    # - (?:[在於]\s*)? 介詞前導：「在2020年」「於上週」（B2）
+    # - 數字必帶單位 + (?![0-9０-９]) 原子化：防裸數字誤收（「王大明2」）與
+    #   catastrophic backtracking（26 位數字 run 曾 3.6s 指數增長 = availability
+    #   紅線；原子化後 80 位 0.00ms）（B3）
+    # - 開放集主題修飾（關於X）不支援——交一般檢索（寧可不抽也不誤抽）。
+    _TIME_INFIX = (r'(?:\s*(?:[在於]\s*)?'
+                   r'(?:最近|今天|昨天|本週|上週|上個月|這幾天|近期|今年|去年|本月|這個月|這週|'
+                   r'[0-9０-９]{1,4}(?![0-9０-９])[年月日號]))*')
+
     AUTHOR_PATTERNS = {
-        'name_before_title_zh': r'([一-鿿]{2,4})\s*(?:記者|作者|編輯|副總編輯|總編輯|主筆)',
-        'title_colon_name_zh': r'(?:記者|作者|編輯)[：:]\s*([一-鿿]{2,4})',
-        'name_possessive_zh': r'([一-鿿]{2,4})\s*(?:的文章|的報導|寫的|的新聞)',
+        # Sandwich（職稱+名字+[時間修飾]+possessive）— 最高精度，必須排第一。
+        # 2026-07-08 P1-5：原首位 name_before_title_zh 會把「幫我找記者X寫的文章」
+        # 的請求語「幫我找」最左匹配成名字；sandwich 對同句式抽出正確名字。
+        # （源自舊 author_intent_detector.py 的 author_articles_zh，QU 整併時遺失。）
+        # capture = CJK 2-4 字 lazy、逐字排除的/寫（防「王家瑜最近」吸附）；
+        # 記者(?![會節們群]) 防「記者會/記者節/記者們/記者群」主題詞誤觸。
+        # 已知歧義（AR R3-B2 裁決）：名字尾字為在/於且緊接時間 token（王不存在2026年…）
+        # 會抽短一字（王不存）——ILIKE contains 語義下為超集，檢索行為等價。
+        # 職稱 alternation 帶 negative lookahead（AR R5-S1）：編輯(?![部台室群們]) 防
+        # 「編輯部王大明」把「部王大明」吸進名字；作者(?![群們]) 同理。
+        'title_name_possessive_zh': (
+            r'(?:記者(?![會節們群])|作者(?![群們])|編輯(?![部台室群們]))\s*((?:(?![的寫])[一-鿿]){2,4}?)'
+            + _TIME_INFIX + r'\s*(?:的文章|的報導|寫的|的新聞|的評論)'),
+        # 左邊界 lookbehind（AR R4-B1）：名字左鄰不得是 CJK/數字——「中國時報王家瑜記者」
+        # 「2026年王大明記者」「給我／列出／顯示＋名」等 mid-string 黏連開放集整類消失
+        # （strip 枚舉結構上收斂不了此家族）。句首與 strip 後的位置天然滿足 lookbehind。
+        # capture 用 lazy {2,4}?（AR R5-B1）：lookbehind 已釘起點，lazy 讓「王大明總編輯」
+        # 正確停在'王大明'——greedy 曾吃成'王大明總'再用「編輯」接上（副總編輯/總編輯/
+        # 主筆三個多字職稱在 2-3 字名下全數 corrupted-name 誤抽）。
+        'name_before_title_zh': (
+            r'(?<![0-9０-９一-鿿])((?:(?![的寫])[一-鿿]){2,4}?)\s*'
+            r'(?:記者(?![會節們群])|作者(?![群們])|編輯(?![部台室群們])|副總編輯|總編輯|主筆)'),
+        'title_colon_name_zh': r'(?:記者(?![會節們群])|作者(?![群們])|編輯(?![部台室群們]))[：:]\s*([一-鿿]{2,4})',
+        # name_possessive_zh 已移除（AR R3-B1）：對全部正例命中 0（sandwich/
+        # name_before_title/colon 全承接），卻是「和林資傑」（雙作者）「在立法院」
+        # 「跑立法院」「年專題」「高端疫苗」誤抽的唯一來源 = 0 正貢獻純 scavenger。
+        # 無職稱訊號的 possessive query 一律交 LLM。
         'by_author_en': r'(?:articles?|posts?|reports?)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
     }
+
+    # 職稱訊號（reject 判定用；記者會/節/們/群、作者群、編輯部/台/室/群/們是主題詞
+    # 非職稱；專欄作家=泛稱非具名）——與 patterns 的職稱 alternation 同步（R5-S1）
+    TITLE_WORD_RE = re.compile(
+        r'記者(?![會節們群])|作者(?![群們])|編輯(?![部台室群們])|主筆|專欄(?!作家)')
+
+    # 請求語前綴——名字抽取前以 fixpoint 迴圈剝除（見 _strip_request_prefixes）：
+    # 堆疊前綴（請麻煩幫我找）、填充詞（一下/一查/一找）、請求動詞（找/查/搜尋/搜/看/
+    # 問/知道/了解）逐層剝淨。bare 動詞單獨出現須帶填充詞才無條件剝：
+    # 「查理布朗」「看見台灣」「想見你」不受影響。
+    REQUEST_PREFIX_RE = re.compile(
+        r'^(?:(?:請?(?:幫我|幫忙)|請|麻煩|我想|想|我要|要|有沒有|有)'
+        r'(?:找|查|搜尋|搜|看|問|知道|了解|教)?(?:一下|一查|一找)?'
+        r'|(?:找|查|搜尋|搜|看)(?:一下|一查|一找))\s*')
+
+    # bare 動詞條件剝：動詞只在後接「2-4 CJK 名 + 職稱詞」時剝（雙字動詞置前防單字先吃）。
+    # 職稱集含多字職稱（AR R5-B1：漏 副總編輯/總編輯/主筆 曾讓「找王大明主筆」復活 R2 家族）。
+    BARE_VERB_PREFIX_RE = re.compile(
+        r'^(?:搜尋|尋找|找|查|搜|問|了解|知道)'
+        r'(?=(?:(?![的寫])[一-鿿]){2,4}(?:記者(?![會節們群])|作者(?![群們])|編輯(?![部台室群們])|副總編輯|總編輯|主筆))')
+
+    # 功能詞（時間/介詞/修飾）——抽出的名字含這些 = regex 吸附產物，一律 reject。
+    FUNCTION_WORD_RE = re.compile(
+        r'最近|今天|昨天|本週|上週|去年|今年|之前|以前|關於|對於|有關|所有|全部|相關')
 
     AUTHOR_STOPWORDS = {
         '什麼', '怎麼', '如何', '為什麼', '哪些', '這個', '那個', '最新', '最近',
         '今天', '昨天', '本週', '分析', '報導', '新聞', '文章', '發展', '趨勢',
         '技術', '產業', '市場', '公司', '企業', '科技', '經濟', '金融', '政治',
+        # 高頻非人名誤抽家族（2026-07-08 P1-5 AR：strict 下誤抽 = 假空結果）
+        '記者會', '記者節', '編輯部', '編輯台', '記者們',
+        # 職稱修飾詞首發集（「攝影記者」「資深記者」的修飾段；
+        # 其級聯超集由 _regex_author 的 TITLE_WORD-in-name reject 收掉）
+        '攝影', '資深', '實習', '文字', '特派', '特約',
+        # beat 詞/媒體名批次（AR R6-S1 executor 落地採納：「體育記者」類
+        # beat 前綴與媒體名前綴在 strict 下誤抽 = 假空結果；
+        # 政治/科技/經濟/金融已在上方基本集內）
+        '體育', '財經', '國際', '地方', '文化', '娛樂', '司法', '醫藥',
+        '社會', '生活', '影劇', '兩岸', '軍事', '環境', '報社', '媒體',
+        '電視台', '本報', '本刊', '三立', '中天', '東森', '民視', '台視',
+        '中視', '華視',
+        # 請求語片語（前綴 strip 後理論上不出現，保留為雙保險）
+        '幫我找', '請幫我', '幫忙找', '我想找', '我想看', '幫我查',
+        '請給我', '給我看', '幫我搜', '搜尋',
     }
 
     def __init__(self, handler):
@@ -161,13 +235,41 @@ class QueryUnderstanding(PromptRunner):
 
         return None
 
+    def _strip_request_prefixes(self, query: str) -> str:
+        """Fixpoint 剝請求語前綴：堆疊前綴（請麻煩幫我找一下…）逐層剝到不動點。
+
+        單發 sub 擋不住堆疊組合（AR R2 實測「麻煩幫我找」「幫我找一下」leak）。
+        """
+        while True:
+            stripped = self.REQUEST_PREFIX_RE.sub('', query)
+            stripped = self.BARE_VERB_PREFIX_RE.sub('', stripped)
+            if stripped == query:
+                return query
+            query = stripped
+
     def _regex_author(self, query: str) -> Optional[Dict]:
         """Try to extract author name via regex. Returns dict or None."""
+        query = self._strip_request_prefixes(query)
         for pattern_name, pattern in self.AUTHOR_PATTERNS.items():
             m = re.search(pattern, query)
             if m:
                 name = m.group(1).strip()
                 if name in self.AUTHOR_STOPWORDS or len(name) < 2:
+                    continue
+                if self.FUNCTION_WORD_RE.search(name):
+                    # 名字含時間/介詞 = 吸附產物（「王家瑜最近」「關於高端」），
+                    # reject 讓其 fallthrough——寧可不抽也不觸發假「找不到作者」
+                    continue
+                if self.TITLE_WORD_RE.search(name):
+                    # 名字含職稱詞 = bare 職稱族／級聯超集（「記者寫」「攝影記者」
+                    # 「編輯室」「記者群」），不是人名（AR R2 S1' 一刀流）
+                    continue
+                if name.startswith('駐'):
+                    # 駐X 特派開放類（駐美/駐日…）；「駐」非漢人姓氏
+                    continue
+                if name[-1] in ('總', '副'):
+                    # 「王總編輯」單字姓+職稱切面（AR R5-N2）：capture min 2 的結構
+                    # 極限使其抽成'王總'——尾字總/副的真實人名罕見，reject 安全
                     continue
                 return {'is_author_search': True, 'author_name': name,
                         'pattern_matched': pattern_name}

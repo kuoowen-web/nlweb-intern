@@ -359,8 +359,8 @@ class LiveResearchHandler(DeepResearchHandler):
             # User 必須匯出後封存，新需求請開新 session。
             if getattr(state, "schema_version", 1) < 2:
                 legacy_msg = (
-                    "此 session 為升級前的舊版本（grounding 機制尚未啟用），"
-                    "已進入唯讀狀態。建議匯出此份研究後，重新開啟新 session 繼續工作。"
+                    "此研究紀錄為舊版格式，目前僅支援讀取與匯出，無法繼續編輯。"
+                    "建議匯出此份研究後，重新開始新的研究。"
                 )
                 logger.warning(
                     f"[LIVE RESEARCH] Rejected continueResearch on legacy schema session "

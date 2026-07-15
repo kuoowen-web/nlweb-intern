@@ -48,9 +48,7 @@ class RequiredInfo(PromptRunner):
             if not self.handler.required_info_found:
                 logger.info("Required information not found, will ask user for more details")
                 self.handler.query_done = True
-                # Centralized abort checking will handle setting the event
-                self.handler.state.abort_fast_track_if_needed()
-                
+
                 logger.debug(f"Sending ask_user message: {response['user_question']}")
                 asyncio.create_task(self.handler.send_message({"message_type": "ask_user", "message": response["user_question"]}))
                 

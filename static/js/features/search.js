@@ -732,6 +732,38 @@ export function showLowKeywordMatchWarning(message) {
     if (resultsSection) resultsSection.insertBefore(warning, resultsSection.firstChild);
 }
 
+// Transient input-validation hint anchored to the search box (not #resultsSection —
+// this fires *before* a search runs, so results container may be hidden/empty).
+// Reuses the showMemoryNotification auto-fade pattern (5s fade + remove); non-blocking
+// (no alert()). Used by the empty-query guard in performSearch to give the user
+// feedback instead of a silent return.
+export function showInputHint(message) {
+    const existing = document.getElementById('searchInputHint');
+    if (existing) existing.remove();
+
+    const hint = document.createElement('div');
+    hint.id = 'searchInputHint';
+    hint.className = 'search-input-hint';
+    hint.setAttribute('role', 'alert');
+    hint.style.cssText = 'margin-top: 8px; color: #c0392b; font-size: 14px; transition: opacity 0.3s;';
+    hint.innerHTML = `<span class="warning-text">${escapeHTML(message)}</span>`;
+
+    // Anchor after the search box so it sits directly under the input.
+    const searchBox = document.querySelector('.search-box');
+    if (searchBox && searchBox.parentNode) {
+        searchBox.parentNode.insertBefore(hint, searchBox.nextSibling);
+    } else {
+        // Fallback: attach near the input itself so the message never gets swallowed.
+        const input = document.getElementById('searchInput');
+        if (input && input.parentNode) input.parentNode.appendChild(hint);
+    }
+
+    setTimeout(() => {
+        hint.style.opacity = '0';
+        setTimeout(() => hint.remove(), 300);
+    }, 4000);
+}
+
 // Empty-result honest notice (CDE plan §E): neutral info tone, not a warning —
 // an empty corpus hit is a fact, not an error. Mutually exclusive server-side
 // with the A/B warnings (never fire on empty sets) and author_search_no_results.
@@ -1358,7 +1390,14 @@ export async function handlePostStreamingRequest(url, body, query, abortSignal =
 export async function performSearch() {
     const searchInput = document.getElementById('searchInput');
     const query = searchInput?.value?.trim() || '';
-    if (!query) return;
+    if (!query) {
+        // No-silent-fail: empty / whitespace-only query gets an inline hint instead
+        // of a silent return. We still don't send a request; the backend "缺少查詢內容"
+        // guard is unreachable here by design (request never leaves the client).
+        showInputHint('請輸入搜尋內容');
+        searchInput?.focus();
+        return;
+    }
 
     // Bug #23: Cancel all active requests (search, DR, FC) before starting new search
     cancelAllActiveRequests();
@@ -1533,6 +1572,7 @@ export async function performSearch() {
         }
 
         window.renderConversationHistory?.();
+        markSessionDirty();  // 2026-07-13 regression fix: results arrival is new content — without this the dirty-gate (session-coordinator.js:70) silently swallows the save and sessionHistory never persists
         window.saveCurrentSession?.();
 
         setProcessingState(false);
@@ -1565,6 +1605,7 @@ export async function performSearch() {
             data: { content: [], nlws: { answer: userMessage } },
             timestamp: Date.now()
         });
+        markSessionDirty();  // 2026-07-13 regression fix: failed-search entry is new content — see completion-point note above
         window.saveCurrentSession?.();
     }
 }

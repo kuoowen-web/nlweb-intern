@@ -24,7 +24,7 @@ async def error_middleware(request: web.Request, handler):
         logger.warning(f"JSON decode error: {e}")
         return web.json_response(
             {
-                'error': 'Invalid JSON in request body',
+                'error': '請求格式錯誤，請重新操作或重新整理頁面。',
                 'type': 'json_error',
                 'details': str(e)
             },
@@ -35,7 +35,7 @@ async def error_middleware(request: web.Request, handler):
         logger.warning(f"Value error: {e}")
         return web.json_response(
             {
-                'error': 'Invalid request parameter',
+                'error': '請求參數無效，請重新操作。',
                 'type': 'value_error',
                 'details': str(e)
             },
@@ -52,7 +52,7 @@ async def error_middleware(request: web.Request, handler):
         
         # Prepare error response
         error_response: Dict[str, Any] = {
-            'error': 'Internal server error',
+            'error': '伺服器發生錯誤，請稍後再試。',
             'type': 'internal_error'
         }
         

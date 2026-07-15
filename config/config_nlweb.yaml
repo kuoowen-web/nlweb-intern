@@ -42,6 +42,16 @@ who_endpoint_enabled: true
 # Endpoint for /who requests to get relevant sites
 who_endpoint: "https://whotoask.azurewebsites.net/who"
 
+# Enable or disable find_prompt fallback to Site id="default" when the matched
+# Site element (e.g. id="all") does not contain the requested prompt.
+# false (default) = current behavior: matched-site miss returns no prompt (the
+#   QueryUnderstanding LLM call is a no-op for site=all; regex-only analysis).
+# true = matched-site miss falls back to Site id="default" (revives QU LLM,
+#   query expansion, LLM author/time detection on the main path).
+# STARTUP-ONLY flag (frozen via lru_cache at first read): changing this value
+# requires a server restart. See docs/in progress/plans/find-prompt-fallback-qu-revival-plan.md
+prompt_default_fallback_enabled: true
+
 # Headers for HTTP requests
 headers:
   # User-Agent header

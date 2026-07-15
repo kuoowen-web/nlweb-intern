@@ -82,9 +82,9 @@ class TestBABLoopEngine:
         handler.message_sender.send_message = AsyncMock()
         handler.connection_alive_event = MagicMock()
         handler.connection_alive_event.is_set = MagicMock(return_value=True)
-        # request_handler: connection alive
-        handler.request_handler = MagicMock()
-        handler.request_handler.connection_alive = True
+        # http_handler: connection alive
+        handler.http_handler = MagicMock()
+        handler.http_handler.connection_alive = True
         # No soft interrupt — use None so _check_connection doesn't trigger it
         handler._soft_interrupt_event = None
         return handler
@@ -1864,8 +1864,8 @@ def _make_handler_for_run_loop():
     handler.message_sender.send_message = AsyncMock()
     handler.connection_alive_event = MagicMock()
     handler.connection_alive_event.is_set = MagicMock(return_value=True)
-    handler.request_handler = MagicMock()
-    handler.request_handler.connection_alive = True
+    handler.http_handler = MagicMock()
+    handler.http_handler.connection_alive = True
     handler._soft_interrupt_event = None  # disable soft interrupt
     handler.query_params = {}
     handler.site = 'all'
@@ -2018,8 +2018,8 @@ class TestConsistencyDegradedNarration:
         handler.message_sender.send_message = AsyncMock()
         handler.connection_alive_event = MagicMock()
         handler.connection_alive_event.is_set = MagicMock(return_value=True)
-        handler.request_handler = MagicMock()
-        handler.request_handler.connection_alive = True
+        handler.http_handler = MagicMock()
+        handler.http_handler.connection_alive = True
         handler._soft_interrupt_event = None
         return handler
 

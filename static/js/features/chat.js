@@ -70,7 +70,7 @@ import {
     setProcessingState, cancelAllActiveRequests, getSearchGenerationId, isCurrentGeneration,
     getConversationHistory, getAccumulatedArticles, getCurrentConversationId,
     getCurrentFreeConvAbortController, setCurrentFreeConvAbortController
-} from './search.js?v=20260705c';
+} from './search.js?v=20260714a';
 import { getResearchReport } from './research.js';
 import {
     getPinnedMessages, setPinnedMessages,

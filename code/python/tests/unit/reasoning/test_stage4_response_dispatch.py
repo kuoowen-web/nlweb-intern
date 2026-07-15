@@ -321,6 +321,13 @@ async def test_dispatch_add_special_element_no_loop():
     state = LiveResearchStageState(current_stage=4, stage_status="checkpoint")
     state.pending_format_confirmation = True
     state.set_checkpoint("格式詢問 prompt（Stage 4）")
+    # R2（2026-07）：dispatch 現在會用 _resolve_chapter_source 取暫定章名清單判 target
+    # 第一層 code 短路。給有效 context_map_json（否則 dispatch try 讀 context_map 會 except
+    # → 章名空）+ format_specs.chapters override（含「結果與討論」）→ target exact 命中
+    # → 直接寫入 special_elements（不落 clarify pending）。
+    from reasoning.schemas_live import ContextMap
+    state.context_map_json = ContextMap(research_question="q").model_dump_json()
+    state.format_specs = {"chapters": [{"name": "結果與討論", "outline": ""}]}
 
     orch._classify_stage_4_response = AsyncMock(
         return_value=Stage4Response(
@@ -347,8 +354,10 @@ async def test_dispatch_add_special_element_no_loop():
     assert orch._emit_checkpoint.call_count == 1
     _, kwargs = orch._emit_checkpoint.call_args
     assert kwargs.get("stage") == 4
-    # special_elements 寫入
+    # R2 新契約：exact 命中章名 → 走 serializer 直接寫入（三欄，無 transient）；不落 pending。
     assert result.format_specs["special_elements"][0]["type"] == "table"
+    assert result.format_specs["special_elements"][0]["target_chapter"] == "結果與討論"
+    assert not result.pending_special_element_json  # exact 命中不進 pending
 
 
 @pytest.mark.asyncio

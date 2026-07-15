@@ -239,7 +239,6 @@ class PromptGuardrails(PromptRunner):
                 "message": "無法處理此查詢，請嘗試其他查詢方式。",
             }
             self.handler.query_done = True
-            self.handler.state.abort_fast_track_if_needed()
             await self.handler.send_message(message)
             logger.warning(
                 f"[InjectionDetection] Query BLOCKED (GUARDRAIL_INJECTION_BLOCK=true) — "

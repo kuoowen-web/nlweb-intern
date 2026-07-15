@@ -104,16 +104,18 @@ Guardrails 的目標：
 |------|------|------|---------|------|
 | Rate Limiting（Auth） | `webserver/middleware/rate_limit.py` | 已上線 | T3 部分 | 僅覆蓋 auth 端點（register/login/forgot-password），不覆蓋 `/ask` |
 | Login Brute-force | `auth/auth_service.py` | 已上線 | - | `login_attempts` table，5 次失敗鎖定 15 分鐘 |
-| Relevance Detection | `core/query_analysis/relevance_detection.py` | 已實作但關閉 | T1 部分 | `RELEVANCE_DETECTION_ENABLED = False`，LLM 判斷查詢相關性 |
+| Relevance Detection | `core/query_analysis/relevance_detection.py` | 已上線（log-only） | T1 部分 | `RELEVANCE_DETECTION_MODE = os.environ.get('GUARDRAIL_RELEVANCE_MODE', 'log_only')`，LLM 判斷查詢相關性；log-only 模式僅記錄不攔截（P2-2 CEO 決定不 enforce，`enforce` 模式才 block） |
 | Hallucination Guard | `reasoning/orchestrator.py` | 已上線 | T5 部分 | Writer 引用來源驗證，移除無效引用 |
 | Critic Agent | `reasoning/agents/critic.py` | 已上線 | T5 部分 | 品質/準確/偏見審查，可 REJECT 要求重做 |
 | Error Handling | `core/error_handling.py` | 已上線 | T3 部分 | LLM timeout/rate limit 偵測，優雅降級 |
 | CORS | `webserver/middleware/cors.py` | 已上線 | 基礎設施 | 跨域請求控制 |
-| Source Tiering | `indexing/source_manager.py` | 已上線 | T4 部分 | 來源分級（Tier 1-4），白名單制 |
+| Source Tiering | `indexing/source_manager.py` | 已上線 | T4 部分 | 來源分級（Tier 1-4：AUTHORITATIVE/VERIFIED/STANDARD/AGGREGATOR），白名單制。（此為 **indexing 層** 分塊/來源信譽用途，仍存在；**非** 2026-06 廢除的 **reasoning 層** 權威分級 Tier 1-5——後者 config 已清、`SourceTierFilter` 降為 no-op，見 `reasoning-spec.md` §1/§9） |
 | Quality Gate | `indexing/quality_gate.py` | 已上線 | T4 部分 | 長度、HTML 殘留、中文比例驗證 |
 | Parameterized Query | `postgres_client.py`, `auth_db.py` | 已上線 | T5.5 | 所有 DB 操作使用 `%s` placeholder，防 SQL injection |
 
 ### 缺口
+
+> ⏱ 時點註（2026-07-10）：下表為 2026-03-19 初版威脅模型的缺口快照。多數已由 Phase 1/2 實作補上（P1-1~P1-6 + P2-1~P2-3，見 Changelog 2026-03-20 / 2026-03-23）；仍 open 的項目（WebSocket 覆蓋、Cloudflare WAF 客製化等）見「已知限制」§8/§9。
 
 | 缺口 | 對應威脅 | 嚴重度 |
 |------|---------|--------|
@@ -635,6 +637,10 @@ LLM 判定結果：
 ---
 
 ## Changelog
+
+### 2026-07-10 - Spec reconcile
+- 「現有防禦盤點」表 Relevance Detection 行：更正自相矛盾——由「已實作但關閉 `RELEVANCE_DETECTION_ENABLED = False`」改為「已上線（log-only）」，對齊 code 現況（`RELEVANCE_DETECTION_MODE` 預設 `log_only`）與 Changelog P2-2 描述。
+- Source Tiering 行：加消歧義註，明示此為 indexing 層 `source_manager.py` 的 SourceTier（Tier 1-4，仍存在），非 2026-06 廢除的 reasoning 層權威分級。
 
 ### 2026-03-23 - Phase 2 Implementation + CEO E2E
 - P2-1 Prompt Injection Detection：dual-layer（regex + TypeAgent LLM），預設 log-only，GUARDRAIL_INJECTION_BLOCK=true 時攔截 malicious

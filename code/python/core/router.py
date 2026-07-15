@@ -518,12 +518,6 @@ class ToolSelector:
                 else:
                     logger.info("No search tool available as fallback")
             
-            # Check if top tool is not search and abort fastTrack if needed
-            if tool_results and tool_results[0]['tool'].name != 'search':
-                logger.info(f"FastTrack aborted: Top tool is '{tool_results[0]['tool'].name}', not 'search'")
-                # Abort fast track using the proper event mechanism
-                self.handler.abort_fast_track_event.set()
-            
             tool_results = tool_results[:3]
             
             # Log tool selection results

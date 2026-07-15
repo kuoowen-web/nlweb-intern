@@ -565,9 +565,12 @@ def test_model_inference():
 21. `title_exact_match` - Boolean (0/1)
 
 **⚠️ Implementation Note - temporal_boost**:
+
+> 🪦 檔案重定向註（2026-07-10）：下方所述 `qdrant.py` 已隨 Qdrant 廢除刪除（2026-06-22）。Phase B 若執行，落點為現行 retrieval 層 `retrieval_providers/postgres_client.py`（temporal_boost 分離追蹤仍待實作）。
+
 - **Phase A Status**: Current Qdrant implementation multiplies `recency_multiplier` directly into `final_score` (qdrant.py:971), no separate `temporal_boost` variable tracked
 - **Phase A Workaround**: Set `temporal_boost = 0.0` as placeholder in `xgboost_ranker.py` feature extraction
-- **Phase B Implementation**: Modify `qdrant.py` to track `temporal_boost = recency_multiplier - 1.0` separately in `point_scores` dict
+- **Phase B Implementation**: Modify ~~`qdrant.py`~~（已刪，改 `postgres_client.py`）to track `temporal_boost = recency_multiplier - 1.0` separately in `point_scores` dict
 - **Rationale**:
   - Recalculating from `published_date` risks formula mismatch (training ≠ inference)
   - Phase A dummy model doesn't need accurate temporal_boost
@@ -975,7 +978,7 @@ code/python/
 ## References
 
 - **Analytics Schema**: `.claude/CLAUDE.md` (Analytics Database Schema section)
-- **BM25 Implementation**: `docs/specs/bm25-spec.md`
+- **BM25 Implementation**: `docs/archive/specs/bm25-spec.md`（🪦 已歸檔；Python BM25 已退役，現行全文匹配為 pg_bigm）
 - **MMR Implementation**: `docs/specs/mmr-spec.md`
 - **Future ML Plans**: `docs/archive/algo-reviews/Week4_ML_Enhancements.md`
 - **XGBoost Documentation**: https://xgboost.readthedocs.io/

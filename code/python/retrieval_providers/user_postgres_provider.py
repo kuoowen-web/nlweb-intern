@@ -54,6 +54,33 @@ def _parse_connection_string(conn_str: str) -> Dict[str, Any]:
     }
 
 
+def _build_user_docs_where(user_id, org_id, source_ids):
+    """Build the WHERE clause + params for user_document_chunks search.
+
+    Enforced org isolation (拍板 2):
+      - org_id truthy  → "org_id = %s"（隔離到該 org）
+      - org_id falsy   → "org_id IS NULL"（隔離到無 org 文件，不跳過過濾）
+
+    Returns (where_sql, params). Note: "org_id IS NULL" is literal SQL and is
+    NOT added to params (SQL 中 org_id = NULL 永遠為 false，必須用 IS NULL).
+    """
+    clauses = ["user_id = %s"]
+    params = [user_id]
+
+    if org_id:
+        clauses.append("org_id = %s")
+        params.append(org_id)
+    else:
+        clauses.append("org_id IS NULL")
+
+    if source_ids:
+        placeholders = ", ".join(["%s"] * len(source_ids))
+        clauses.append(f"source_id IN ({placeholders})")
+        params.extend(source_ids)
+
+    return " AND ".join(clauses), params
+
+
 class UserPostgresProvider:
     """Provider for querying user's private documents stored in PostgreSQL."""
 
@@ -164,20 +191,8 @@ class UserPostgresProvider:
         embedding = [float(v) for v in embedding]
         embedding_time = time.time() - embedding_start
 
-        # 2. Build WHERE clauses
-        clauses = ["user_id = %s"]
-        params: List[Any] = [user_id]
-
-        if org_id:
-            clauses.append("org_id = %s")
-            params.append(org_id)
-
-        if source_ids:
-            placeholders = ", ".join(["%s"] * len(source_ids))
-            clauses.append(f"source_id IN ({placeholders})")
-            params.extend(source_ids)
-
-        where_sql = " AND ".join(clauses)
+        # 2. Build WHERE clauses (enforced org isolation — 拍板 2)
+        where_sql, params = _build_user_docs_where(user_id, org_id, source_ids)
 
         # 3. Query: order by cosine distance (ascending = most similar first)
         sql = f"""

@@ -42,12 +42,7 @@ logging:
       env_var: "RANKING_LOG_LEVEL"
       default_level: ERROR
       log_file: "ranking.log"
-    
-    fast_track:
-      env_var: "FASTTRACK_LOG_LEVEL"
-      default_level: ERROR
-      log_file: "fasttrack.log"
-    
+
     # Prompt System Modules
     prompt_runner:
       env_var: "PROMPT_RUNNER_LOG_LEVEL"
@@ -145,7 +140,6 @@ environment_variables:
   AZURE_OPENAI_LOG_LEVEL: "Controls logging for Azure OpenAI operations"
   NLWEB_HANDLER_LOG_LEVEL: "Controls logging for the main NLWeb handler"
   RANKING_LOG_LEVEL: "Controls logging for the ranking engine"
-  FASTTRACK_LOG_LEVEL: "Controls logging for fast track processing"
   PROMPT_RUNNER_LOG_LEVEL: "Controls logging for prompt execution"
   PROMPTS_LOG_LEVEL: "Controls logging for prompt management and parsing"
 

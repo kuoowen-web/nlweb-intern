@@ -6,7 +6,7 @@
 
 **問題**：Dockerfile 使用 Python 3.13，導致 production 失敗。
 
-**根本原因**：
+**根本原因**（🪦 案例主角 qdrant-client 已隨 Qdrant 廢除移出依賴（2026-06-22），「太新的 Python 導致套件裝到不完整版本」教訓通則仍有效）：
 - Dockerfile 使用 Python 3.13
 - Python 3.13 太新 → qdrant-client 安裝不完整版本
 - `AsyncQdrantClient` 類別存在但**缺少 `search()` 方法**
@@ -21,9 +21,9 @@
    COPY --from=builder /usr/local/lib/python3.11/site-packages ...
    ```
 
-2. **釘選關鍵依賴**
+2. **釘選關鍵依賴**（🪦 範例 qdrant-client 已退役；原則適用現行關鍵依賴如 psycopg / sentence-transformers）
    ```
-   qdrant-client==1.11.3
+   qdrant-client==1.11.3   # 歷史範例（依賴已於 2026-06 移除）
    ```
 
 3. **加入執行時診斷**
@@ -130,7 +130,7 @@ docker exec nlweb-app python -c "import urllib.request; ..."
 ## 部署檢查清單
 
 - [ ] 驗證 Dockerfile 使用 Python 3.11（非 3.13）
-- [ ] 釘選關鍵依賴（qdrant-client 等）
+- [ ] 釘選關鍵依賴（現行如 psycopg / sentence-transformers；～2026-06 前為 qdrant-client，已隨 Qdrant 廢除移除）
 - [ ] 加入關鍵 library 執行時診斷
 - [ ] 部署前清除 Docker build cache（或使用 CACHE_BUST）
 - [ ] nginx 每個 location block 設 `proxy_http_version 1.1`

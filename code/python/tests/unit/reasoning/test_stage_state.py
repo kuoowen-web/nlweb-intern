@@ -543,3 +543,17 @@ class TestOfflineCapFields:
             offline_checkpoint_advances=2,
         )
         json.dumps(s.to_dict())  # must not raise
+
+
+class TestGeneratedReportTitleField:
+    def test_generated_report_title_roundtrip(self):
+        s = LiveResearchStageState(generated_report_title="有質感的標題")
+        d = s.to_dict()
+        assert d["generated_report_title"] == "有質感的標題"
+        s2 = LiveResearchStageState.from_dict(d)
+        assert s2.generated_report_title == "有質感的標題"
+
+    def test_generated_report_title_legacy_session_defaults_empty(self):
+        """舊 session（dict 無此欄位）→ from_dict fallback 空字串（backward compat）。"""
+        s = LiveResearchStageState.from_dict({"current_stage": 6})
+        assert s.generated_report_title == ""

@@ -312,7 +312,8 @@ class GenerateAnswer(NLWebHandler):
                         query=self.query,
                         user_id=self.user_id,
                         top_k=10,
-                        query_params=self.query_params
+                        query_params=self.query_params,
+                        org_id=self.org_id
                     )
 
                     if private_results:

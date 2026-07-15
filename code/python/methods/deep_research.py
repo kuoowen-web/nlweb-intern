@@ -16,6 +16,8 @@ Future implementation will include:
 
 import asyncio
 import json
+import time
+import uuid
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 from core.baseHandler import NLWebHandler
@@ -62,6 +64,13 @@ class DeepResearchHandler(NLWebHandler):
         # Task 6: Non-blocking research support
         self._research_task: Optional[asyncio.Task] = None
         self._soft_interrupt_event = asyncio.Event()
+
+        # 層3（B1/B5）server-side persist：session UUID + 新建旗標 + 前端當前 session id
+        #   在 __init__ 初始化，避免 clarification 早退路徑 AttributeError。
+        self.dr_session_id = None
+        self._dr_session_is_new = False
+        from core.utils.utils import get_param
+        self.loaded_session_id = get_param(query_params, "loaded_session_id", str, "")
 
         logger.info("DeepResearchHandler initialized")
         logger.info(f"  Query: {self.query}")
@@ -171,6 +180,23 @@ class DeepResearchHandler(NLWebHandler):
         temporal_context = self._get_temporal_context()
         logger.info(f"[DEEP RESEARCH] Temporal context: {temporal_context}")
 
+        # 層3（B5）：決定這次寫哪個 session UUID（優先採用前端當前 session）。
+        # 放在 run_research 之前——clarification pending 早退路徑不會進到 execute_deep_research
+        # （prepare() 設 query_done → runQuery 早 return），故不會誤建 row。
+        self.dr_session_id = await self._create_dr_session()
+        # 層3（B1）：只有「新建 row」時才 run 前 emit UUID handshake——
+        # 採用現有 session 時 UUID=前端已知的當前 session，不需推。
+        # （照抄 LR live_research.py:134-151 範本；用 self.http_handler，非 wrapper。）
+        if getattr(self, "_dr_session_is_new", False) and self.http_handler is not None:
+            try:
+                await self.http_handler.write_stream({
+                    "message_type": "deep_research_session_created",
+                    "session_id": self.dr_session_id,
+                })
+                logger.info(f"[DEEP RESEARCH] Sent session_created event (new row): {self.dr_session_id}")
+            except Exception as e:
+                logger.warning(f"[DEEP RESEARCH] Could not send session_created event: {e}")
+
         # Feature flag check
         if not CONFIG.reasoning_params.get("enabled", False):
             logger.info("[DEEP RESEARCH] Reasoning module disabled, using mock implementation")
@@ -215,7 +241,19 @@ class DeepResearchHandler(NLWebHandler):
                     results = await self._research_task
                 except asyncio.CancelledError:
                     logger.info("[DEEP RESEARCH] Research task cancelled")
-                    results = []
+                    # W1: 中斷 ≠ 完成。原本落到下方 results=[] 會 fabricate 一份空的
+                    # 「成功」報告送給前端（silent fail）。改為明確標記 interrupted +
+                    # 主動 SSE 告知，並提前 return，不往下送假報告。
+                    self.return_value.update({
+                        'status': 'interrupted',
+                        'answer': '',
+                        'confidence_level': 'Low',
+                        'methodology_note': 'Deep Research 已中斷（未完成，無報告）',
+                        'sources_used': [],
+                        'items': [],
+                    })
+                    await self._send_research_interrupted()
+                    return
                 finally:
                     self._research_task = None
             else:
@@ -255,6 +293,14 @@ class DeepResearchHandler(NLWebHandler):
         })
 
         logger.info(f"[DEEP RESEARCH] Updated return_value with final report")
+
+        # [R8 BLOCKER2] report_obj 組裝（含 snake→camel 轉換）抽成 helper `_build_research_report_obj`——
+        #   轉換本身（results[0].schema_object 的 snake_case → report_obj 的 camelCase）是實質步驟、必須有 test 覆蓋。
+        report_obj = self._build_research_report_obj(final_report, source_urls, results)
+        # 層3：把報告一次性 persist（B2 空覆蓋防護 + B3 讀回驗證都在 _persist 內；傳入 results 供 gate 判）
+        await self._persist_research_report(self.dr_session_id, report_obj, results)
+        # B1 冗餘：讓 api.py final envelope 也帶回 server UUID（非唯一送達點，run 前 event 才是主送達）
+        self.return_value["dr_session_id"] = self.dr_session_id
 
     def _on_research_complete(self, task: asyncio.Task):
         """
@@ -296,6 +342,24 @@ class DeepResearchHandler(NLWebHandler):
             # SSE send itself failed -- connection probably dead, just log
             logger.warning(
                 f"[DEEP RESEARCH] Failed to send error to frontend: {send_err}"
+            )
+
+    async def _send_research_interrupted(self):
+        """Push a research-interrupted notice to the user via SSE (best-effort).
+
+        W1: 中斷 ≠ 完成。不可送出空的 final_result 假裝成功（silent fail）。此處主動
+        通知前端研究被中斷、未完成，前端據此顯示中斷狀態而非空報告。
+        """
+        try:
+            if hasattr(self, 'message_sender') and self.message_sender:
+                await self.message_sender.send_message({
+                    "message_type": "research_interrupted",
+                    "message": "Deep Research 已中斷，未產生完整報告。",
+                })
+                logger.info("[DEEP RESEARCH] Interrupted notice sent to frontend via SSE")
+        except Exception as send_err:
+            logger.warning(
+                f"[DEEP RESEARCH] Failed to send interrupted notice: {send_err}"
             )
 
     def _get_temporal_context(self) -> Dict[str, Any]:
@@ -349,9 +413,9 @@ class DeepResearchHandler(NLWebHandler):
 
         return [{
             "@type": "Item",
-            "url": f"https://deep-research.internal/{self.research_mode}",
+            "url": f"internal://system/{self.research_mode}",
             "name": f"[MOCK] Deep Research Result - {self.research_mode.upper()} Mode",
-            "site": "Deep Research Module",
+            "site": "讀豹系統",
             "siteUrl": "internal",
             "score": 95,
             "description": (
@@ -412,6 +476,152 @@ class DeepResearchHandler(NLWebHandler):
             report_parts.append("\n")
 
         return "\n".join(report_parts)
+
+    async def _create_dr_session(self) -> str:
+        """決定「這次報告寫哪個 session UUID」，回 UUID。
+
+        B5：DR 語意=「在當前 session 裡研究」，故**優先採用前端當前 session**：
+          - 前端有傳 loaded_session_id 且經 get_session 驗證屬當前 user/org → 用它（不建新，
+            不分裂側欄）。self._dr_session_is_new = False（→ B1：不需 emit handshake）。
+          - loaded_session_id 缺失/無效/非本人 → create_session 建新，
+            self._dr_session_is_new = True（→ B1：run 前須 emit deep_research_session_created）。
+        未登入 / DB 故障 → fallback bare UUID，pipeline 不被 block（no-silent-fail：fallback 時留 log）。
+        """
+        fallback_id = str(uuid.uuid4())
+        self._dr_session_is_new = False  # 預設；真的 create 時才設 True
+        user_id = getattr(self, "user_id", "") or ""
+        org_id = getattr(self, "org_id", "") or ""
+        if not user_id or not org_id:
+            logger.info(f"[DEEP RESEARCH] No user/org ID, using bare UUID without DB session (key={fallback_id})")
+            return fallback_id
+
+        from core.session_service import SessionService
+        service = SessionService()
+
+        # B5：優先採用前端當前 session（loaded_session_id 驗過屬本人）
+        # loaded_session_id 由前端 DR 請求新增帶入（Task 8 Step 0），經 get_param 讀出。
+        loaded_sid = getattr(self, "loaded_session_id", "") or ""
+        if loaded_sid:
+            try:
+                # F23：get_session owner 不匹配回 None → 只有屬本 user/org 才採用
+                existing = await service.get_session(loaded_sid, user_id, org_id)
+                if existing is not None:
+                    logger.info(f"[DEEP RESEARCH] Adopting current session (no new row): {loaded_sid}")
+                    return loaded_sid
+                else:
+                    logger.info(f"[DEEP RESEARCH] loaded_session_id not owned/found, will create new: {loaded_sid}")
+            except Exception as e:
+                logger.warning(f"[DEEP RESEARCH] get_session validate failed, will create new: {e}")
+
+        # 沒給有效 loaded_session_id → 建新 row
+        try:
+            result = await service.create_session(
+                user_id=user_id,
+                org_id=org_id,
+                title=f"深度研究：{self.query[:50]}",
+            )
+            session_id = result["id"]
+            self._dr_session_is_new = True  # 新建 → B1 需 emit UUID handshake
+            logger.info(f"[DEEP RESEARCH] Created server session: {session_id}")
+            return session_id
+        except Exception as e:
+            logger.error(f"[DEEP RESEARCH] Failed to create DB session, using bare UUID: {e}")
+            return fallback_id
+
+    def _build_research_report_obj(self, final_report: str, source_urls: list, results: list) -> dict:
+        """[R8 BLOCKER2] 組 research_report persist dict——含 graph/chain/KG 的 snake→camel 轉換。
+
+        抽 helper 的理由：snake→camel 轉換是實質步驟（前端 reload 讀 camelCase、schema_object 是
+        snake_case），必須有 test 覆蓋轉換本身，不能只測「存已對的物件」（假綠）。
+
+        來源 = results[0].schema_object（**snake_case**：argument_graph / reasoning_chain_analysis /
+        knowledge_graph，orchestrator.py:2085/2089/2092 塞、kg-spec §2.1）。
+        目標 report_obj = **camelCase**（前端 reload top-level restore news-search.js:2720-2721 讀
+        session.researchReport.argumentGraph/.chainAnalysis、:2867 讀 serverReport.knowledgeGraph，
+        且 hydrate :2602 整包搬不轉 key → 必須存 camelCase 才讀得出）。
+        """
+        _schema_obj = results[0].get("schema_object", {}) if results else {}
+        _argument_graph = _schema_obj.get("argument_graph")            # list（node dict 陣列）或 None
+        _reasoning_chain = _schema_obj.get("reasoning_chain_analysis")  # dict 或 None
+        _knowledge_graph = _schema_obj.get("knowledge_graph")          # dict {entities, relationships, metadata} 或 None
+
+        report_obj = {
+            "report": final_report,
+            "sources": source_urls,
+            "query": self.query,
+            "timestamp": int(time.time() * 1000),
+            # [R4 C3] 唯一 write marker：persist 讀回驗證比對此值（非 timestamp），消除同毫秒撞縫。
+            # 只是內部驗證欄位，前端 render 不讀（讀 report/sources/query/timestamp），多此欄位無害。
+            "persist_marker": str(uuid.uuid4()),
+        }
+        # [R6 BLOCKER2] graph/chain 轉 camelCase（snake schema_object → camel report_obj）。無值則不塞
+        # （保持與前端「? [...] : null」相容——restore 分支 undefined 走 null 分支）。
+        if _argument_graph:
+            report_obj["argumentGraph"] = _argument_graph      # camel，對齊 :2720 session.researchReport.argumentGraph
+        if _reasoning_chain:
+            report_obj["chainAnalysis"] = _reasoning_chain      # camel，對齊 :2721 session.researchReport.chainAnalysis
+        # [R7 BLOCKER1] KG 轉 camelCase `knowledgeGraph`——存進**既有 research_report JSONB**（零 DB migration，
+        #   [verified] search_sessions 無獨立 knowledge_graph 欄位）。三處 key 一致（存==hydrate 搬==reload 讀，
+        #   皆 camel `knowledgeGraph`）。shape = dict {entities,relationships,metadata}（displayKnowledgeGraph 直接吃）。
+        if _knowledge_graph:
+            report_obj["knowledgeGraph"] = _knowledge_graph    # camel，對齊 (c) serverReport.knowledgeGraph / (b) hydrate 搬
+        return report_obj
+
+    async def _persist_research_report(self, session_id: str, report_obj: dict, results: list) -> bool:
+        """把報告寫進 search_sessions.research_report。回 True=已驗證寫入，False=skip/寫失敗。
+
+        B2/F24 空覆蓋防護：**看研究是否實質成功（results 非空），不看 markdown 字串空不空**。
+          斷線早退 run_research→[] 時 _generate_final_report([]) 回「非空空洞骨架」——len(results)==0 才是斷線的權威訊號。
+        B3/F22/F23 silent-fail 防護 + [R4 C3] 唯一 write marker 比對：update_session 假成功（execute
+          後不讀 rowcount，owner 不匹配仍回 True）——故 update 後 get_session **讀回驗證**。**[R3 should-fix 2]**
+          不只比 truthiness——要比對讀回的 `research_report["persist_marker"] == report_obj["persist_marker"]`
+          才算真寫入這一份；不符 → loud error + 回 False（不可 silent 說 Persisted）。
+        """
+        # B2：實質成功 gate——results 空（斷線早退）則 skip
+        if not results:
+            logger.info(f"[DEEP RESEARCH] results empty (disconnect early-exit?), skip persist "
+                        f"(avoid empty-overwrite) session={session_id}")
+            return False
+        if not report_obj or not (report_obj.get("report") or "").strip():
+            # 冗餘保險：research 成功但 report 竟空（不預期）——仍 skip 不覆蓋
+            logger.warning(f"[DEEP RESEARCH] results non-empty but report string empty, skip persist "
+                           f"session={session_id}")
+            return False
+        user_id = getattr(self, "user_id", "") or ""
+        org_id = getattr(self, "org_id", "") or ""
+        if not user_id or not org_id:
+            logger.info(f"[DEEP RESEARCH] No user/org, skip persist session={session_id}")
+            return False
+        try:
+            from core.session_service import SessionService
+            service = SessionService()
+            # F2：update_session(session_id, user_id, org_id, updates) — 4 參數！
+            await service.update_session(session_id, user_id, org_id,
+                                         {"research_report": report_obj})
+            # B3：讀回驗證（update_session 回 True 是假成功，不可信）。F23：get_session 回 snake_case dict，
+            # research_report 已反序列化為 dict；owner 不匹配 → get_session 回 None。
+            verify = await service.get_session(session_id, user_id, org_id)
+            persisted = verify.get("research_report") if verify else None
+            if not persisted or (isinstance(persisted, dict) and not (persisted.get("report") or "").strip()):
+                logger.error(f"[DEEP RESEARCH] persist readback verify FAILED (row not updated / owner mismatch?) "
+                             f"session={session_id}")
+                return False
+            # [R3 should-fix 2 / R4 C3]：只比非空不夠——DB 若本就有舊非空 report、這次 UPDATE 命中 0 rows，
+            # 讀回會撈到「舊的非空 report」→ 誤判寫成功。故比對**唯一 write marker**（persist_marker，UUID），
+            # 確認撈回的正是這次寫的那份。
+            expected_marker = report_obj.get("persist_marker")
+            got_marker = persisted.get("persist_marker") if isinstance(persisted, dict) else None
+            if expected_marker is not None and got_marker != expected_marker:
+                logger.error(f"[DEEP RESEARCH] persist readback marker MISMATCH "
+                             f"(readback persist_marker={got_marker} != this-write {expected_marker}; "
+                             f"UPDATE likely hit 0 rows, stale report served) session={session_id}")
+                return False
+            logger.info(f"[DEEP RESEARCH] Persisted + readback-verified (marker matched) research_report "
+                        f"session={session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"[DEEP RESEARCH] Failed to persist research_report session={session_id}: {e}")
+            return False
 
     def _calculate_confidence(self, results: list) -> str:
         """

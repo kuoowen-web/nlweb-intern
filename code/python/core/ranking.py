@@ -61,7 +61,6 @@ class Ranking:
     EARLY_SEND_THRESHOLD = 59
     NUM_RESULTS_TO_SEND = 10
 
-    FAST_TRACK = 1
     REGULAR_TRACK = 2
     CONVERSATION_SEARCH = 3
 
@@ -88,11 +87,9 @@ class Ranking:
             logger.debug(f"Using custom ranking prompt for site: {site}, item_type: {item_type}")
             return prompt_str, ans_struc
         
-    def __init__(self, handler, items, ranking_type=FAST_TRACK, level="low"):
+    def __init__(self, handler, items, ranking_type=REGULAR_TRACK, level="low"):
         ll = len(items)
-        if ranking_type == self.FAST_TRACK:
-            self.ranking_type_str = "FAST_TRACK"
-        elif ranking_type == self.REGULAR_TRACK:
+        if ranking_type == self.REGULAR_TRACK:
             self.ranking_type_str = "REGULAR_TRACK"
         elif ranking_type == self.CONVERSATION_SEARCH:
             self.ranking_type_str = "CONVERSATION_SEARCH"
@@ -108,11 +105,6 @@ class Ranking:
         self._sent_title_keys = set()  # Track (name, site) to prevent sending duplicates
 
     async def rankItem(self, item):
-
-        if (self.ranking_type == Ranking.FAST_TRACK and self.handler.state.should_abort_fast_track()):
-            logger.info("Fast track aborted, skipping item ranking")
-            logger.info("Aborting fast track")
-            return None
         name = "unknown"
         try:
             # Handle Dict format (new) or Tuple format (legacy)
@@ -238,25 +230,6 @@ class Ranking:
             logger.warning("Connection lost during ranking, skipping sending results")
             return
         
-        # If this is FastTrack ranking, wait for prechecks to complete before sending
-        if self.ranking_type == Ranking.FAST_TRACK:
-            try:
-                prechecks_done = await asyncio.wait_for(
-                    self.handler.state.wait_for_prechecks(),
-                    timeout=5.0
-                )
-                if not prechecks_done:
-                    logger.info("Fast track aborted: prechecks not complete")
-                    return
-            except asyncio.TimeoutError:
-                logger.warning("Fast track: prechecks timed out, not sending answers")
-                return
-                
-            # Check abort conditions after prechecks
-            if self.handler.state.should_abort_fast_track():
-                logger.info("Fast track aborted, not sending answers")
-                return
-              
         json_results = []
         logger.debug(f"Considering sending {len(answers)} answers (force: {force})")
         
@@ -293,12 +266,7 @@ class Ranking:
         if (json_results):  # Only attempt to send if there are results
             # Wait for pre checks to be done using event
             await self.handler.pre_checks_done_event.wait()
-            
-            # if we got here, prechecks are done. check once again for fast track abort
-            if (self.ranking_type == Ranking.FAST_TRACK and self.handler.state.should_abort_fast_track()):
-                logger.info("Fast track aborted after pre-checks")
-                return
-            
+
             try:
                 # Final safety check before sending
                 if self.num_results_sent + len(json_results) > self.NUM_RESULTS_TO_SEND:
@@ -306,11 +274,7 @@ class Ranking:
                     allowed_count = self.NUM_RESULTS_TO_SEND - self.num_results_sent
                     json_results = json_results[:allowed_count]
                     logger.warning(f"Trimmed results to {len(json_results)} to stay within limit of {self.NUM_RESULTS_TO_SEND}")
-                
-                if (self.ranking_type == Ranking.FAST_TRACK):
-                    self.handler.fastTrackWorked = True
-                    logger.info("Fast track ranking successful")
-                
+
                 # Use the new schema to create and auto-send the message
                 if self.handler.generate_mode == 'unified':
                     # Unified mode: send as 'articles' with await for ordering guarantee
@@ -417,10 +381,6 @@ class Ranking:
 
         # Wait for pre checks using event
         await self.handler.pre_checks_done_event.wait()
-        
-        if (self.ranking_type == Ranking.FAST_TRACK and self.handler.state.should_abort_fast_track()):
-            logger.info("Fast track aborted after ranking tasks completed")
-            return
 
         filtered = [r for r in self.rankedAnswers if r['ranking']['score'] > 51]
         ranked = sorted(filtered, key=lambda x: x['ranking']["score"], reverse=True)

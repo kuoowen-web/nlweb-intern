@@ -3,17 +3,19 @@
 Port from DR `orchestrator.py:1095-1131` to LR `_write_section`:
 - subset check: sources_used ⊆ valid_evidence_ids
 - literal placeholder regex check（LR 特有）
-- 觸發後自動修正 sources / confidence='Low' / methodology_note 註記
+- 觸發後自動修正 sources / confidence_level 依嚴重度分級降級（severe→Low，
+  否則降一級 High→Medium/Medium→Low）/ methodology_note 註記
 """
 
 import pytest
 
-from reasoning.schemas_live import LiveWriterSectionOutput
+from reasoning.schemas_live import LiveWriterSectionOutput, CitationInline
 from reasoning.live_research.hallucination_guard import apply_hallucination_guard
 
 
 def test_section_with_invalid_source_id_corrected():
-    """sources_used 含白名單外 id → 自動修正 + confidence='Low'。"""
+    """sources_used 含白名單外 id → 自動修正；本例無 typed citation（corrected_citations 空）
+    → severe → confidence='Low'（G4 分級降級：severe case 才打到 Low）。"""
     section = LiveWriterSectionOutput(
         section_title="X",
         section_content="正常內容",
@@ -573,3 +575,99 @@ async def test_orch_extraction_failed_emit_helper_dedup():
     # 重入（模擬第二/三 callsite 也呼叫 helper）→ 不重播
     await orch._emit_grounding_extraction_failed_if_pending()
     assert captured.count(lr_copy.GROUNDING_EXTRACTION_FAILED_NARRATION) == 1
+
+
+# ============================================================================
+# G3 時序錯位修復：_CITATION_RE 須同時認得 render 前 {cite:N} 與 render 後 [N]
+# ============================================================================
+
+
+def test_split_and_filter_keeps_sentence_with_pre_render_cite_placeholder():
+    """G3 回歸測試：guard 管線在 orchestrator._render_section_citations 之前跑，
+    此時 section content 仍是 {cite:N} placeholder（尚未轉成 [N]）。
+    舊 _CITATION_RE 只認 [N]，認不出 {cite:N} → has_citation 恆 False →
+    「已引用、其實有根據」的句子被誤判成純未驗證句遭硬刪。
+    修法後：句子含 {cite:3} 應被 R3 的 citation 安全閥保住（不硬刪，計入 unsafe）。"""
+    from reasoning.live_research.hallucination_guard import (
+        split_and_filter_ungrounded_sentences,
+    )
+    content = "某水泥公司的爭議見諸報導{cite:3}。"
+    kept, removed, unsafe = split_and_filter_ungrounded_sentences(
+        content, ungrounded_entities=["某水泥公司"], grounded_entities=[],
+    )
+    assert kept == content
+    assert removed == 0
+    assert unsafe == 1
+
+
+# ============================================================================
+# G4 過度懲罰修復：依嚴重度分級信心降級，避免單一 phantom 就把整章打到 Low
+# ============================================================================
+
+
+def test_hallucination_guard_single_phantom_with_valid_citation_downgrades_to_medium():
+    """G4：sources_used 含 1 個白名單外 phantom，但 citations 仍有 1 個有效引用、
+    section_content 無字面 placeholder → 屬「多數 citation 仍有效」情況，
+    只降一級（High→Medium），不應打到 Low。"""
+    section = LiveWriterSectionOutput(
+        section_title="X",
+        section_content="正常內容，附有效引用。",
+        sources_used=[1, 99],  # 99 是 phantom，1 有效
+        citations=[CitationInline(evidence_id=1)],  # 有效 citation 保留
+        confidence_level="High",
+    )
+    whitelist = {1, 2, 3}
+
+    corrected, was_corrected = apply_hallucination_guard(section, whitelist)
+
+    assert was_corrected is True
+    assert corrected.confidence_level == "Medium"
+
+
+def test_hallucination_guard_majority_phantom_citations_forces_low():
+    """G4（AR R2）：多數 citation 失效（9 phantom vs 1 valid）→ 仍應打到 Low，
+    即使還剩 1 個有效 citation。舊邏輯 `severe = placeholder_hit or len(corrected)==0`
+    只看「有無任一有效 citation」，9假1真只會降一級（Medium）——但本章 90% 引用是假的，
+    語義上應偏 severe。新邏輯改用 phantom vs valid 數量比例：
+    len(phantom_citations) >= len(corrected_citations) → severe → Low。"""
+    section = LiveWriterSectionOutput(
+        section_title="X",
+        section_content="正常內容，附多筆引用。",
+        sources_used=[1, 2, 3, 4, 5, 6, 7, 8, 9, 99],  # 99 白名單外（sources_used 面）
+        citations=[
+            CitationInline(evidence_id=1),   # 唯一有效
+            CitationInline(evidence_id=101),
+            CitationInline(evidence_id=102),
+            CitationInline(evidence_id=103),
+            CitationInline(evidence_id=104),
+            CitationInline(evidence_id=105),
+            CitationInline(evidence_id=106),
+            CitationInline(evidence_id=107),
+            CitationInline(evidence_id=108),  # 8 個 phantom citation
+        ],
+        confidence_level="High",
+    )
+    whitelist = {1, 2, 3, 4, 5, 6, 7, 8, 9}
+
+    corrected, was_corrected = apply_hallucination_guard(section, whitelist)
+
+    assert was_corrected is True
+    assert corrected.confidence_level == "Low"
+
+
+def test_hallucination_guard_literal_placeholder_still_forces_low():
+    """G4 嚴重分支：字面 placeholder 命中（Writer 根本沒照格式寫）→ 仍直接打到 Low，
+    不受分級緩解影響。"""
+    section = LiveWriterSectionOutput(
+        section_title="X",
+        section_content="某段論述 (作者, 年份)。",
+        sources_used=[1],
+        citations=[CitationInline(evidence_id=1)],
+        confidence_level="High",
+    )
+    whitelist = {1}
+
+    corrected, was_corrected = apply_hallucination_guard(section, whitelist)
+
+    assert was_corrected is True
+    assert corrected.confidence_level == "Low"

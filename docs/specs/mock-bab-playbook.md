@@ -38,7 +38,7 @@
 > **🔴 fixture 曾漏 evidence_usage（2026-06-08 方法 A e2e 揪出）**：原清單只列 evidence_pool / context_map / book_outline 三項是**不完整的**——漏了「BAB 也產出 grounded claims（evidence_usage）」這層。chapter-override（5 章）路徑的 writer 硬依賴它，缺則 body 章空轉（詳見下方「兩條 writer 路徑」）。
 > **資料已撈補**（`evidence_usage.json` 35 id / 147 claims，全 PASS）；**但 code `mock_bab` 載入邏輯仍須加載 evidence_usage**（見下方「注入機制」，原本只載 3 檔）——這步是 code 改動，方法 A agent 復工時做。
 
-PG 撈法：`ssh -i C:\Users\User\.ssh\nlweb-deploy -p 2222 root@95.217.153.63` → `docker exec -i nlweb-postgres psql -U nlweb -d nlweb -tA`（中文輸出正常；中文 LIKE 輸入會被 cp950 壞，本 fixture 撈不需中文 WHERE）。
+PG 撈法：`ssh -i C:\Users\User\.ssh\YOUR_SSH_KEY -p 2222 root@YOUR_VPS_HOST` → `docker exec -i nlweb-postgres psql -U nlweb -d nlweb -tA`（中文輸出正常；中文 LIKE 輸入會被 cp950 壞，本 fixture 撈不需中文 WHERE）。
 
 ---
 
@@ -164,5 +164,3 @@ writer 依「章節來源」走兩條路，對 fixture 依賴不同：
 - CEO 標準 prompt 序列（12 段，整理在 mock session 對話）+ 上述 4 份 blueprint + evidence pool。
 
 - 本次完整產物：`docs/scratch/lr-mock-*`（report-final / ch1-5 / evidence-web / contextmap / stage1-analyst / run-tracking）+ `dr-capability-audit.md` + `lr-capability-reality.md`。
-  
-  </content>

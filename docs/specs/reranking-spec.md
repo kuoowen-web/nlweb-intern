@@ -51,7 +51,9 @@ Final Results (10 results)
 
 ### **Stage 1: Vector DB Retrieval**
 
-**檔案位置：** retrieval_providers/qdrant.py, core/retriever.py
+> 🪦 歷史紀錄（機制已於 2026-06-22 隨 Qdrant 廢除）：現行 retrieval 為 etrieval_providers/postgres_client.py\（pgvector + pg_bigm 雙路真 hybrid），見檔頭警示。
+
+**檔案位置：** ~~retrieval_providers/qdrant.py~~（已刪）, core/retriever.py
 
 **功能：**
 
@@ -82,7 +84,9 @@ Final Results (10 results)
 
 ### **Stage 2: Hybrid Scoring (BM25 + Intent)**
 
-**檔案位置：** retrieval_providers/qdrant.py:555-650 (hybrid_search method)
+> 🪦 歷史紀錄（機制已隨 Qdrant 路徑廢除，2026-06-22）：Python BM25 re-rank 與 \_detect_query_intent\ 動態 α/β 皆不在現行路徑；關鍵字匹配由 pg_bigm 在 retrieval 層原生處理，見檔頭警示。
+
+**檔案位置：** ~~retrieval_providers/qdrant.py:555-650 (hybrid_search method)~~（已刪）
 
 **關鍵創新：Intent Detection**
 

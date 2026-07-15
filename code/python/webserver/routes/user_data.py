@@ -57,7 +57,7 @@ async def _check_storage_quota(org_id: str, new_file_bytes: int) -> Dict[str, An
             return {
                 'allowed': False,
                 'warn': False,
-                'reason': f'Storage quota exceeded ({org["storage_quota_gb"]} GB limit)',
+                'reason': f'組織儲存空間已達上限（{org["storage_quota_gb"]} GB），無法繼續上傳。',
             }
 
         usage_pct = projected / quota_bytes * 100
@@ -157,7 +157,7 @@ async def upload_file_handler(request: web.Request) -> web.Response:
                 'filename': filename,
                 'size_bytes': file_size,
                 'status': 'uploaded',
-                'message': 'File uploaded. Connect to SSE endpoint to start processing.'
+                'message': '檔案上傳成功，正在準備處理。'
             })
 
         except Exception as e:
@@ -234,7 +234,7 @@ async def upload_progress_sse_handler(request: web.Request) -> web.StreamRespons
             if source['status'] == 'ready':
                 await send_progress(100, 'completed', '文件已處理完成')
             else:
-                await send_progress(0, 'failed', f"文件處理失敗: {source.get('error_message', 'Unknown error')}")
+                await send_progress(0, 'failed', f"文件處理失敗: {source.get('error_message', '未知錯誤')}")
             await response.write_eof()
             return response
 
@@ -278,7 +278,7 @@ async def upload_progress_sse_handler(request: web.Request) -> web.StreamRespons
             if result['success']:
                 await send_progress(100, 'completed', '處理完成！')
             else:
-                await send_progress(0, 'failed', f"處理失敗: {result.get('error', 'Unknown error')}")
+                await send_progress(0, 'failed', f"處理失敗: {result.get('error', '未知錯誤')}")
 
         finally:
             # Clean up active_tasks to prevent memory leak
@@ -386,11 +386,11 @@ async def delete_source_handler(request: web.Request) -> web.Response:
 
             return web.json_response({
                 'success': True,
-                'message': f'Source {source_id} deleted successfully'
+                'message': '資料來源已成功刪除。'
             })
         else:
             return web.json_response(
-                {'error': 'Failed to delete source (not found or unauthorized)'},
+                {'error': '找不到此資料來源，或您沒有刪除權限。'},
                 status=404
             )
 

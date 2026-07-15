@@ -517,6 +517,18 @@ class SpecialElementSpec(BaseModel):
     )
     description: str = Field(default="", description="user 自然語言描述")
 
+    # === transient（classifier 語意判斷輸出，用完即丟、不持久化）===
+    # LLM 對「非字面 exact/唯一」的 target 判語意對應到哪一章（OQ-6 靈魂）。
+    # dispatch 讀這兩欄位路由（clear→確認 / uncertain→問），持久化前經 serializer strip 掉（B3）。
+    resolved_chapter_title: Optional[str] = Field(
+        default=None,
+        description="LLM 判 target 語意對應的章名（空/None = 判不出）。transient，不持久化。",
+    )
+    resolution_confidence: Optional[Literal["clear", "uncertain"]] = Field(
+        default=None,
+        description="LLM 語意判斷信心：clear=明確對應 / uncertain=判不準。transient，不持久化。",
+    )
+
 
 class InitialChapterSpec(BaseModel):
     """初始 query 抽取**專用**章節 submodel（與 Stage 4 ChapterSpec 隔離）。
@@ -684,8 +696,8 @@ class Stage4FormatPayload(BaseModel):
 
     target_word_count（Blocker A root fix, 2026-05-19）：user 在 Stage 4 reply
     指定的中文總字數（typed int）。LLM 解析「五千字」→ 5000、「七千字左右」→ 7000、
-    「三千多字」→ 3000。null = user 沒提字數，writer 沿用 default (outline planner
-    每章 800-1500 字)。dispatcher 寫進 state.user_voice.target_word_count。
+    「三千多字」→ 3000。null = user 沒提字數 → outline planner 回每章 target=0
+    （writer 自決長度，不硬塞 default）。dispatcher 寫進 state.user_voice.target_word_count。
     """
     format_spec_extracted: str = Field(default="")
     citation_style_extracted: Optional[Literal[
@@ -785,6 +797,24 @@ class Stage4Response(BaseModel):
             if not self.clarifying_question.strip():
                 raise ValueError("action='unclear' 要求 clarifying_question 非空")
         return self
+
+
+class ClarificationRequest(BaseModel):
+    """通用「不確定就澄清」typed request（設計文件 §3）。
+
+    收斂 LR 三條同型 clarification spine（Stage 1 empty-ops / Stage 4 unclear /
+    R2 表格章節指涉）。對齊既有 Stage4Response action='unclear' 的「必填問句 +
+    validator 非空」藍本（schemas_live.py:784-786）。
+    """
+    question: str = Field(..., description="繁體中文澄清問句（可含選項枚舉）")
+    stage: int = Field(..., description="拋出點的 stage（決定 re-emit 哪個 checkpoint）")
+
+    @field_validator("question")
+    @classmethod
+    def _question_nonempty(cls, v: str) -> str:
+        if not (v or "").strip():
+            raise ValueError("ClarificationRequest.question 不可為空")
+        return v
 
 
 # ============================================================================
@@ -1432,6 +1462,24 @@ class GeneratedTitle(BaseModel):
     title: str = Field(
         ...,
         description="簡潔的繁體中文標題（≤30 字），概括 snippet 主題；禁用「相關報導」「新聞」等泛化詞。",
+    )
+
+
+class GeneratedReportTitle(BaseModel):
+    """LR 最終報告 H1 標題：Stage 6 組 H1 前，low-tier LLM 依 research_question
+    + 各章標題/摘要生成的有質感報告標題（取代直用 user 原始 query 當 H1）。
+
+    與 GeneratedTitle 的區別：GeneratedTitle 是「外部來源缺標題時補來源標題」
+    （web/wiki backfill）；本 schema 是「整份報告的 H1 標題」。兩者勿混用。
+    失敗 / 空回應由 caller（orchestrator._generate_report_title）降級為 research_question。
+    """
+
+    title: str = Field(
+        ...,
+        description=(
+            "整份研究報告的繁體中文標題（≤40 字），需具體、有資訊量、概括報告主旨；"
+            "禁用「研究報告」「分析」「探討」等泛化空詞當開頭套語，直接點出主題與核心張力。"
+        ),
     )
 
 

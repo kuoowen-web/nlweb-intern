@@ -133,7 +133,7 @@ class OrchestratorBase:
             self.logger.warning(f"Progress message send failed (non-critical): {e}")
 
         # Bridge: detect disconnect after send attempt
-        wrapper = getattr(self.handler, 'request_handler', None)
+        wrapper = getattr(self.handler, 'http_handler', None)
         if wrapper and not wrapper.connection_alive:
             raise ResearchCancelledError("Client disconnected (detected in _send_progress)")
 
@@ -160,7 +160,7 @@ class OrchestratorBase:
         interrupts during research phases. Uses getattr for backward compatibility
         with handlers that don't have _soft_interrupt_event.
         """
-        wrapper = getattr(self.handler, 'request_handler', None)
+        wrapper = getattr(self.handler, 'http_handler', None)
         event = getattr(self.handler, 'connection_alive_event', None)
 
         # Check wrapper's connection_alive flag

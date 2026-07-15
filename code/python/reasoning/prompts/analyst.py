@@ -28,7 +28,9 @@ class AnalystPromptBuilder:
         enable_web_search: bool = False,
         previous_draft: Optional[str] = None,  # SEC-6 Phase 1
         enable_live_research: bool = False,  # Task 4: Live Research B context injection
-        context_map_summary: Optional[str] = None  # Task 4: ContextMap summary for injection
+        context_map_summary: Optional[str] = None,  # Task 4: ContextMap summary for injection
+        retrieval_evidence: Optional[str] = None,  # 防線二：gap 分類證據注入
+        final_pass: bool = False  # 防線四：最後一輪強制 best-effort 寫稿
     ) -> str:
         """
         Build research prompt from PDF System Prompt (pages 7-10).
@@ -89,7 +91,7 @@ class AnalystPromptBuilder:
 
         # Add gap enrichment instructions if enabled (Stage 5)
         if enable_gap_enrichment:
-            prompt += self._build_gap_enrichment_instructions(enable_web_search)
+            prompt += self._build_gap_enrichment_instructions(enable_web_search, retrieval_evidence)
 
         # SEC-6 Phase 1: Inject previous draft for context continuity
         if previous_draft:
@@ -111,6 +113,12 @@ class AnalystPromptBuilder:
         if enable_live_research and context_map_summary:
             prompt += self._build_context_map_injection(context_map_summary)
 
+        # 防線四：最後一輪強制 best-effort 寫稿指示（無條件路徑，不受 enable_gap_enrichment gate）。
+        # 放在組裝最尾端 → 成為 Analyst 決定 status 前讀到的最終指令；且在 previous_draft 段之後，
+        # 不被 previous_draft 敘事沖淡指令權重。final_pass=False 時完全不注入 → byte-identical。
+        if final_pass:
+            prompt += self._build_final_pass_directive()
+
         return prompt
 
     def build_revision_prompt(
@@ -118,7 +126,8 @@ class AnalystPromptBuilder:
         original_draft: str,
         review: 'CriticReviewOutput',  # noqa: F821
         formatted_context: str,
-        original_query: str = None
+        original_query: str = None,
+        final_pass: bool = False  # 防線四：最後一輪 revise 也強制 best-effort 寫稿（孿生死路）
     ) -> str:
         """
         Build revision prompt from PDF Analyst Revise Prompt (pages 14-15).
@@ -243,6 +252,13 @@ class AnalystPromptBuilder:
 - 使用 "new_queries" 欄位（字串陣列，可以為空）
 - 使用 "missing_information" 欄位（字串陣列，可以為空）
 """
+
+        # 防線四（修訂 3）：revise 路徑孿生死路——最後一輪 revise 也注入同一 final-pass 指示。
+        # build_revision_prompt :230「若修改後仍需補充搜尋，可將 status 設為 SEARCH_REQUIRED」是對稱死指令，
+        # final-pass 指示（helper 內「嚴禁 SEARCH_REQUIRED」）顯式覆蓋之。
+        if final_pass:
+            prompt += self._build_final_pass_directive()
+
         return prompt
 
     def _build_context_map_injection(self, context_map_summary: str) -> str:
@@ -785,15 +801,48 @@ Web Search 狀態：**已啟用**
 **⚠️ 再次強調**：當此指令出現時，`knowledge_graph` 是**強制必填**，不是可選的。至少提取查詢中的核心實體。
 """
 
-    def _build_gap_enrichment_instructions(self, enable_web_search: bool) -> str:
+    def _build_final_pass_directive(self) -> str:
+        """防線四：最後一輪強制 best-effort 寫稿指示。
+        由 build_research_prompt / build_revision_prompt 在 final_pass=True 時 append（無條件路徑，
+        不受 enable_gap_enrichment gate）。research 與 revise 兩路徑復用同一措辭（零第二套）。"""
+        return """
+
+---
+
+## ⚠️ 最後一輪強制產出（FINAL PASS — 迭代預算已用盡）
+
+**這是本次研究的最後一輪，之後不會再有任何搜尋機會**（站內補搜與網路搜尋都已用盡）。
+
+**本輪特別規則（覆蓋前述「情況 A：資料不足 → SEARCH_REQUIRED」）**：
+- 前面「情況 A（資料不足 → status=SEARCH_REQUIRED、draft 設為空字串）」**於最後一輪不適用**。即使你判斷資料不足，最後一輪也**必須** status=DRAFT_READY、用現有資料撰寫、把缺口誠實標註在文中。
+- **即使本輪 web_search 未啟用**，也**不得**以「需要網路搜尋」「系統未啟用一般網路搜尋」為由拒絕撰寫或回 SEARCH_REQUIRED——最後一輪之後沒有下一輪，拒絕撰寫等於讓使用者拿到空白結果。
+
+**你必須用「現有資料」產出一份 best-effort 的可交付草稿**：
+- `status` **必須**設為 `DRAFT_READY`，`draft` **必須**是非空的可交付 Markdown 草稿——即使可用資料有限，你也必須產出一份誠實標註缺口的草稿。
+- **嚴禁**回 `status: SEARCH_REQUIRED`、**嚴禁**把 draft 設為空字串、**嚴禁**用 `new_queries` 要求再搜尋。
+
+**grounding 紀律不變（這是產品的可信任性底線，最後一輪也不放寬）**：
+> grounding 規則照舊適用——時效性/數字/具名實體的標準不因 final-pass 而放寬；以下是具體行為要求：
+- **只寫證據支持的內容**：draft 中每個關鍵陳述都要有 [ID] 引用（對齊系統慣例，如 `[1]`、`[3]`），包含本輪已補進的網路來源。
+- **缺的面向要誠實明說缺**：資料不足以確認的部分，在文中直接標註「**現有資料不足以確認……**」，而**不是**編造填補、也**不是**因此拒絕整篇。
+- **寧可短報告，不可假報告**：如果只夠寫三段有憑有據的內容 + 兩處誠實缺口標註，那就寫這樣——短而誠實遠勝於空白或編造。
+- 把 `missing_information` 欄位如實填上仍缺的資訊（讓使用者知道邊界），但這**不**改變 `status` 必須是 `DRAFT_READY`。
+
+**一句話**：手上有多少證據就寫多少、缺的明說缺、不要編、不要再要求搜尋、不要交白卷。
+"""
+
+    def _build_gap_enrichment_instructions(self, enable_web_search: bool, retrieval_evidence: Optional[str] = None) -> str:
         """Build gap enrichment instructions for Stage 5."""
         web_search_status = "**已啟用**" if enable_web_search else "**未啟用**（動態資料將標註為「需網路搜尋確認」）"
+
+        # 防線二：站內檢索證據強弱摘要（None 時為空行，不影響原文）
+        evidence_block = f"\n{retrieval_evidence}\n" if retrieval_evidence else ""
 
         return f"""
 ---
 
 ## 階段 2.6：知識缺口偵測與補充 (Gap Detection & Enrichment - Stage 5)
-
+{evidence_block}
 在分析過程中，你可能會發現知識缺口。請使用以下三種方式補充：
 
 ### 🔹 補充方式一：LLM Knowledge（永遠可用）
@@ -961,6 +1010,19 @@ Web Search 狀態：**已啟用**
 4. **嚴禁編造 URL**
 
 5. **未指定年份的財務數據**
+
+6. **站內證據弱時，具名實體 / 專有名詞 / 近期可外部驗證事實傾向 web_search**（advisory）：
+   - 上方「站內檢索證據強弱」顯示 ⚠️ Signal A（關聯性較弱），或命中筆數雖多但最高向量分數偏低時，
+     代表**站內語料對此 gap 的支撐存疑**。此時若該 gap 是**特定人名 / 機構 / 產品 / 事件**（可外部驗證的事實），
+     **傾向使用 `web_search` 而非 `llm_knowledge`**。
+   - 理由：你對「自己是否真的認識某個專有名詞」的自我評估不可靠；站內查不到 + 向量分數低 =
+     很可能是你 training data 也沒有的冷門實體，用「常識」總結會編造。
+   - ❌ 錯誤：「高端訓屬一般語境，用常識總結即可」→ llm_knowledge（站內 91 筆全弱關聯，這是誤判）
+   - ✅ 正確：站內證據弱 + 專有名詞 → `web_search`（search_query 用該實體名）
+   - **例外（不得誤傷）**：穩定常識 / 通用定義 / 原理 / 背景（「什麼是通貨膨脹」「供需法則」），
+     即使站內弱也**維持 `llm_knowledge`** —— 這類本就不需上網，過度轉 web_search 會浪費 Google 額度。
+   - **web_search 未啟用時**：照常標 `resolution: web_search` + `requires_web_search: true`，
+     系統會自動降級標註「需網路搜尋確認」（與 `resolution` 欄位說明既有機制對齊，不需為此改標 llm_knowledge）。
 
 **CRITICAL**：即使你的 training data 包含相關資訊（例如 Andy Jassy 是 CEO），只要查詢涉及「現任」「最新」等時效性詞彙，就**必須**使用 `web_search`，不得使用 `llm_knowledge` 直接回答。
 

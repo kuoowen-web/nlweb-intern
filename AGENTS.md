@@ -2,6 +2,8 @@
 
 本文件為 Codex 提供專案指引。
 
+> 行為規則與 `CLAUDE.md` 同步維護，**CLAUDE.md 為 master**（2026-07-11 收斂拍板）；兩檔規則若有出入，以 CLAUDE.md 為準。動態狀態一律不放本檔。
+
 **黃金法則**：僅實作被要求的功能，不要額外新增功能。避免過度複雜化。
 
 ---
@@ -10,7 +12,7 @@
 
 新聞網站自然語言搜尋系統。目標：可信、準確、邏輯嚴謹的搜尋與推論。
 
-**目前狀態**：核心系統 + Login 系統 + 全量 Indexing 完成。詳見 `docs/status.md`。
+**專案狀態**：見 `docs/status.md`（動態內容不放本檔，避免 stale）。
 
 ---
 
@@ -72,7 +74,6 @@
 | 詢問主題       | 需閱讀的文件                                                       |
 | ---------- | ------------------------------------------------------------ |
 | 系統狀態機、運作流程 | `docs/reference/architecture/state-machine-diagram.md`       |
-| 狀態機詳細說明    | `docs/reference/architecture/state-machine-diagram-explained.md` |
 | 系統總覽與 API  | `docs/reference/systemmap.md`                                |
 | 程式碼規範      | `docs/reference/codingrules.md`                              |
 | UX 流程      | `docs/reference/userworkflow.md`                             |
@@ -87,32 +88,8 @@
 
 ## 模組開發狀態
 
-| 模組                     | 狀態      | 說明                                   |
-| ---------------------- | ------- | ------------------------------------ |
-| **M0: Indexing**       | 🟢 完成   | Crawler (7 Parser, Subprocess 隔離) + Indexing Pipeline |
-| **M1: Input**          | 🟢 完成   | Query Decomposition ✅ / Guardrails Phase 1+2 ✅ |
-| **M2: Retrieval**      | 🟡 部分完成 | Internal Search ✅ / Web Search 🟡（Reasoning gap resolution 已上 prod；通用 retrieval 刻意不混外網） |
-| **M3: Ranking**        | 🟢 完成   | LLM + XGBoost + MMR（BM25 已移除）    |
-| **M4: Reasoning**      | 🟢 完成   | Actor-Critic + 4 Agents + Tier 6 API |
-| **M5: Output**         | 🟡 部分完成 | API + Frontend + Help Center + KG ✅ / Visualizer ❌ |
-| **M6: Infrastructure** | 🟢 完成   | DB + Cache + LLM + Analytics         |
-| **Auth / Session**     | 🟢 完成   | Email/Password + JWT + Session + Audit + B2B + BP |
-
-**詳細模組資訊**：見 `docs/reference/systemmap.md`
-
----
-
-## 目前開發重點
-
-### 已完成
-
-Track A-AR 共 44 個完成項目，涵蓋 Analytics、BM25、MMR、Reasoning、XGBoost、Crawler Subprocess、Dashboard 穩定性、三機協作、Chinatimes Multi-Category 修復、Login B2B、UI Redesign、Guardrail Phase 1+2、CSP Security、KG 心智圖、Help Center、Private Docs PG 遷移 等。
-
-**詳細資訊**：見 `docs/archive/completed-work.md`
-
-### 目前工作
-
-見 `docs/status.md`（動態內容不放 AGENTS.md，避免 prompt cache 失效）
+模組狀態為動態資訊，不放本檔（曾因 stale 表格誤導）。查詢順序：
+`docs/reference/systemmap.md`（模組架構與現況）→ `docs/status.md`（目前重點與 backlog）→ `docs/archive/completed-work.md`（已完成工作史）。
 
 ---
 
@@ -123,12 +100,8 @@ Track A-AR 共 44 個完成項目，涵蓋 Analytics、BM25、MMR、Reasoning、
 **關鍵**：被要求 debug 或診斷問題時，**必須**先讀取 memory 相關檔案，再開始調查。
 
 **流程**：
-1. 先讀 `memory/MEMORY.md`（專案根目錄下）
-2. 根據問題模組讀取對應 lessons 檔案（在 memory/ 目錄下）：
-   - Crawler / Dashboard → `lessons-crawler.md`
-   - VPS / Docker / 部署 / 資安 → `lessons-infra-deploy.md`
-   - Auth / Login / Cookie → `lessons-auth.md`
-   - 其他或模組不明 → `lessons-general.md`（優先讀取）
+1. 先讀 `memory/MEMORY.md`（專案根目錄下）——它是純索引，模組 → lessons 檔的完整對應表以它為準（單一來源；`.claude/commands/learn.md` A2 有同表）
+2. 依索引讀對應 `memory/lessons-*.md`（如 crawler / infra-deploy / auth / frontend / general）
 3. 確認是否為已知問題或類似 pattern
 4. 若為新問題，才開始從程式碼調查
 
@@ -177,7 +150,7 @@ Track A-AR 共 44 個完成項目，涵蓋 Analytics、BM25、MMR、Reasoning、
 
 - 建立/更新 `docs/specs/{algorithm}-spec.md`
 - 內容包含：目的、公式、參數、實作細節、測試策略
-- 範例：`docs/specs/bm25-spec.md`、`docs/specs/xgboost-spec.md`
+- 範例：`docs/specs/xgboost-spec.md`、`docs/specs/mmr-spec.md`
 
 ### Python 版本
 

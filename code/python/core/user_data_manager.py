@@ -93,7 +93,7 @@ class UserDataManager:
         if file_ext not in allowed_extensions:
             return {
                 'valid': False,
-                'error': f'File type not allowed. Allowed types: {", ".join(allowed_extensions)}'
+                'error': f'不支援此檔案格式。請上傳 PDF 或文字檔（.pdf、.txt）。'
             }
 
         # Check file size
@@ -102,7 +102,7 @@ class UserDataManager:
             max_size_mb = max_size / (1024 * 1024)
             return {
                 'valid': False,
-                'error': f'File size exceeds maximum allowed size of {max_size_mb:.1f}MB'
+                'error': f'檔案大小超過上限（最大 {max_size_mb:.1f}MB），請壓縮後再試。'
             }
 
         # Check user's total storage usage
@@ -113,7 +113,7 @@ class UserDataManager:
             max_total_mb = max_total / (1024 * 1024)
             return {
                 'valid': False,
-                'error': f'Total storage limit ({max_total_mb:.1f}MB) would be exceeded'
+                'error': f'儲存空間不足，無法上傳此檔案（您的總容量上限為 {max_total_mb:.1f}MB）。'
             }
 
         # Check number of files
@@ -123,7 +123,7 @@ class UserDataManager:
         if file_count >= max_files:
             return {
                 'valid': False,
-                'error': f'Maximum number of files ({max_files}) reached'
+                'error': f'已達檔案數量上限（{max_files} 個），請刪除舊檔案後再上傳。'
             }
 
         return {'valid': True}

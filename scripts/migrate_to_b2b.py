@@ -7,8 +7,6 @@ Maps pre-auth legacy data to real users and organisations.
 What it migrates:
   A. user_data.db  : user_sources rows with legacy user_id → real user_id + org_id
   B. analytics DB  : adds org_id column; tags historical rows with a sentinel org tag
-  C. Qdrant nlweb_user_data    : updates payload user_id + org_id
-  D. Qdrant nlweb_conversations: updates payload user_id
 
 All steps are idempotent — running the script twice is safe.
 
@@ -29,12 +27,10 @@ Usage examples:
 
 import argparse
 import asyncio
-import os
 import sqlite3
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 # ── Path setup ───────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -220,133 +216,6 @@ def _migrate_analytics(
         conn.close()
 
 
-# ── Step C+D: Qdrant migration ────────────────────────────────────
-
-async def _qdrant_update_payload(
-    client,
-    collection_name: str,
-    filter_field: str,
-    filter_value: str,
-    new_payload: dict,
-    dry_run: bool,
-    batch_size: int = 100,
-) -> int:
-    """Scroll through points matching filter and overwrite payload fields."""
-    from qdrant_client.http import models
-
-    updated = 0
-    next_offset = None
-
-    while True:
-        results, next_offset = await client.scroll(
-            collection_name=collection_name,
-            scroll_filter=models.Filter(
-                must=[models.FieldCondition(
-                    key=filter_field,
-                    match=models.MatchValue(value=filter_value),
-                )]
-            ),
-            limit=batch_size,
-            offset=next_offset,
-            with_payload=True,
-            with_vectors=False,
-        )
-
-        if not results:
-            break
-
-        ids = [p.id for p in results]
-        if not dry_run:
-            await client.set_payload(
-                collection_name=collection_name,
-                payload=new_payload,
-                points=ids,
-            )
-        updated += len(ids)
-
-        if next_offset is None:
-            break
-
-    return updated
-
-
-async def _migrate_qdrant(
-    legacy_user_id: str,
-    real_user_id: str,
-    org_id: str,
-    dry_run: bool,
-    qdrant_url: Optional[str] = None,
-    qdrant_api_key: Optional[str] = None,
-    user_data_collection: str = "nlweb_user_data",
-    conv_collection: str = "nlweb_conversations",
-    user_data_db_path: Optional[str] = None,
-    conv_db_path: Optional[str] = None,
-):
-    try:
-        from qdrant_client import AsyncQdrantClient
-    except ImportError:
-        print("  [SKIP] qdrant-client not installed — skipping Qdrant migration")
-        return
-
-    async def _try_collection(client, collection_name: str, label: str, new_payload: dict):
-        try:
-            collections = await client.get_collections()
-            names = [c.name for c in collections.collections]
-            if collection_name not in names:
-                print(f"  [SKIP] Qdrant collection '{collection_name}' not found")
-                return
-
-            count = await _qdrant_update_payload(
-                client, collection_name,
-                filter_field="user_id",
-                filter_value=legacy_user_id,
-                new_payload=new_payload,
-                dry_run=dry_run,
-            )
-            verb = "[DRY]" if dry_run else "[MIGRATE]"
-            print(f"  {verb} Qdrant/{collection_name} ({label}): {count} points updated")
-        except Exception as e:
-            print(f"  [WARN] Qdrant/{collection_name}: {e}")
-
-    # Helper to open a client and run migrations
-    async def _run_with_client(client):
-        await _try_collection(
-            client, user_data_collection, "user_data",
-            new_payload={"user_id": real_user_id, "org_id": org_id},
-        )
-        await _try_collection(
-            client, conv_collection, "conversations",
-            new_payload={"user_id": real_user_id},
-        )
-        await client.close()
-
-    if qdrant_url:
-        print(f"  Connecting to Qdrant at {qdrant_url} …")
-        client = AsyncQdrantClient(url=qdrant_url, api_key=qdrant_api_key)
-        await _run_with_client(client)
-    else:
-        # Try local paths
-        paths_tried = []
-        for path in [user_data_db_path, conv_db_path,
-                     str(PROJECT_ROOT / "data" / "qdrant"),
-                     str(PROJECT_ROOT / "data" / "db")]:
-            if not path or path in paths_tried:
-                continue
-            paths_tried.append(path)
-            try:
-                client = AsyncQdrantClient(path=path)
-                # Quick sanity check
-                await client.get_collections()
-                print(f"  Using local Qdrant at: {path}")
-                await _run_with_client(client)
-                return
-            except Exception:
-                pass
-
-        print("  [SKIP] No reachable Qdrant instance found "
-              "(set QDRANT_URL env var to connect to remote)")
-
-
 # ── Main ─────────────────────────────────────────────────────────
 
 async def main():
@@ -375,14 +244,6 @@ async def main():
                         help="Path to user_data.db")
     parser.add_argument("--analytics-db", default=str(DEFAULT_ANALYTICS_DB),
                         help="Path to query_logs.db")
-
-    # Qdrant
-    parser.add_argument("--qdrant-url", default=os.environ.get("QDRANT_URL"),
-                        help="Qdrant server URL (default: $QDRANT_URL)")
-    parser.add_argument("--qdrant-api-key", default=os.environ.get("QDRANT_API_KEY"),
-                        help="Qdrant API key (default: $QDRANT_API_KEY)")
-    parser.add_argument("--user-data-collection", default="nlweb_user_data")
-    parser.add_argument("--conv-collection", default="nlweb_conversations")
 
     args = parser.parse_args()
 
@@ -433,20 +294,6 @@ async def main():
         legacy_analytics_user=args.legacy_analytics_user,
         org_id=org_id,
         dry_run=args.dry_run,
-    )
-    print()
-
-    # ── Step C+D: Qdrant ─────────────────────────────────────────
-    print("Step C+D — Qdrant collections")
-    await _migrate_qdrant(
-        legacy_user_id=args.legacy_user_id,
-        real_user_id=real_user_id,
-        org_id=org_id,
-        dry_run=args.dry_run,
-        qdrant_url=args.qdrant_url,
-        qdrant_api_key=args.qdrant_api_key,
-        user_data_collection=args.user_data_collection,
-        conv_collection=args.conv_collection,
     )
     print()
 

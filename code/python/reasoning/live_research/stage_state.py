@@ -45,7 +45,7 @@ class UserVoice:
     citation_style: Optional[CitationStyle] = None
 
     # Blocker A (2026-05-19) root fix: Stage 4 user 拍板的中文總字數
-    # None = user 沒拍板（writer 沿用 outline planner default 每章 800-1500 字）
+    # None = user 沒拍板字數（outline planner 回 target=0，交 writer 自決長度，不硬塞 default）
     # 寫入路徑：Stage 4 _classify_stage_4_response → format_content.target_word_count
     # 讀取路徑：outline planner prompt（_format_format_specs 注入 budget）+ writer
     target_word_count: Optional[int] = None
@@ -151,6 +151,11 @@ class LiveResearchStageState:
     # Set when LLM parses reframe_structure intent；下一輪 user confirm 才 apply。
     # 空字串 = 沒有 pending reframe。
     pending_reframe_json: str = ""
+    # R2 澄清機制（2026-07）：待 user 確認/回答的 special_element 完整 pending context。
+    # 空字串 = 無 pending。JSON：{"kind":"confirm"|"clarify",
+    #   "elements":[{"type","description","raw_target","resolved_title"}...],"chapter_names":[...]}
+    # confirm = LLM 判 clear、待 user 單選確認；clarify = uncertain/對不到、待 user 選章。
+    pending_special_element_json: str = ""
     # Bug 2 (2026-05-18) root-fix：reframe proposal markdown 獨立 field，跟
     # `checkpoint_prompt`（原 stage 的 checkpoint）解耦。
     # `_emit_reframe_proposal` 寫入此 field（不再 mutate `checkpoint_prompt`），
@@ -171,6 +176,15 @@ class LiveResearchStageState:
     # 空字串 = 尚未跑到 Stage 6，或欄位上線前已跑完的舊 session（from_dict fallback ""）。
     # 前端回顧主路徑直接讀此字串丟 showLRExport，完全不重組（與 export 逐字一致）。
     final_report_markdown: str = ""
+
+    # LR 報告標題生成（plan: lr-report-title-generation）。Stage 6 組 H1 前
+    # low-tier LLM 依 research_question + 各章標題/摘要生成的報告標題。
+    # 主路徑報告字串已含此標題（嵌 final_report_markdown 的 H1）；本欄位存「純標題值」
+    # 供 debug / 前端 / 未來 consumer 取用，免從 markdown 反解。
+    # AR R1 語義約定：只在「真生成」時存純標題值；生成失敗/降級/尚未生成/舊 session
+    # 一律空字串 ""（不存 research_question）。空=「無生成標題」的唯一表徵，
+    # 前端 fallback 據「空/非空」分流（from_dict fallback ""）。
+    generated_report_title: str = ""
 
     # === Grounding (Track A — sprint 2026-05-28) ===
     # key = evidence_id (int), value = List[GroundedClaim.model_dump()]
@@ -308,10 +322,12 @@ class LiveResearchStageState:
             "format_specs": self.format_specs,
             "pending_format_confirmation": self.pending_format_confirmation,
             "pending_reframe_json": self.pending_reframe_json,
+            "pending_special_element_json": self.pending_special_element_json,
             "pending_reframe_proposal_markdown": self.pending_reframe_proposal_markdown,
             "book_outline_json": self.book_outline_json,
             "written_sections": self.written_sections,
             "final_report_markdown": self.final_report_markdown,
+            "generated_report_title": self.generated_report_title,
             "executed_searches": self.executed_searches,
             "evidence_pool_json": self.evidence_pool_json,
             "hallucination_corrected": self.hallucination_corrected,
@@ -461,10 +477,12 @@ class LiveResearchStageState:
             format_specs=d.get("format_specs", {}),
             pending_format_confirmation=d.get("pending_format_confirmation", False),
             pending_reframe_json=d.get("pending_reframe_json", ""),
+            pending_special_element_json=d.get("pending_special_element_json", ""),
             pending_reframe_proposal_markdown=d.get("pending_reframe_proposal_markdown", ""),
             book_outline_json=d.get("book_outline_json", ""),
             written_sections=d.get("written_sections", []),
             final_report_markdown=d.get("final_report_markdown", ""),
+            generated_report_title=d.get("generated_report_title", ""),
             executed_searches=d.get("executed_searches", []),
             evidence_pool_json=d.get("evidence_pool_json", ""),
             hallucination_corrected=d.get("hallucination_corrected", False),
@@ -533,6 +551,7 @@ class LiveResearchStageState:
         # === guard 欄位：無論 target 一律清（防 phantom routing / 誤續寫）===
         self.failed_intent_parse_count = 0
         self.pending_reframe_json = ""
+        self.pending_special_element_json = ""
         self.pending_reframe_proposal_markdown = ""
         self.pending_format_confirmation = False
         self.hallucination_corrected = False
@@ -604,6 +623,7 @@ class LiveResearchStageState:
             }
         # 幽靈 guard（不清 = phantom reframe / format confirm / 誤續寫 / 誤判 writer 在跑）
         self.pending_reframe_json = ""
+        self.pending_special_element_json = ""
         self.pending_reframe_proposal_markdown = ""
         self.pending_format_confirmation = False
         self.hallucination_corrected = False

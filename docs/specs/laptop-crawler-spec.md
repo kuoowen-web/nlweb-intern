@@ -53,7 +53,7 @@ Crawler (1 source):      ~0.2 GB
 
 ### indexing/__init__.py 已清空
 
-筆電不裝 qdrant_client 等重量級套件，`indexing/__init__.py` 改為：
+筆電不裝重量級套件（torch / sentence-transformers 等；歷史上還有 qdrant_client——該依賴已於 2026-06 隨 Qdrant 廢除自主 repo 移除），`indexing/__init__.py` 改為：
 ```python
 # dashboard-only
 ```

@@ -53,8 +53,8 @@
 //   from chat.js feedback handler residual (event delegation in news-search.js uses named
 //   import).
 
-import { getConversationHistory } from './search.js?v=20260705c';
-import { getChatHistory } from './chat.js?v=20260705c';
+import { getConversationHistory } from './search.js?v=20260714a';
+import { getChatHistory } from './chat.js?v=20260714a';
 import { getSessionHistory, getSavedSessions, clearSharedSessions, renderSharedSessions } from './sessions-list.js';
 import { getSourceDisplayNames } from './source-filters.js';
 import { getCurrentSessionId } from '../utils/analytics.js';

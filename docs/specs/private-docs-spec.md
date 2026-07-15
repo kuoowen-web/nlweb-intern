@@ -1,8 +1,10 @@
 # Private Documents 規格文件
 
 > **Owner**: 讀豹 Team
-> **Last Updated**: 2026-04-27
+> **Last Updated**: 2026-07-10
 > **Status**: 完成（Qdrant → PostgreSQL 遷移後已上線；pgvector cosine search 運作中）
+>
+> **Reconcile 2026-07-10**：公開 `chunks` 表向量索引由 IVFFlat 更正為 HNSW（對齊 prod 現況，見「與主線 Indexing 的異同」表）。
 
 ---
 
@@ -128,7 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_udc_user_org  ON user_document_chunks(user_id, or
 | embedding model | Qwen3-Embedding-4B（API，非本機） | Qwen3-Embedding-4B（本機 INT8 量化） |
 | 向量維度 | 1024 | 1024 |
 | 儲存表 | `user_document_chunks` | `chunks` |
-| 向量索引 | 無（sequential scan） | IVFFlat（`idx_chunks_embedding_ivf`） |
+| 向量索引 | 無（sequential scan） | HNSW（`idx_chunks_embedding_hnsw`，m=16/ef_construction=200；原 IVFFlat 2026-03 改 HNSW） |
 | BM25 搜尋 | 無 | 有（`pg_bigm` + `idx_chunks_tsv_bigm`） |
 
 ---

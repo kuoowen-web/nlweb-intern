@@ -482,11 +482,13 @@ testing/
 test_*.py
 !code/python/tests/test_*.py
 !code/python/tests/unit/**/test_*.py
+!code/python/tests/e2e/test_*.py
 !code/python/tests/integration/**/test_*.py
 !tools/test_*.py
 !code/python/tests/integration/test_*.py
 !code/python/tests/contract/**/test_*.py
 !code/python/tests/contract/test_*.py
+!.claude/hooks/test_*.py
 check_*.py
 analyze_*.py
 retry_*.py
@@ -602,3 +604,7 @@ docs/e2e-screenshots/
 
 # Superpowers writing-plans 預設輸出目錄（plan 正式落點是 docs/in progress/plans/，這裡是工具孤兒）
 docs/superpowers/
+
+# CEO 個人簡報/文件（二進位，不屬 repo，2026-07-14）
+*.pptx
+*.docx

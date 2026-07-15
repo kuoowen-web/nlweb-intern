@@ -509,7 +509,7 @@ stateDiagram-v2
 ## 5.3 Major Upgrade — 計畫中的 Reasoning 擴充狀態
 
 > 以下為 Major Upgrade 計畫中的新 states。使用 `classDef planned` 虛線標記。
-> 詳見 `docs/in progress/plans/major-upgrade-plan.md`
+> 詳見 `docs/archive/plans/major-upgrade-plan.md`（計畫已完成並歸檔；Composable Pipeline 已落地，現行實況見 `docs/specs/reasoning-spec.md`）
 
 ```mermaid
 stateDiagram-v2
@@ -1163,7 +1163,7 @@ sequenceDiagram
 | SSE Streaming | `core/utils/message_senders.py`, `core/schemas.py` |
 | Help Center | `webserver/routes/help.py` |
 | Audit | `webserver/routes/audit.py` |
-| **📋 Major Upgrade Plan** | `docs/in progress/plans/major-upgrade-plan.md` |
+| **📋 Major Upgrade Plan** | `docs/archive/plans/major-upgrade-plan.md`（已完成歸檔） |
 
 ---
 

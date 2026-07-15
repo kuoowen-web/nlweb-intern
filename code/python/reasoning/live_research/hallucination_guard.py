@@ -2,8 +2,9 @@
 
 Port from DR `code/python/reasoning/orchestrator.py:1095-1131`：DR 在 final
 report 跑完後做一次性 subset check（writer.sources_used ⊆ analyst_citations）
-+ 自動修正 + confidence='Low' + tracer.condition_branch('HALLUCINATION_GUARD',
-...)。LR 因為 per-section 寫作，每寫完一個 section 就跑一次 guard。
++ 自動修正 + 依嚴重度分級降級（severe→Low，否則降一級 High→Medium/Medium→Low）+
+tracer.condition_branch('HALLUCINATION_GUARD', ...)。LR 因為 per-section 寫作，
+每寫完一個 section 就跑一次 guard。
 
 LR 額外加 literal placeholder regex check（DR 沒有）：偵測 section content
 含字面 (Author, Year) / (作者, 年份) / 裸 [N] placeholder 樣式，若有則同樣
@@ -21,7 +22,8 @@ logger = get_configured_logger("live_research.hallucination_guard")
 
 
 # 偵測字面 placeholder（不是真實引用，Writer 沒按 citation_format enum 寫）
-# 這些 pattern 觸發 → flag hallucination_corrected + confidence='Low'
+# 這些 pattern 觸發 → flag hallucination_corrected；placeholder 命中一律 severe → confidence='Low'
+# （G4 後其餘觸發改依嚴重度分級降級，僅 placeholder / 修正後無有效 citation 這兩種 severe case 打到 Low）
 LITERAL_PLACEHOLDER_PATTERNS = [
     r"\(Author,\s*Year\)",       # 英文字面 placeholder
     r"\(作者,\s*年份\)",            # 中文字面 placeholder
@@ -77,8 +79,12 @@ def _deterministic_grounded_filter(
 
 # 中文 / 英文句尾標點切句（標點隨前句）
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?\n])")
-# citation 標記：[3] / [3,12] / [3、12]（半形括號，與 render 端一致）
-_CITATION_RE = re.compile(r"\[\d+(?:\s*[,、]\s*\d+)*\]")
+# citation 標記：[3] / [3,12] / [3、12]（render 後）或 {cite:3}（render 前）。
+# G3 修復：apply_hallucination_guard / split_and_filter_ungrounded_sentences 的呼叫點
+# 都在 orchestrator._render_section_citations 之前跑，此時 section content 仍是
+# {cite:N} placeholder（尚未轉成 [N]）。只認 [N] 會讓「已引用、其實有根據」的句子
+# has_citation 恆為 False，被 R3 安全閥誤判成純未驗證句遭硬刪，故兩種格式都要認。
+_CITATION_RE = re.compile(r"\[\d+(?:\s*[,、]\s*\d+)*\]|\{cite:\d+\}")
 # 句首/句中上下文依賴連接詞（刪去會留殘骸 / 指代不明）
 _CONJUNCTION_MARKERS = (
     "但是", "然而", "因此", "所以", "因而", "於是", "不過", "因此", "故",
@@ -142,6 +148,10 @@ def split_and_filter_ungrounded_sentences(
     return "".join(kept_parts), removed, unsafe
 
 
+# G4: 信心降一級對照（避免單一 phantom 直接把整章打到 Low）
+_DOWNGRADE_ONE = {"High": "Medium", "Medium": "Low", "Low": "Low"}
+
+
 def apply_hallucination_guard(
     section: LiveWriterSectionOutput,
     valid_evidence_ids: Set[int],
@@ -156,7 +166,8 @@ def apply_hallucination_guard(
         (corrected_section, was_corrected):
         - was_corrected=False → 回傳原 section（沒 mutate）
         - was_corrected=True → 回傳新 section（sources 移除 phantom、
-          confidence_level='Low'、methodology_note 加註記）
+          confidence_level 依嚴重度分級降級（severe→Low，否則降一級
+          High→Medium/Medium→Low）、methodology_note 加註記）
 
     觸發條件（任一即觸發）：
     1. sources_used 含 valid_evidence_ids 外的 id（phantom）
@@ -213,10 +224,18 @@ def apply_hallucination_guard(
         else f"[自動修正：{reason_str}]"
     ).strip()
 
+    # G4（AR R2）：severe 判斷從「有任一有效 citation」收緊為「多數 citation 失效」，
+    # 對齊「多數 citation 仍有效才只降一級」的意圖。反例：9 phantom + 1 valid 原本只降一級，
+    # 現在 phantom(9) >= valid(1) → severe → Low。placeholder（Writer 沒照格式寫）仍一律 severe。
+    # 邊界：citations 全空（只由 sources_used 污染觸發 correction）→ 0 >= 0 → severe → Low，
+    # 屬保守正確（本就無 typed-citation grounding）。
+    severe = bool(placeholder_hit) or len(phantom_citations) >= len(corrected_citations)
+    new_confidence = "Low" if severe else _DOWNGRADE_ONE.get(section.confidence_level, "Low")
+
     corrected = section.model_copy(update={
         "sources_used": corrected_sources,
         "citations": corrected_citations,
-        "confidence_level": "Low",
+        "confidence_level": new_confidence,
         "methodology_note": new_note,
     })
 

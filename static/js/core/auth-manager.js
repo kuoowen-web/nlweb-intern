@@ -290,6 +290,19 @@ export class AuthManager {
                 }
                 res = await fetch(url, options);
             } catch (e) {
+                // AbortError 例外處理（2026-07-10）：caller 主動 abort（快速連搜時
+                // AbortController.abort() 取消前一個請求）會讓 fetch 拋 AbortError。
+                // 若正好落在 401-refresh-retry 窗，這是「非錯誤的正常取消」，不是 auth
+                // 失敗 — 必須 re-throw 讓 caller 既有的 AbortError 分支處理，絕不可誤觸
+                // _handleAuthFailure（否則誤彈 login modal + reset state）。
+                // 已驗證所有帶 signal（可 abort）的 caller 都有 e.name==='AbortError'
+                // 靜默 return 分支：search.js handlePostStreamingRequest → performSearch
+                // (:1581)、chat.js (:255)、deep-research.js (:1562)。不帶 signal 的
+                // caller（LR / session-manager / file-kb / auth-ui / page-bootstrap）
+                // 永不會走到這裡，故 re-throw 不會變 unhandled rejection。
+                if (e && e.name === 'AbortError') {
+                    throw e;
+                }
                 // CEO P0 UX fix (2026-05-19): refresh fail 必須 trigger
                 // _handleAuthFailure（顯示 login modal + reset state），不可靜默
                 // return 401 — 否則 caller 看 raw "HTTP 401" 顯示給 user。

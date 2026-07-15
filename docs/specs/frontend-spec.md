@@ -55,6 +55,8 @@
 > **LOC 說明**：本 spec 的行數均標「~行」概數（避免隨提交漂移），實際數字以 `wc -l` 自驗為準。後續持續演進，數百行內的差異屬正常。
 > **Line refs 說明**：v4.0 完成後 news-search.js 為 ~3,517 行 stub。本 spec 內行號 refs 均為邏輯參考。需找實際位置時 grep 函數名或 D-1 module header 標記。
 
+> **檔案樹快照註（2026-07-10）**：下方樹為 v4.0 完成時快照。此後新增的 live 檔未列入：`js/feedback-modal.js`、`js/feedback-utils.js`、`js/help.js`、`js/features/lr-reconnect-auth.js`、`js/features/lr-snapshot.js`、`js/features/search-generation.js`、`js/features/__tests__/`（7 test 檔）、`css/feedback-modal.css`；feature modules 現況為 19 個非測試檔（「16 features / 23 surfaces」為 v4.0 快照數字）。
+
 ```
 static/
 ├── news-search-prototype.html   # 主頁面 HTML 結構（type="module" script 載入）
@@ -107,11 +109,11 @@ static/
 
 HTML 載入：`<script type="module" src="static/js/main.js">` — defer semantics，取代 classic script。
 
-`main.js` 職責：
+`main.js` 職責（2026-07-10 對 code 校正）：
 1. Import 23 module surfaces（部分由其他 module 轉導入，非全部在 main.js 直接 import）
 2. 呼叫 `injectStateSync({ UserStateSync, UserStateSyncError, assertUserIdentity })` — wire auth-manager
-3. 呼叫 `injectStateSyncBackref({ isLRInProgress, getLRSessionId, clearLRSessionId })` — wire live-research D-V3 backref
-4. 設定 21 intentional `window.X = X` bridges（見 §2.3）
+3. ~~呼叫 `injectStateSyncBackref(...)`~~ → D-V3 backref 實由 `live-research.js` module init 自行呼叫（`main.js:71-74` 註解），非 main.js 職責（§2.4 D-V3 描述為準）
+4. 設定 4 個 `window.X = X` bridges（authManager / AuthManager / renderLeftSidebarSessions / renderSharedSessions）；其餘 intentional bridges 由 news-search.js 自行 attach（見 §2.3）
 5. DOMContentLoaded init sequence
 
 ### 2.2 news-search.js Stub — KEEP-in-place 14 類函數
@@ -123,7 +125,7 @@ HTML 載入：`<script type="module" src="static/js/main.js">` — defer semanti
 | DOM init（頁面啟動）| DOMContentLoaded handlers | 直接操作 HTML DOM，與 module 載入同時執行 |
 | Bootstrap 序列 | window.resetConversation prefix | 相依 window global，搬出需完整 bridge 重構 |
 | Session hydration | loadSavedSession | 直接 reassign 多個 outer-scope `let`，classic-script only |
-| DOM-coupled residuals | setProcessingState, cancelAllActiveRequests | 操作複雜 DOM + 相依多個 outer state |
+| DOM-coupled residuals | renderHistoryPopup, restoreSession 等（~~setProcessingState, cancelAllActiveRequests~~ 已於 commit 14a 遷至 `features/search.js`）| 操作複雜 DOM + 相依多個 outer state |
 | 21 window-attach bridges | window.openTab = openTab 等 | Sidebar inline-onclick callsite，無法移除 |
 
 **Root cause**：classic-script `let` binding 不能被 ES module reassign（D-V3 / lessons-frontend 2026-05-21）。真實搬出需一次性大改 declaration → getter/setter/event-based pattern。AC-V6（≤500 LOC）為 GOAL not hard target，CEO directive 1（2026-05-25）接受 ~3,400 行 stub 現況（refactor 完成時；後續演進至 ~3,517 行）。
@@ -137,7 +139,7 @@ v4.0 完成後仍保留 21 個 `window.X = ...`，原因分兩類：
 | Sidebar inline-onclick | HTML sidebar 用 `onclick="window.funcName()"` 呼叫，無法改成 ES import |
 | ES module parse-time cycle avoidance | 跨模組呼叫若改 import 會形成循環依賴；window bridge 避免 |
 
-完整清單記錄在 `static/js/news-search.js` top-of-file commit 25 comment block（v4.0 最終狀態）。清零路徑需 HTML sidebar 重構（sidebar inline-onclick 替換為 ES event listener）+ 解決 parse-time circular dependency，為後續 Phase 7+ scope。
+`static/js/news-search.js` top-of-file comment block（L1-38）記錄概述與兩類歸因（sidebar ~6 / load-bearing ~15），**非逐項清單**；逐項以 `window.X =` 實際 attach 為準（2026-07-10 實測 32 處，含 state 賦值非純 bridge）。清零路徑需 HTML sidebar 重構（sidebar inline-onclick 替換為 ES event listener）+ 解決 parse-time circular dependency，為後續 Phase 7+ scope。
 
 ### 2.4 設計合約（v4.0 Design Contracts）
 
@@ -247,7 +249,7 @@ live-research.js 啟動時呼叫：
 |------|--------|------|----------|
 | 新聞搜尋 | `search` | 快速搜尋，回傳文章列表 + 摘要 | SSE `/ask` |
 | 進階搜尋 | `deep_research` | Deep Research，含推論鏈、知識圖譜 | SSE `/api/deep_research` |
-| 自由對話 | `chat` | 多輪對話，支援上下文 | POST `/api/free_conversation` |
+| 自由對話 | `chat` | 多輪對話，支援上下文 | POST `/ask`（帶 research context；~~`/api/free_conversation`~~ live 前端已零 caller，2026-07-10 校正）|
 
 #### 4.1.1 新聞搜尋 (Search Mode)
 
@@ -284,7 +286,7 @@ async function performDeepResearch(query, skipClarification, comprehensiveSearch
 
 ```javascript
 async function performFreeConversation(userMessage) {
-    // 1. POST 到 /api/free_conversation
+    // 1. 經 handlePostStreamingRequest('/ask', ...) POST（chat.js:114/218；非 /api/free_conversation）
     // 2. 維護 conversationHistory
     // 3. 支援多輪對話上下文
 }
@@ -458,7 +460,7 @@ function saveCurrentSession() {
 
 **新架構**：cross-user 隔離由 `UserStateSync.clearUserScopedState()` + `assertUserIdentity()` + `UserStateSync.runInitSync()` 三段式處理 — `clearUserScopedState()` 統一清 user-scoped localStorage keys 與 in-memory globals（含 D-2026-05-13 前由 legacy main-UI reset wrapper 涵蓋的 6 個 user-scoped main-UI globals：`_sessionDirty` / `currentArgumentGraph` / `currentChainAnalysis` / `shareContentOverride` / `currentLRSessionId` / `currentAnalyticsQueryId`），`assertUserIdentity()` 在 `cache.user_id !== fresh.user_id` 時拋 `UserStateSyncError` → trigger A 整套 reset，`runInitSync()` 整合 fullReset + `fetchInit()` + `applyInit()` 一次走完。詳見 §10.3。
 
-**引用**：D-2026-05-13「Frontend Init Sync Refactor」、`memory/lessons-frontend.md`「Frontend Init Sync — Architectural Refactor（2026-05-13）」、`docs/in progress/plans/frontend-init-sync-refactor-plan.md`。
+**引用**：D-2026-05-13「Frontend Init Sync Refactor」、`memory/lessons-frontend.md`「Frontend Init Sync — Architectural Refactor（2026-05-13）」、`docs/archive/plans/frontend-init-sync-refactor-plan.md`（已歸檔）。
 
 ### 4.3 右側 Tab 面板系統
 
@@ -648,13 +650,13 @@ function openFeedbackModal(rating) {
 |--------|------|------|------|
 | `currentMode` | string | `features/mode.js` | `getCurrentMode()` / `setCurrentMode()` |
 | `accumulatedArticles` | array | `features/search.js` | `getAccumulatedArticles()` |
-| `conversationHistory` | array | news-search.js stub | window global（待 Phase 7+）|
-| `sessionHistory` | array | news-search.js stub | `getSessionHistory()`（sessions-list）|
+| `conversationHistory` | array | `features/search.js`（commit 2/14a 遷移）| `getConversationHistory()`（news-search.js L50-51 import）|
+| `sessionHistory` | array | `features/sessions-list.js`（commit 10）| `getSessionHistory()` |
 | `chatHistory` | array | `features/chat.js` | `getChatHistory()` / `pushChatHistory()` |
-| `savedSessions` | array | news-search.js stub | `window.savedSessions`（每筆含 `_serverId` marker，見 §4.2.3）|
+| `savedSessions` | array | `features/sessions-list.js`（commit 10）| `window.savedSessions` bridge（每筆含 `_serverId` marker，見 §4.2.3）|
 | `_sessionDirty` | boolean | `features/session-manager.js` | `markSessionDirty()` / `isSessionDirty()`（D-V14）|
-| `currentLoadedSessionId` | string\|null | news-search.js stub | `window.currentLoadedSessionId` getter |
-| `currentConversationId` | string | news-search.js stub | window global |
+| `currentLoadedSessionId` | string\|null | `features/sessions-list.js`（commit 10）| `window.currentLoadedSessionId` getter |
+| `currentConversationId` | string | `features/search.js`（commit 2/14a）| module export + window bridge |
 | `currentResearchReport` | object\|null | `features/research.js` | `getCurrentResearchReport()` |
 | `currentArgumentGraph` | array\|null | `features/research.js`（user-scoped）| module getter |
 | `currentChainAnalysis` | object\|null | `features/research.js`（user-scoped）| module getter |
@@ -667,8 +669,8 @@ function openFeedbackModal(rating) {
 | `sourceFolders` | array | `features/folders.js` | `getSourceFolders()` |
 | `selectedFileIds` | array | `features/source-filters.js` | `getSelectedFileIds()` |
 | `currentAnalyticsQueryId` | string\|null | `utils/analytics.js`（user-scoped）| `getCurrentAnalyticsQueryId()` / `setCurrentAnalyticsQueryId()` |
-| `searchGenerationId` | number | news-search.js stub | window global（取消機制用）|
-| `availableSites` | array | news-search.js stub | window global |
+| `searchGenerationId` | number | `features/search.js`（commit 2/14a）| module export（取消機制用）|
+| `availableSites` | array | `features/source-filters.js`（commit 13）| module export |
 
 **User-scoped globals 清除規範**：所有標記 user-scoped 的 state，cross-user 切換時必須**全部**清除。實際做法見 §10.3 — 統一透過 `UserStateSync.clearUserScopedState()` 處理，由 7 個 sync trigger（§10.3 表）作為唯一合法寫入入口。`clearUserScopedState()` 透過 D-V3 backref pattern 清除 live-research state，透過各 module setter 清除其餘 module-owned state。
 
@@ -694,14 +696,14 @@ function openFeedbackModal(rating) {
 |------|------|------|----------|
 | `/ask` | GET (SSE) | 新聞搜尋 | SSE Stream |
 | `/api/deep_research` | GET (SSE) | Deep Research | SSE Stream |
-| `/api/free_conversation` | POST | 自由對話 | SSE Stream |
+| ~~`/api/free_conversation`~~ | POST | 自由對話 — live 前端零 caller（chat 實走 POST `/ask` 帶 research context，2026-07-10 校正）| SSE Stream |
 | `/sites_config` | GET | 取得網站設定 | JSON |
 | `/api/user/init` | GET | 一次 round-trip 取回 `{ user, org, role, sessions, shared_sessions, preferences }`（D-2026-05-13，見 §10.3）| JSON |
 | `/api/user/upload` | POST | 上傳檔案 | JSON |
 | `/api/user/upload/{id}/progress` | GET (SSE) | 上傳進度 | SSE Stream |
 | `/api/user/sources` | GET | 取得使用者資料來源 | JSON |
 | `/api/user/sources/{id}` | DELETE | 刪除使用者資料來源 | JSON |
-| `/api/feedback` | POST | 提交使用者回饋 | JSON |
+| `/api/help/feedback` | POST | 提交使用者回饋（`webserver/routes/help.py` 註冊；前端 `static/js/feedback-modal.js` 呼叫） | JSON |
 | `/api/analytics/event` | POST | 分析事件 | JSON |
 
 ### 6.2 SSE 串流處理
@@ -931,7 +933,7 @@ default:
 - 新增資料夾按鈕 `.folder-add-btn`
 - 搜尋按鈕 `.btn-search`
 
-**需要調整（白底區域 → 半透明白 default + 淺黃 active）**：
+**需要調整（白底區域 → 半透明白 default + 淺黃 active）** — ✅ 已完成（2026-07-10 抽驗：`.btn-feedback` / `.option-chip` default 已為 `rgba(255,255,255,0.5)`；`.tree-toolbar-btn` 用 `transparent` 變體，視覺等效）：
 - 搜尋結果 tabs `.tab`（default 改半透明白，active 維持深黃 — 例外）
 - 展開摘要 `.btn-toggle-summary`（active 用淺黃 — 例外）
 - 分享 Modal `.btn-copy`
@@ -1036,20 +1038,20 @@ function initSidebarDragDelegation() {
 |-----|------|----------|
 | `taiwanNewsSavedSessions` | 已儲存的 sessions | JSON Array |
 | `taiwanNewsFolders` | 資料夾列表 | JSON Array |
-| `taiwanNewsSourceFolders` | 來源分類資料夾 | JSON Array |
-| `taiwanNewsFileFolders` | 檔案分類資料夾 | JSON Array |
-| `taiwanNewsSelectedFiles` | 已選取的檔案 | JSON Array |
+| `nlweb_source_folders` | 來源分類資料夾（~~taiwanNewsSourceFolders~~ 實際 key，2026-07-10 校正：`source-filters.js:60`）| JSON Array |
+| `nlweb_file_folders` | 檔案分類資料夾（~~taiwanNewsFileFolders~~ 實際 key：`file-kb.js:68-70`）| JSON Array |
+| `nlweb_selected_files` | 已選取的檔案（~~taiwanNewsSelectedFiles~~ 實際 key）| JSON Array |
 | `taiwanNewsSessionsMigrated` | localStorage → server 遷移完成 flag | boolean |
-| `lastUserId` | 最近一次登入的 user_id（供 cross-user 偵測比對）| string |
-| `nlweb_large_font` | 大字體模式（device-scoped）| boolean |
-| `nlweb_kg_hidden` | 知識圖譜隱藏（device-scoped）| boolean |
+| ~~`lastUserId`~~ | ~~最近一次登入的 user_id~~ — live static 零引用，已不存在（2026-07-10 校正）| string |
+| `nlweb-large-font` | 大字體模式（device-scoped；連字號為實際 key）| boolean |
+| `nlweb-kg-hidden` | 知識圖譜隱藏（device-scoped；連字號為實際 key）| boolean |
 | `nlweb_session_id` | Session ID | string |
 | `authUser` | 登入使用者基本資料 | JSON |
 | `authAccessToken` | 存取 token | string |
 
 **User-scoped vs Device-scoped（5/01 update）**：
 
-`AuthManager.USER_SCOPED_KEYS` 列出 6 個須在 cross-user 切換 / logout / auth-failure 時清除的 key（含 `taiwanNewsSavedSessions`、`taiwanNewsFolders`、`taiwanNewsSourceFolders`、`taiwanNewsFileFolders`、`taiwanNewsSelectedFiles`、`taiwanNewsSessionsMigrated`）。`nlweb_large_font`、`nlweb_kg_hidden` 等 **device-scoped UI 偏好刻意不在清除清單**，跨用戶共用裝置仍保留偏好。詳見 §4.2.6 Cross-User 隔離。
+`AuthManager.USER_SCOPED_KEYS` 列出 6 個須在 cross-user 切換 / logout / auth-failure 時清除的 key：`taiwanNewsSavedSessions`、`taiwanNewsFolders`、`taiwanNewsSessionsMigrated`、`nlweb_source_folders`、`nlweb_file_folders`、`nlweb_selected_files`（`auth-manager.js:79-86`，2026-07-10 對 code 校正）。`nlweb_large_font`、`nlweb_kg_hidden` 等 **device-scoped UI 偏好刻意不在清除清單**，跨用戶共用裝置仍保留偏好。詳見 §4.2.6 Cross-User 隔離。
 
 ### 10.2 Session 資料結構
 
@@ -1073,7 +1075,7 @@ function initSidebarDragDelegation() {
 
 ### 10.3 Init Sync Architecture（2026-05-13 update）
 
-> **背景**：取代 2026-04-29 ~ 05-08 之間 9 個 case-by-case cross-user leak patch（commits `5ff8947` → `e0b5a41`），改為 single sync flow。詳見 D-2026-05-13 + `docs/in progress/plans/frontend-init-sync-refactor-plan.md` + `memory/lessons-frontend.md`「Frontend Init Sync — Architectural Refactor（2026-05-13）」段。
+> **背景**：取代 2026-04-29 ~ 05-08 之間 9 個 case-by-case cross-user leak patch（commits `5ff8947` → `e0b5a41`），改為 single sync flow。詳見 D-2026-05-13 + `docs/archive/plans/frontend-init-sync-refactor-plan.md`（已歸檔）+ `memory/lessons-frontend.md`「Frontend Init Sync — Architectural Refactor（2026-05-13）」段。
 
 **核心 invariant**：`cache.user_id == JWT.user_id`。前端 user-scoped state 只允許在以下 7 個 sync trigger 透過 `UserStateSync` module 寫入，其他寫入點視為 bug：
 
@@ -1114,6 +1116,8 @@ function initSidebarDragDelegation() {
 ## 附錄 A：函數索引
 
 > **v4.0 注意**：函數所在位置已從單體 news-search.js 分散至 21 個 ES module。標注模組位置；news-search.js 殘留的保留函數以「stub」標記。
+>
+> **⚠️ 位置標注漂移（2026-07-10 校正註）**：下方多處「news-search.js stub」標注已隨後續 commits 遷移至 feature module，實測至少 14 處：`performFreeConversation`→chat.js、`cancelActiveSearch`/`setProcessingState`/`createArticleCard`/`renderArticlesProgressive`/`renderAnswerProgressive`→search.js、`displayReasoningChain`/`addToggleAllToolbar`/`generateCitationReferenceList`/`updateReasoningProgress`→deep-research.js、`renderSourceTreeView`→source-filters.js、`saveCurrentSession`→core/session-coordinator.js（commit 23）、`deleteSavedSession`→sessions-list.js（commit 22）、`showFolderPage`→folders.js。**查函數實際位置以 indexer / grep 為準，勿信本附錄的 stub 標注**。
 
 ### 搜尋相關
 - `performSearch()` - 執行新聞搜尋（`features/search.js`）
@@ -1209,4 +1213,4 @@ const RESEARCH_MODES = {
 
 ---
 
-*最後更新：2026-05-25（Frontend Modular Refactor v4.0 Path A++ 完成：§2 檔案結構全面重寫 + §2.4 D-V3/D-V6/D-V14/AC contracts 新增 + §1 架構概覽更新 + §10.3 UserStateSync 位置更新 + 附錄 A 函數模組位置標注）*
+*最後更新：2026-07-10（spec drift reconcile — §6.1 feedback 端點 `/api/feedback`→`/api/help/feedback`，對齊 `webserver/routes/help.py` 實際註冊）。先前更新：2026-05-25（Frontend Modular Refactor v4.0 Path A++ 完成：§2 檔案結構全面重寫 + §2.4 D-V3/D-V6/D-V14/AC contracts 新增 + §1 架構概覽更新 + §10.3 UserStateSync 位置更新 + 附錄 A 函數模組位置標注）*

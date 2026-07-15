@@ -41,8 +41,6 @@ class RelevanceDetection(PromptRunner):
                 message = {"message_type": "site_is_irrelevant_to_query", "message": self.explanation_for_irrelevance}
                 self.handler.query_is_irrelevant = True
                 self.handler.query_done = True
-                # Centralized abort checking will handle setting the event
-                self.handler.state.abort_fast_track_if_needed()
                 asyncio.create_task(self.handler.send_message(message))
             else:
                 # log_only mode: log the detection but do NOT block the query

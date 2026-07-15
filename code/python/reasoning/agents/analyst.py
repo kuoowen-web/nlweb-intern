@@ -42,7 +42,9 @@ class AnalystAgent(BaseReasoningAgent):
         enable_web_search: bool = False,
         previous_draft: Optional[str] = None,  # SEC-6 Phase 1
         enable_live_research: bool = False,  # Task 4: Live Research B context injection
-        context_map_summary: Optional[str] = None  # Task 4: ContextMap summary for injection
+        context_map_summary: Optional[str] = None,  # Task 4: ContextMap summary for injection
+        retrieval_evidence: Optional[str] = None,  # 防線二：gap 分類證據注入
+        final_pass: bool = False  # 防線四：最後一輪強制 best-effort 寫稿
     ) -> AnalystResearchOutput:
         """
         Enhanced research with optional argument graph generation and knowledge graph.
@@ -86,7 +88,9 @@ class AnalystAgent(BaseReasoningAgent):
             enable_web_search=enable_web_search,  # Stage 5
             previous_draft=previous_draft,  # SEC-6 Phase 1
             enable_live_research=enable_live_research,  # Task 4: Live Research
-            context_map_summary=context_map_summary  # Task 4: B context injection
+            context_map_summary=context_map_summary,  # Task 4: B context injection
+            retrieval_evidence=retrieval_evidence,  # 防線二
+            final_pass=final_pass  # 防線四
         )
 
         # Choose schema based on feature flags (dynamic schema selection)
@@ -135,6 +139,7 @@ class AnalystAgent(BaseReasoningAgent):
         query: str = None,
         enable_kg: bool = False,  # B9: match research() schema selection
         enable_live_research: bool = False,  # B9: match research() schema selection
+        final_pass: bool = False,  # 防線四（修訂 3）：最後一輪 revise 也強制寫稿
     ) -> AnalystResearchOutput:
         """
         Revise draft based on critic's feedback.
@@ -166,7 +171,8 @@ class AnalystAgent(BaseReasoningAgent):
             original_draft=original_draft,
             review=review,
             formatted_context=formatted_context,
-            original_query=query
+            original_query=query,
+            final_pass=final_pass  # 防線四（修訂 3）
         )
 
         # Choose schema based on feature flags (dynamic schema selection)

@@ -13,10 +13,12 @@ class NoValidSourcesError(Exception):
 
 class SourceTierFilter:
     """
-    Hard filter implementing tier-based filtering and content enrichment.
+    Pass-through source handler (tier-based filtering removed 2026-06).
 
-    Filters sources based on mode configuration and enriches items
-    with tier metadata and prefixes.
+    filter_and_enrich() is now a no-op pass-through: the Tier 1-5 authority
+    grading / enrichment and the empty-source hard filter have both been
+    removed. The tier helper methods below are retained for signature
+    compatibility with callers that still probe tier metadata.
     """
 
     def __init__(self, source_tiers: Dict[str, Dict[str, Any]]):
@@ -69,14 +71,12 @@ class SourceTierFilter:
 
         Returns:
             The items unchanged (no enrichment, no hard filtering).
-
-        Raises:
-            NoValidSourcesError: If no items are available at all.
         """
-        # Empty-source guardrail retained (upstream issue, not mode filtering).
-        if not items:
-            raise NoValidSourcesError("No valid sources available")
-
+        # Empty-source guardrail removed (§v5): source-tier mechanism is gone,
+        # filter is pure pass-through and never filters to empty. An empty input
+        # means upstream retrieval genuinely returned 0 sources — that case must
+        # flow to the orchestrator β-path (zero-results web backfill), NOT be
+        # short-circuited here. See _phase_filter_and_prepare :598 branch.
         return items
 
     def _get_tier_info(self, source: str) -> Dict[str, Any]:

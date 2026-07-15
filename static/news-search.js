@@ -72,7 +72,7 @@ import {
     populateResultsFromAPI, showMemoryNotification, showTimeFilterRelaxedWarning,
     showLowRelevanceWarning, showLowKeywordMatchWarning,
     showSummaries, hideSummaries
-} from './js/features/search.js?v=20260705c';
+} from './js/features/search.js?v=20260714a';
 // v4.0 Commit 3 (2026-05-24) — chatHistory.
 // v4.0 Commit 17 (2026-05-25, Phase 8): 13 chat function bodies MIGRATED.
 //   - performFreeConversation (main entry — POST /ask streaming for free-chat with research context)
@@ -93,7 +93,7 @@ import {
     truncateText, scrollToMessage, togglePinnedDropdown, closePinnedDropdown,
     initPinnedBanner,
     togglePinNewsCard, updateNewsCardPinState, renderPinnedNewsList
-} from './js/features/chat.js?v=20260705c';
+} from './js/features/chat.js?v=20260714a';
 // Re-bridge for search.js performSearch chat-mode delegate path. Sweep commit 25.
 window.performFreeConversation = performFreeConversation;
 // v4.0 Commit 4 (2026-05-24) — pin pair (pinnedMessages / pinnedNewsCards).
@@ -107,6 +107,11 @@ import {
     getArgumentGraph, setArgumentGraph, clearArgumentGraph,
     getChainAnalysis, setChainAnalysis, clearChainAnalysis
 } from './js/features/research.js';
+// [R10] reload research report 來源選擇 helper——獨立無副作用 module（test 可 import、不炸 browser globals）。
+// [R10 nit 確認] news-search.js（消費端）**import** 此 helper 但**不 re-export**（無 export { pickResearchReportSource }）——
+//   test 直接 import 獨立 module `./js/features/dr-restore-source.js`（見 reload-restore-source.test.js），
+//   不從 news-search.js re-export 點 import（否則 test 會連帶拉到 app-shell → ReferenceError: localStorage）。
+import { pickResearchReportSource } from './js/features/dr-restore-source.js';
 // v4.0 Commit 6 (2026-05-24) — shareContentOverride (sharing modal explicit override).
 // v4.0 Commit 18 (2026-05-25, Phase 8): 8 sharing/export function bodies MIGRATED.
 //   Export builders: cleanHTMLContent, getTop10Articles, formatPlainText,
@@ -155,7 +160,7 @@ import {
     bumpLRSwitchToken,
     // v3 LR dialog snapshot — feed loaded snapshot to restore for stage-toggle replay
     setLRLoadedSnapshot,
-} from './js/features/live-research.js?v=20260705c';
+} from './js/features/live-research.js?v=20260714a';
 // Re-bridge performLiveResearch onto window so features/search.js performSearch
 // LR mode delegate can still find it via window.performLiveResearch. Sweep target
 // commit 25 final cleanup when search.js imports it directly.
@@ -295,7 +300,7 @@ import {
     createCriticalNodesAlert, renderArgumentNode, setupHoverInteractions,
     inferScore, formatReasoningForVerification,
     getCurrentResearchQueryId, setCurrentResearchQueryId, clearCurrentResearchQueryId
-} from './js/features/deep-research.js?v=20260705c';
+} from './js/features/deep-research.js?v=20260715b';
 
         // v4.0 Commit 15 (2026-05-25, Phase 8): re-bridge deep-research.js exports to
         //   window so features/search.js performSearch (DR mode delegate) can reach them
@@ -320,11 +325,14 @@ import {
 import {
     displayKnowledgeGraph,
     getCurrentKGData, getKGEditMode, resetKGState
-} from './js/features/knowledge-graph.js?v=20260705c';
+} from './js/features/knowledge-graph.js?v=20260714a';
 // Re-bridge so features/deep-research.js can still reach via window. Sweep commit 25
 // when deep-research.js direct-imports from knowledge-graph.js.
 window.displayKnowledgeGraph = displayKnowledgeGraph;
 window.__getCurrentKGData = getCurrentKGData;
+// [R7 should-fix] 供 deep-research.js Step 0c 清 stale KG state（push snapshot 前本次缺 KG → resetKGState()，
+//   非 displayKnowledgeGraph(null)——後者 early-return 不清 _currentKGData）。
+window.__resetKGState = resetKGState;
 
         // ==================== USER STATE SYNC HELPERS ====================
         // v4.0 Commit 11 (2026-05-24): UserStateSyncError class + assertUserIdentity function
@@ -2600,6 +2608,11 @@ window.__getCurrentKGData = getCurrentKGData;
                             pinnedMessages: s.pinned_messages ?? s.pinnedMessages ?? [],
                             pinnedNewsCards: s.pinned_news_cards ?? s.pinnedNewsCards ?? [],
                             researchReport: s.research_report ?? s.researchReport ?? null,
+                            // [R7 BLOCKER1] KG 也 server 權威：把 server research_report 內的 knowledgeGraph
+                            //   拉到 session.knowledgeGraph sibling（KG 消費端讀 sibling，非 researchReport 內）。
+                            //   server 存進 research_report JSONB 的是 camelCase knowledgeGraph（Task 7 report_obj），
+                            //   hydrate 整包搬 research_report 不轉 key → s.research_report.knowledgeGraph 即那個 camelCase。
+                            knowledgeGraph: s.research_report?.knowledgeGraph ?? s.researchReport?.knowledgeGraph ?? null,
                             conversationId: s.conversation_id ?? s.conversationId ?? null,
                             // G3：live_research_state 含 schema_version，供 legacy session gate 使用
                             liveResearchState: s.live_research_state ?? s.liveResearchState ?? null,
@@ -2702,28 +2715,31 @@ window.__getCurrentKGData = getCurrentKGData;
             setCurrentResearchQueryId(session.researchQueryId || null);
 
             // Restore Deep Research report for follow-up Q&A
-            // Prefer per-entry snapshot from sessionHistory (supports multiple DR reports);
-            // fall back to top-level session.researchReport for backward compatibility.
-            const lastDREntry = [...getSessionHistory()].reverse().find(e => e.isDeepResearch && e.researchReport);
-
-            if (lastDREntry) {
-                setResearchReport({ ...lastDREntry.researchReport });
-                setArgumentGraph(lastDREntry.argumentGraph ? [...lastDREntry.argumentGraph] : null);
-                setChainAnalysis(lastDREntry.chainAnalysis ? { ...lastDREntry.chainAnalysis } : null);
-                console.log('[Session] Restored research report from getSessionHistory() entry:', getResearchReport().report?.substring(0, 100) + '...');
+            // [R5 BLOCKER2] reload 還原優先序反轉：登入用戶的 server top-level research_report 為權威，
+            //   優先於 nested sessionHistory[].researchReport（後者 client 控制、可能 stale）。
+            //   :2602 已把 server research_report hydrate 進 session.researchReport。
+            // [R7 BLOCKER2] 判準用「server report 有 .report 字串內容」（非 truthiness——空 {} 誤走 server 分支會清空報告）。
+            // [R10] 來源選擇（含 .report predicate + 四者同源決策 + KG 三層 fallback）全委給 pickResearchReportSource
+            //   （dr-restore-source.js，純函式）——Step 2b 只從 helper 一次拿 report/graph/chain/KG、不再各自分支選
+            //   （防分源 drift：R7 KG 分源踩過的坑）。四者從單一 origin 決策 → server 有效 → 四者全 server；nested → 全 nested。
+            // 治 C4：nested 進不進 server 都不影響登入用戶（server 權威），匿名用戶仍靠 nested。
+            const fallbackDREntry = [...getSessionHistory()].reverse().find(e => e.isDeepResearch && e.researchReport);
+            const restored = pickResearchReportSource(session, fallbackDREntry);  // [R10] 一次回全：{origin, report, argumentGraph, chainAnalysis, knowledgeGraph}
+            if (restored.origin !== 'none') {
+                setResearchReport({ ...restored.report });
+                setArgumentGraph(restored.argumentGraph ? [...restored.argumentGraph] : null);
+                setChainAnalysis(restored.chainAnalysis ? { ...restored.chainAnalysis } : null);
+                // KG 由下方 Step 2b-KG 的 displayKnowledgeGraph(restored.knowledgeGraph) 消費（同一 restored 物件、四者同源）。
+                const _src = restored.origin === 'server' ? 'SERVER top-level (authoritative)' : 'nested sessionHistory entry (fallback, no server value)';
+                console.log(`[Session] Restored research report from ${_src}:`, getResearchReport().report?.substring(0, 100) + '...');
                 if (getArgumentGraph()) {
                     console.log('[Session] Restored argument graph with', getArgumentGraph().length, 'nodes');
                 }
-            } else if (session.researchReport) {
-                // Backward compat: old saved sessions without per-entry snapshots
-                setResearchReport({ ...session.researchReport });
-                setArgumentGraph(session.researchReport?.argumentGraph ? [...session.researchReport.argumentGraph] : null);
-                setChainAnalysis(session.researchReport?.chainAnalysis ? { ...session.researchReport.chainAnalysis } : null);
-                console.log('[Session] Restored research report from top-level (legacy):', getResearchReport().report?.substring(0, 100) + '...');
             } else {
                 clearResearchReport();
                 clearArgumentGraph();
                 clearChainAnalysis();
+                // KG：restored.knowledgeGraph 仍可能有 legacy session.knowledgeGraph（should-fix1），由 Step 2b-KG 判斷是否 display。
             }
 
             // 先重置 UI 到首頁狀態（resets mode to search, clears all containers, resets tabs to list)
@@ -2861,10 +2877,14 @@ window.__getCurrentKGData = getCurrentKGData;
                     }
                 }
 
-                // Restore Knowledge Graph if available (prefer per-entry, fallback to top-level)
-                // Don't overwrite KG if user is currently editing
-                // v4.0 Commit 21 (2026-05-25): kgEditMode read via getKGEditMode().
-                const kgSource = lastDREntry?.knowledgeGraph || session.knowledgeGraph;
+                // Restore Knowledge Graph if available
+                // [R7 BLOCKER1 / R10] KG server 權威優先——但來源選擇已收進 Step 2b 的 pickResearchReportSource helper
+                //   （restored.knowledgeGraph = server → nested → legacy session.knowledgeGraph 三層 fallback，四者同源）。
+                //   本 Step 不再自己走三層 selector（那會與 Step 2b 的 origin 決策重複、drift——R7 KG 分源踩過的坑）。
+                //   直接讀 helper 回的 restored.knowledgeGraph → report/graph/chain/KG 四者從單一 origin 決策、保證同源。
+                //   [R8 should-fix1] legacy session.knowledgeGraph 尾巴保留在 helper 三層 fallback 內（不漏）。
+                // Don't overwrite KG if user is currently editing. v4.0 Commit 21: kgEditMode read via getKGEditMode().
+                const kgSource = restored.knowledgeGraph;  // [R10] 從 Step 2b helper 回的四者之一（含三層 fallback）
                 if (kgSource && !getKGEditMode()) {
                     displayKnowledgeGraph(kgSource);
                 }

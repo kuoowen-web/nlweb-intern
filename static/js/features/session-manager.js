@@ -144,7 +144,8 @@ export class SessionManager {
                             accumulated_articles: session.accumulatedArticles,
                             pinned_messages: session.pinnedMessages,
                             pinned_news_cards: session.pinnedNewsCards,
-                            research_report: session.researchReport,
+                            // [R2] B4：DR research_report 為 server 單一權威、前端只讀不寫——
+                            //   移除 PUT/POST body 的 research_report（含 route strip 結構性堵，見 Task 8b）。
                             conversation_id: session.conversationId,
                             lr_dialog_snapshot: session.lrDialogSnapshot,
                         })
@@ -182,7 +183,8 @@ export class SessionManager {
                             accumulated_articles: session.accumulatedArticles,
                             pinned_messages: session.pinnedMessages,
                             pinned_news_cards: session.pinnedNewsCards,
-                            research_report: session.researchReport,
+                            // [R2] B4：DR research_report 為 server 單一權威、前端只讀不寫——
+                            //   移除 PUT/POST body 的 research_report（含 route strip 結構性堵，見 Task 8b）。
                             conversation_id: session.conversationId,
                             lr_dialog_snapshot: session.lrDialogSnapshot,
                         })

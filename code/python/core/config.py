@@ -98,6 +98,7 @@ class NLWebConfig:
     required_info_enabled: bool = True  # Enable or disable required info checking
     aggregation_enabled: bool = False  # Enable or disable aggregation functionality
     who_endpoint_enabled: bool = True  # Enable or disable the who endpoint
+    prompt_default_fallback_enabled: bool = False  # find_prompt matched-site miss -> fallback to Site id="default" (startup-only)
     api_keys: Dict[str, str] = field(default_factory=dict)  # API keys for external services
     who_endpoint: str = "http://localhost:8000/who"  # Endpoint for /who requests
 
@@ -514,7 +515,10 @@ class AppConfig:
         
         # Load who endpoint enabled flag
         who_endpoint_enabled = self._get_config_value(data.get("who_endpoint_enabled"), True)
-        
+
+        # Load prompt default fallback enabled flag (startup-only, default off)
+        prompt_default_fallback_enabled = self._get_config_value(data.get("prompt_default_fallback_enabled"), False)
+
         # Load who_endpoint from config
         who_endpoint = self._get_config_value(data.get("who_endpoint"), "http://localhost:8000/who")
 
@@ -551,6 +555,7 @@ class AppConfig:
             required_info_enabled=required_info_enabled,
             aggregation_enabled=aggregation_enabled,
             who_endpoint_enabled=who_endpoint_enabled,
+            prompt_default_fallback_enabled=prompt_default_fallback_enabled,
             api_keys=api_keys,
             who_endpoint=who_endpoint
         )
@@ -669,7 +674,11 @@ class AppConfig:
     def is_who_endpoint_enabled(self) -> bool:
         """Check if the who endpoint is enabled."""
         return self.nlweb.who_endpoint_enabled if hasattr(self, 'nlweb') else True
-    
+
+    def is_prompt_default_fallback_enabled(self) -> bool:
+        """Check if find_prompt should fall back to Site id="default" on matched-site miss (startup-only flag)."""
+        return self.nlweb.prompt_default_fallback_enabled if hasattr(self, 'nlweb') else False
+
     def load_sites_config(self, path: str = "sites.xml"):
         """Load site configurations from XML file."""
         # Build the full path to the config file using the config directory

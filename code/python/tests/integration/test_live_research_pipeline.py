@@ -143,9 +143,9 @@ def _make_handler() -> MagicMock:
     handler.message_sender.send_message = AsyncMock()
     handler.connection_alive_event = MagicMock()
     handler.connection_alive_event.is_set = MagicMock(return_value=True)
-    # request_handler: connection alive (for 3-signal check in BABLoopEngine)
-    handler.request_handler = MagicMock()
-    handler.request_handler.connection_alive = True
+    # http_handler: connection alive (for 3-signal check in BABLoopEngine)
+    handler.http_handler = MagicMock()
+    handler.http_handler.connection_alive = True
     # No soft interrupt — use None so _check_connection doesn't trigger it
     handler._soft_interrupt_event = None
     handler.query_params = {}

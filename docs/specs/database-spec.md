@@ -32,7 +32,7 @@
 
 `CREATE EXTENSION pgvector` / `pg_bigm` 需要 superuser 權限、且 alembic offline mode 與 extension upgrade 不便。container entrypoint（`/docker-entrypoint-initdb.d/init.sql`）跑剛好 — 只在 volume 第一次 init 時跑一次。Extension 版本管理屬基礎建設層，與業務 schema 解耦。
 
-### Migration 鏈（截至 2026-05-13）
+### Migration 鏈（截至 2026-06-19）
 
 ```
 9df501ad9a13  baseline_auth_tables                    （Sprint 1 auth tables × 6）
@@ -49,10 +49,12 @@ e39a746fb916  align_users_schema_with_initialize      （users 補 email_verific
     │
 1015e1c40f88  phase_b_align_vps_schema                （Phase 1.5：bootstrap_tokens 收編 + audit_logs uuid/jsonb + org.plan NOT NULL/DEFAULT + session partial index）
     │
-7c2f4ae6b1d3  phase_b_collect_feedbacks_faqs          （Phase 2.5：feedbacks + faqs 收編，HEAD）
+7c2f4ae6b1d3  phase_b_collect_feedbacks_faqs          （Phase 2.5：feedbacks + faqs 收編）
+    │
+9863ee09ce82  add_lr_dialog_snapshot_column           （search_sessions 收編 lr_dialog_snapshot JSONB 欄位，2026-06-19，HEAD）
 ```
 
-`alembic current` 預期回 `7c2f4ae6b1d3 (head)`。
+`alembic current` 預期回 `9863ee09ce82 (head)`。
 
 ---
 
@@ -204,7 +206,7 @@ async def initialize(self):
 |------|------|----------|------|
 | **Search** | articles, chunks | alembic `b5e9d3f71a42` | 生產中 |
 | **Auth** | organizations, users, org_memberships, invitations, refresh_tokens, login_attempts | alembic `9df501ad9a13` + `e39a746fb916` + `1015e1c40f88`（org.plan） | 生產中 |
-| **Session** | search_sessions, org_folders, org_folder_sessions, session_shares, user_preferences | alembic `c1c6deac2013` + `1015e1c40f88`（partial index） | 生產中 |
+| **Session** | search_sessions, org_folders, org_folder_sessions, session_shares, user_preferences | alembic `c1c6deac2013` + `1015e1c40f88`（partial index） + `9863ee09ce82`（search_sessions.lr_dialog_snapshot JSONB 欄位收編） | 生產中 |
 | **Audit** | audit_logs | alembic `a3f8c2e51d07` + `1015e1c40f88`（uuid/jsonb） | 生產中 |
 | **Bootstrap onboarding** | bootstrap_tokens | alembic `1015e1c40f88` 收編 | 生產中 |
 | **Feedback / FAQ** | feedbacks, faqs | alembic `7c2f4ae6b1d3` 收編 | 生產中 |
@@ -214,11 +216,15 @@ async def initialize(self):
 **詳細欄位定義** 見：
 - Auth / Session / Audit：`docs/specs/login-spec.md`
 - Analytics：`docs/specs/analytics-spec.md`
-- Search（articles/chunks/HNSW）：`docs/specs/indexing-spec.md` + `docs/specs/bm25-spec.md`
+- Search（articles/chunks/HNSW）：`docs/specs/indexing-spec.md`（🪦 `bm25-spec.md` 已歸檔至 `docs/archive/specs/`，描述的 Python BM25 已退役，現行全文匹配為 pg_bigm）
 
 ---
 
 ## History
+
+### 2026-07-10 Spec reconcile：alembic head 更新
+
+migration 鏈末端補 `9863ee09ce82`（`add_lr_dialog_snapshot_column`，down_revision=`7c2f4ae6b1d3`，2026-06-19），「預期 head」由 `7c2f4ae6b1d3` 更正為 `9863ee09ce82`，Session 分類補該 migration 對 `search_sessions.lr_dialog_snapshot` 欄位的收編。對齊實際 alembic head。
 
 ### 2026-05-20 Phase 5 follow-up：deploy.yml schema-init race 修
 

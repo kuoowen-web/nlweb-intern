@@ -29,8 +29,6 @@ import core.query_analysis.required_info as required_info
 import traceback
 import core.query_analysis.relevance_detection as relevance_detection
 import core.query_analysis.prompt_guardrails as prompt_guardrails
-import core.fastTrack as fastTrack
-from core.fastTrack import site_supports_standard_retrieval
 import core.post_ranking as post_ranking
 import core.router as router
 from core.state import NLWebHandlerState
@@ -45,7 +43,51 @@ logger = get_configured_logger("nlweb_handler")
 # Analytics logging
 from core.query_logger import get_query_logger
 
+# Sites that don't support standard vector retrieval
+# (moved here from the removed dead retrieval-shortcut module, 2026-07)
+NO_STANDARD_RETRIEVAL_SITES = ["datacommons", "all", "conv_history", "CricketLens", "cricketlens", "cricketlens.com"]
+
+def site_supports_standard_retrieval(site):
+    """Check if a site supports standard vector database retrieval"""
+    # If site is "all" and aggregation is disabled, treat it as supporting standard retrieval
+    if site == "all" and not CONFIG.is_aggregation_enabled():
+        logger.debug("Site is 'all' with aggregation disabled - treating as standard retrieval")
+        return True
+    return site not in NO_STANDARD_RETRIEVAL_SITES
+
 API_VERSION = "0.1"
+
+
+def _resolve_trusted_identity(query_params, http_handler):
+    """Resolve (user_id, org_id) preferring the server-injected JWT identity.
+
+    L2 single-source（拍板 1）：identity 一律優先採 middleware 放進
+    request['user'] 的可信值，client 傳的 query_params['user_id'] 只在
+    「沒有可信 request 身分」時 fallback（非 streaming / from_message 路徑）。
+
+    優先序：
+      1. http_handler.request['user'] 且 authenticated → 用其 id / org_id
+         （覆蓋任何 client 偽造的 user_id / org_id）
+      2. 否則 → get_param(query_params, ...)（維持既有行為）
+
+    Returns (user_id, org_id)。org_id 允許為 None（合法無 org user）。
+    """
+    request = getattr(http_handler, "request", None)
+    if request is not None:
+        try:
+            user = request.get("user")
+        except AttributeError:
+            user = None
+        if user and user.get("authenticated"):
+            # server 端可信身分：直接採用，覆蓋 client 值
+            return user.get("id"), user.get("org_id")
+
+    # Fallback：沒有可信 request 身分（wrapper=None / 無 request / 未認證）
+    return (
+        get_param(query_params, "user_id", str, None),
+        get_param(query_params, "org_id", str, None),
+    )
+
 
 class NLWebHandler:
 
@@ -111,8 +153,12 @@ class NLWebHandler:
         include_private_sources = get_param(self.query_params, "include_private_sources", str, "false")
         self.include_private_sources = include_private_sources not in ["False", "false", "0", None]
 
-        self.user_id = get_param(self.query_params, "user_id", str, None)
-        self.org_id = get_param(self.query_params, "org_id", str, None)
+        # L2 single-source（拍板 1）：identity 優先採 server 注入的可信身分
+        # （request['user']），client 傳的 query_params['user_id'] 只在無可信
+        # 身分時 fallback。堵住偽造 user_id/org_id 撈別人私有文件（P0）。
+        self.user_id, self.org_id = _resolve_trusted_identity(
+            self.query_params, self.http_handler
+        )
 
         self.item_type = siteToItemType(self.site)
         self.required_item_type = get_param(self.query_params, "required_item_type", str, None)
@@ -141,8 +187,6 @@ class NLWebHandler:
         self.tool_routing_results = []
         self.state = NLWebHandlerState(self)
 
-        self.fastTrackRanker = None
-        self.fastTrackWorked = False
         self.sites_in_embeddings_sent = False
 
         self.return_value = {}
@@ -155,7 +199,6 @@ class NLWebHandler:
         self.retrieval_done_event = asyncio.Event()
         self.connection_alive_event = asyncio.Event()
         self.connection_alive_event.set()  # Initially alive
-        self.abort_fast_track_event = asyncio.Event()
         self._state_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
 
@@ -302,10 +345,9 @@ class NLWebHandler:
             await self.prepare()
             if (self.query_done):
                 return self.return_value
-            if (not self.fastTrackWorked):
-                await self.route_query_based_on_tools()
-            
-            # Check if query is done regardless of whether FastTrack worked
+            await self.route_query_based_on_tools()
+
+            # Check if query is done
             if (self.query_done):
                 return self.return_value
 
@@ -384,8 +426,6 @@ class NLWebHandler:
         tasks = []
 
         tasks.append(asyncio.create_task(self.decontextualizeQuery().do()))
-        # FastTrack disabled - all searches now use regular path for unified vector/MMR handling
-        # tasks.append(asyncio.create_task(fastTrack.FastTrack(self).do()))
         tasks.append(asyncio.create_task(query_understanding.QueryUnderstanding(self).do()))
 
         # Check if a specific tool is requested via the 'tool' parameter
@@ -655,7 +695,7 @@ class NLWebHandler:
                     try:
                         await self.message_sender.send_message({
                             "message_type": "author_search_no_results",
-                            "content": f"在目前的搜尋範圍中找不到作者「{author_name}」的文章，請嘗試限縮資料來源再搜尋"
+                            "content": f"在目前的資料庫中找不到作者「{author_name}」的文章。若確有此人，可能其文章尚未被收錄。"
                         })
                     except Exception as e:
                         logger.warning(f"Failed to send author_search_no_results message: {e}")
@@ -746,7 +786,7 @@ class NLWebHandler:
 
         if tool.handler_class:
             try:
-                # For non-search tools, clear any items that FastTrack might have populated
+                # For non-search tools, clear any previously populated items
                 if tool_name != "search":
                     self.final_retrieved_items = []
                     self.retrieved_items = []

@@ -4,8 +4,10 @@ Deep Research Orchestrator - Coordinates the Actor-Critic reasoning loop.
 
 import asyncio
 import json
+import re
 import sentry_sdk
 import time
+import types
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from urllib.parse import quote
@@ -22,6 +24,11 @@ from reasoning.orchestrator_base import OrchestratorBase, ResearchCancelledError
 
 
 logger = get_configured_logger("reasoning.orchestrator")
+
+
+def _normalize_web_query(q: str) -> str:
+    """dedup key normalize：strip + 內部 whitespace collapse + casefold。集中一處避免各點不一致。"""
+    return re.sub(r"\s+", " ", (q or "").strip()).casefold()
 
 
 # === KG Editing: ResearchState cache for selective re-run ===
@@ -84,6 +91,20 @@ class DeepResearchOrchestrator(OrchestratorBase):
     Coordinates the iterative loop between Analyst (Actor) and Critic,
     then uses Writer to format the final report.
     """
+
+    # §v5: user-facing 文案，繁中、無內部用詞（mode 名 / discovery / strict）、誠實。
+    # 此為深層防線（dead catch）文案——0 筆正常情境走 β-path，補不到落
+    # _create_no_results_response（那才是使用者實際會看到的主文案）；此 catch
+    # 只在非預期地拋 NoValidSourcesError 才顯示。
+    # 措辭刻意不假設「網路已搜過」——此 catch 可能在 web search 未實際嘗試就觸發
+    # （Codex AR Round 1）。故只說「沒有可用來源能支撐研究報告」，不宣稱已試過網路。
+    _NO_VALID_SOURCES_MESSAGE = (
+        "很抱歉，這次沒有可用來源能支撐研究報告，因此無法產出結果。\n\n"
+        "建議您：\n"
+        "1. 換個關鍵詞或更具體的描述再試一次\n"
+        "2. 確認問題中的人名、機構名或事件名稱是否正確\n"
+        "3. 稍後再試（部分即時資料可能尚未收錄）"
+    )
 
     def __init__(self, handler: Any):
         """
@@ -418,6 +439,134 @@ class DeepResearchOrchestrator(OrchestratorBase):
         # 8. Web grounding fetched -> caller proceeds to Actor-Critic.
         return True
 
+    async def _resolve_web_search_gaps_in_loop(
+        self,
+        response: Any,
+        mode: str,
+        state: 'ResearchState',
+        enable_web_search: bool,
+        web_searched_queries: set,
+        tracer: Any = None,
+        query_id: str = None,
+    ) -> bool:
+        """防線三：在 actor-critic loop 內，把 response 的 web_search 類 gap_resolutions
+        兌現成真正的 Google 呼叫，不論 response.status 是 SEARCH_REQUIRED 還是 DRAFT_READY。
+
+        起因：Analyst 可能同一次輸出 status=SEARCH_REQUIRED（驅動站內 secondary search）
+        + gap_resolutions[web_search]（該上網查的具名實體）。orchestrator 的
+        SEARCH_REQUIRED 分支會在抵達主路徑 :846 _process_gap_resolutions 之前 continue 掉，
+        導致 web_search gap 永遠不被兌現（高端訓 zero-Google bug）。此 helper 在 SEARCH_REQUIRED
+        分支入口先把 web_search gap 兌現，讓 web source 與站內 secondary source 同迭代合流。
+
+        復用既有 _process_gap_resolutions 引擎（同 v1 β-path 的 reuse-not-fork）。
+        **隱性契約**：本 helper 依賴 _process_gap_resolutions 只讀 response.gap_resolutions
+        （:2034 迴圈），故餵一個只帶 gap_resolutions 的 SimpleNamespace 即可；若未來
+        _process_gap_resolutions 開始讀 response 的其他欄位（status/draft/...），此處會漏傳、需同步。
+
+        R3 記帳集中（Gemini nit：dedup 互動精確描述）：normalize / response 內部去重 / 跨路徑 dedup /
+        cap / mark 五件事**全部由引擎 _process_gap_resolutions 的 web gap 收集迴圈（:2034-2058）做**
+        （Step 4a），**helper 完全不讀也不寫 web_searched_queries**（純委派，只把 set 傳穿透給引擎）。
+        引擎收集迴圈的順序（每個 web gap 依序）：(1) _normalize_web_query 產 key → (2) 命中 response 內部
+        seen set 則 skip → (3) 命中跨路徑 web_searched_queries 則 skip → (4) 達 cap 則 skip →
+        (5) 通過才 append 進 web_search_gaps 並同時把 key add 進兩個 set（response 內部 + 跨路徑）。
+        - dedup：web_searched_queries 跨迭代持久 + 跨路徑共享（DRAFT_READY :857 主路徑用同一 set），
+          同一 normalize 後 key 全 session 只打一次 Google（跨路徑防「helper 打一次、DRAFT_READY 再打一次」）。
+        - cap：run 級 hard cap（tier_6.gap_routing.max_external_calls_per_run，沿用 LR 鍵），
+          `len(web_searched_queries)` >= cap 時不再收新 distinct web query、visible log（cap_skipped）
+          （每 accept 同步 mark，故 len(set) 即時含 prior + 本輪已 accept，不 double-count）。
+        - mark：引擎在收集決定送出 web gap 的當下 add（步驟 5），**不在被 mock 的 _execute_web_searches**
+          （Codex B2：故 mock _execute_web_searches 的測試依然穩定，set 仍被正確寫）。
+          trade-off（in-house nit）：_execute_web_searches try/except 降級（:2303-2306 log-only）
+          時 query 已被 mark、本 run 不重試——換取「測試穩定（mark 在未被 mock 的收集迴圈）」
+          與「防額度迴圈（異常不重打同 query）」；下游降級有 visible warning log，不 silent。
+
+        re-format 分工（isolation-aware，B-ISO snapshot-before）：
+        - non-isolation：全量重建 formatted_context / source_map（mirror v1 β-path :414）。
+          全量重建會覆寫引擎剛登記的 web 區間、重新分配連續 id，故無「引擎 append + helper 再 append」疊加。
+        - isolation（SEC-6「只看本迭代新 docs」）：**不全量重建、不自己 append source_map**——
+          引擎（_execute_web_searches:2282-2288）已把 web docs append 進 source_map（start_id=before_max+1）。
+          helper 用 snapshot 的 before_max 取「引擎已登記的 web 區間」（keys > before_max 的 items），
+          用**引擎給的實際 id** format 成 pending_web_formatted（start_id 對齊 before_max+1，id 一致），
+          暫存回 state（供 :761/:785 與站內新 docs 串接）。**helper 對 source_map 只讀不寫**（避免雙重 ID）。
+
+        SF1 契約：pending_web_formatted 同輪必被 SEARCH_REQUIRED 站內分支消費（:761 / :785 串接），
+        消費即清（串接後設 None）。isolation 路徑才會設此欄位；non-isolation 全量重建不用它。
+
+        Returns True 若至少補進一個 web source（呼叫端需 re-format 已在此完成 / 暫存）。
+        """
+        from reasoning.schemas_enhanced import GapResolutionType
+
+        # 1. Guard：web search 關 → 可見（非 silent）no-op。
+        if not enable_web_search:
+            self.logger.info("[WEB-GAP-RESOLVE] web search disabled; skip web gap resolution")
+            return False
+
+        # 2. Harvest：判斷本 response 有無 WEB_SEARCH gap 可兌現（僅判斷有無，不 dedup/不 cap
+        #    ——normalize/response 內部去重/跨路徑 dedup/cap/mark 全由引擎收集迴圈做，Step 4a）。
+        #    無 web gap → early-return no-op（絕大多數 SEARCH_REQUIRED 查詢只有 internal new_queries）。
+        _all_web = [
+            g for g in (getattr(response, 'gap_resolutions', None) or [])
+            if g.resolution == GapResolutionType.WEB_SEARCH and g.search_query
+        ]
+        _harvested = len(_all_web)
+        if _harvested == 0:
+            return False
+
+        # 3. 兌現前 snapshot：context size + source_map 最大 id（B-ISO snapshot-before）。
+        #    self.source_map is state.source_map（同一 dict reference，:456-458）；引擎兌現時會 append
+        #    web docs 進去（start_id=before_max+1）。snapshot before_max 供事後取「引擎已登記的 web 區間」。
+        before = len(state.current_context)
+        before_max = max(state.source_map.keys(), default=0)
+        self.logger.info(
+            f"[WEB-GAP-RESOLVE] 送 {_harvested} 個 web_search gap 進引擎收集迴圈（引擎做 dedup/cap/mark）："
+            f"{[g.search_query for g in _all_web]}（before_max_id={before_max}）"
+        )
+
+        # 4. 復用既有引擎（餵整批 web gap；normalize/去重/dedup/cap/mark 全在引擎收集迴圈做）。
+        #    傳共享 web_searched_queries set —— 引擎在收集決定送出 web gap 的當下 add 進 set。
+        #    引擎內 _execute_web_searches:2282-2288 會 current_context.extend + source_map append。
+        filtered = types.SimpleNamespace(gap_resolutions=_all_web)
+        await self._process_gap_resolutions(
+            response=filtered,
+            mode=mode,
+            current_context=state.current_context,
+            enable_web_search=enable_web_search,
+            tracer=tracer,
+            query_id=query_id,
+            web_searched_queries=web_searched_queries,  # R3：引擎收集迴圈做 normalize/去重/dedup/cap/mark
+        )
+
+        # 5. 量補進幾筆；0 → 不 re-format、回 False（全被 dedup/cap 擋掉 或 Google 回空）。
+        added = len(state.current_context) - before
+        # 標準化 summary log（Codex SF-3，固定 ASCII key 便於 E2E grep）：
+        # harvested= dedup_skipped= cap_skipped= executed= sources_added=（skip 細節由引擎收集迴圈逐條 log；
+        # 此處 dedup_skipped/cap_skipped/executed 由引擎回填或此處近似，統一 underscore key）。
+        self.logger.info(
+            f"[WEB-GAP-RESOLVE] harvested={_harvested} sources_added={added}"
+        )
+        if added == 0:
+            return False
+
+        # 6. re-format（isolation-aware，B-ISO snapshot-before）。
+        if getattr(state, "enable_isolation", False):
+            # SEC-6：引擎已把 web docs append 進 source_map（id > before_max）。helper 不再 append，
+            # 直接取引擎已登記的 web 區間、用引擎給的實際 id format 成 pending_web_formatted。
+            new_web_ids = sorted(k for k in state.source_map.keys() if k > before_max)
+            new_web_items = [state.source_map[k] for k in new_web_ids]
+            # start_id 對齊引擎登記區間起點 → _format_context_shared 產出的 [id] marker 與引擎 source_map id 完全一致。
+            web_formatted, _ = self._format_context_shared(
+                new_web_items, start_id=(before_max + 1)
+            )
+            state.pending_web_formatted = web_formatted  # SF1：供站內分支 :761/:785 串接，消費即清
+            # ★ 不對 state.source_map 做任何 append/update —— 引擎已登記，helper 只讀（避免雙重 ID）。
+        else:
+            # non-isolation：全量重建（mirror v1 β-path :414，行為 byte-identical）。
+            # 全量重建覆寫引擎剛登記的區間、重新分配連續 id，無疊加。
+            state.formatted_context, state.source_map = self._format_context_shared(state.current_context)
+            self.formatted_context = state.formatted_context
+            self.source_map = state.source_map
+        return True
+
     async def _phase_filter_and_prepare(self, state: 'ResearchState') -> 'ResearchState':
         """
         Phase 1: Filter sources by tier + format context with citations.
@@ -425,26 +574,18 @@ class DeepResearchOrchestrator(OrchestratorBase):
         Reads: state.items, state.mode, state.tracer
         Writes: state.current_context, state.formatted_context, state.source_map
         May set: state.early_return (if no sources)
-
-        Raises:
-            NoValidSourcesError: If no sources are available after enrichment
         """
         await self._emit_phase_event("filter_and_prepare", "started")
 
-        # Phase 1a: Filter and prepare sources
-        try:
-            state.current_context = await self._filter_and_prepare_sources(
-                items=state.items,
-                mode=state.mode,
-                tracer=state.tracer,
-            )
-        except ValueError:
-            state.early_return = self._create_no_sources_error_response(
-                items_count=len(state.items),
-                filtered_count=0,
-                mode=state.mode,
-            )
-            return state
+        # Phase 1a: Filter and prepare sources.
+        # §v5: no try/except here — _filter_and_prepare_sources no longer raises on
+        # empty (guardrail removed). Empty current_context flows to Phase 1b → empty
+        # source_map → :598 β-path.
+        state.current_context = await self._filter_and_prepare_sources(
+            items=state.items,
+            mode=state.mode,
+            tracer=state.tracer,
+        )
 
         # Phase 1b: Format context with citations
         state.formatted_context, state.source_map = await self._format_research_context(
@@ -483,6 +624,56 @@ class DeepResearchOrchestrator(OrchestratorBase):
         await self._emit_phase_event("filter_and_prepare", "completed")
         return state
 
+    def _build_retrieval_evidence_summary(self) -> Optional[str]:
+        """組主查詢站內檢索的「證據強弱」摘要，供 Analyst gap 分類時參考。
+
+        復用 handler 上已算好的 Signal A/B flag（正確 0.0 排除邏輯已在 postgres_client
+        跑過，不在此重算）。命中筆數從 items 拿；最高真實向量分數用共用純函式（同排除邏輯）。
+        回傳 None = 無 items（0 結果由防線一 short-circuit，這裡不注入）。
+
+        items 形狀（2026-07-05 親讀 postgres_client.py:791-825 + baseHandler.py:597-606 驗）：
+        `self.handler.final_retrieved_items` = search() 的 return，元素是 **list row 非 dict**：
+          - AGGREGATOR_KEEP_SCORES='1'（預設）→ 6-item list
+            [url, schema_str, title, source, vector_or_None, scores_dict]，
+            scores_dict['vector_score'] 是真實向量分數。
+          - flag='0' → legacy 4/5-tuple（無 scores）。
+          - baseHandler 在 include_private_sources 時 prepend 私有檔 4-element list
+            [url, json_str, name, site]（無 scores）。
+        max_real_vector_score 已 shape-aware：6-item 讀 index 5、legacy/私有檔略過。
+        命中筆數 n=len(items) 含私有檔（它們也是使用者看到的檢索結果）。
+        """
+        from retrieval_providers.postgres_client import max_real_vector_score
+
+        items = getattr(self.handler, "final_retrieved_items", None) or []
+        n = len(items)
+        if n == 0:
+            return None
+
+        low_rel = bool(getattr(self.handler, "low_relevance_warning", False))
+        low_kw = bool(getattr(self.handler, "low_keyword_match_warning", False))
+        top = max_real_vector_score(items)
+        top_str = f"{top:.2f}" if top is not None else "無真實向量證據（純關鍵字命中）"
+
+        lines = [
+            "## 站內檢索證據強弱（供 gap 分類參考，非 binding）",
+            f"- 站內命中筆數：{n}",
+            f"- 最高真實向量相關分數：{top_str}",
+        ]
+        if low_rel:
+            lines.append("- ⚠️ Signal A：站內結果關聯性較弱（最高向量分數低於品質門檻）")
+        if low_kw:
+            lines.append("- ⚠️ Signal B：站內結果關鍵字字面吻合度低")
+        if not low_rel and not low_kw:
+            lines.append("- 站內證據關聯性正常")
+
+        summary = "\n".join(lines)
+        # no-silent：分類判錯時的驗偽依據
+        self.logger.info(
+            f"[GAP-EVIDENCE] n={n} top_vec={top_str} "
+            f"signalA(low_rel)={low_rel} signalB(low_kw)={low_kw}"
+        )
+        return summary
+
     async def _phase_actor_critic_loop(self, state: 'ResearchState') -> 'ResearchState':
         """
         Phase 2: Actor-Critic iterative loop.
@@ -506,6 +697,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
         max_iterations = state.max_iterations
         iteration = 0
+        final_pass = False  # 防線四：迴圈前初始化，防 max_iterations=0 邊界 post-loop 讀 NameError
         draft = None
         review = None
         response = None  # RSN-7: Initialize to avoid unbound variable if first analyst call fails
@@ -516,6 +708,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
         if enable_isolation:
             self.logger.info("SEC-6: Agent isolation ENABLED")
         seen_citation_ids: set = set()
+        # 防線三：跨迭代 web query 去重（同一 search_query 全 session 只打一次 Google，防額度燒爆）
+        web_searched_queries: set = set()
 
         # Aliases for readability (state is the source of truth)
         query = state.query
@@ -528,6 +722,16 @@ class DeepResearchOrchestrator(OrchestratorBase):
         iteration_logger = state.iteration_logger
 
         while iteration < max_iterations:
+            web_added = False  # 防線三 B-LAST：每輪顯式初始化（Codex R4 blocker）
+            # ★ 必須在 :679 SEARCH_REQUIRED 分支之前初始化。
+            # 理由：:794 讀點在 SEARCH_REQUIRED 分支內（:779 else 路徑），
+            #       :829 讀點在 SEARCH_REQUIRED 分支外、之後（:819 draft= 落下處）。
+            # 非 SEARCH_REQUIRED 路徑（如 DRAFT_READY）從不進 4b 賦值，
+            # 若無顯式初始化則 :829 guard 讀到上輪殘值或 NameError（空 draft 路徑）。
+            # 防線四：本輪是否為最後一輪（iteration 0-indexed，+1 才是「第幾輪」）。
+            # v3 extra-pass 退一格（:980 iteration -= 1）後，下一輪迴圈頂用當下 iteration 重算 →
+            # 退一格自然把「下一輪才是 final」蓋到，不需特殊處理。
+            final_pass = (iteration + 1 >= max_iterations)
             self._check_connection()  # Checkpoint 1: loop start
             self.logger.info(f"Starting iteration {iteration + 1}/{max_iterations}")
 
@@ -563,6 +767,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
                             formatted_context=state.formatted_context,
                             query=query,
                             enable_kg=enable_kg,  # B9: match research() schema selection
+                            final_pass=final_pass,  # 防線四（修訂 3）：最後一輪 revise 也強制寫稿
                         )
                         span.set_result(response)
                 else:
@@ -572,6 +777,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
                         formatted_context=state.formatted_context,
                         query=query,
                         enable_kg=enable_kg,  # B9: match research() schema selection
+                        final_pass=final_pass,  # 防線四（修訂 3）：最後一輪 revise 也強制寫稿
                     )
 
                 iteration_logger.log_agent_output(
@@ -590,6 +796,10 @@ class DeepResearchOrchestrator(OrchestratorBase):
                     "temporal_context": temporal_context
                 }
 
+                # 防線二：組站內檢索證據強弱摘要，注入 gap 分類輸入（只在初次 research；
+                # research_with_enriched_data 的 re-run 刻意不注入，gap 已分類完）
+                retrieval_evidence = self._build_retrieval_evidence_summary()
+
                 self._check_connection()  # Checkpoint 3: before analyst.research()
                 if tracer:
                     with tracer.agent_span("analyst", "research", analyst_input) as span:
@@ -599,7 +809,9 @@ class DeepResearchOrchestrator(OrchestratorBase):
                             mode=mode,
                             temporal_context=temporal_context,
                             enable_kg=enable_kg,  # Phase KG: Pass per-request flag
-                            enable_web_search=enable_web_search  # Stage 5: Pass web search flag
+                            enable_web_search=enable_web_search,  # Stage 5: Pass web search flag
+                            retrieval_evidence=retrieval_evidence,  # 防線二：gap 分類證據注入
+                            final_pass=final_pass,  # 防線四：最後一輪強制 best-effort 寫稿
                         )
                         span.set_result(response)
                 else:
@@ -609,7 +821,9 @@ class DeepResearchOrchestrator(OrchestratorBase):
                         mode=mode,
                         temporal_context=temporal_context,
                         enable_kg=enable_kg,  # Phase KG: Pass per-request flag
-                        enable_web_search=enable_web_search  # Stage 5: Pass web search flag
+                        enable_web_search=enable_web_search,  # Stage 5: Pass web search flag
+                        retrieval_evidence=retrieval_evidence,  # 防線二：gap 分類證據注入
+                        final_pass=final_pass,  # 防線四：最後一輪強制 best-effort 寫稿
                     )
 
                 iteration_logger.log_agent_output(
@@ -625,6 +839,28 @@ class DeepResearchOrchestrator(OrchestratorBase):
                     f"Analyst requested additional search (iteration {iteration + 1}): "
                     f"{response.new_queries}"
                 )
+
+                # 防線三 N-2 defensive：進 SEARCH_REQUIRED 分支先清 pending_web_formatted（消費即清雙保險）。
+                # 正常流程 :761/:785 消費後已設 None；此處 reset 防「上輪異常路徑漏清」殘留串進本輪視野。
+                state.pending_web_formatted = None
+                # 防線三：先兌現本 response 的 web_search 類 gap（不論 status）。
+                # Analyst 可能同時回 SEARCH_REQUIRED + web_search gap；若只走站內 secondary
+                # search（下方），web gap 會在 iteration+=1;continue 時被丟棄（高端訓 zero-Google bug）。
+                # 在此把 web source 與站內 secondary source 同迭代合流補進 context，下輪 Analyst 一起整合。
+                web_added = await self._resolve_web_search_gaps_in_loop(
+                    response=response,
+                    mode=mode,
+                    state=state,
+                    enable_web_search=enable_web_search,
+                    web_searched_queries=web_searched_queries,
+                    tracer=tracer,
+                    query_id=query_id,
+                )
+                if web_added:
+                    self.logger.info(
+                        "[WEB-GAP-RESOLVE] web source 已合流進 context，"
+                        "與站內 secondary search 結果一起交下輪 Analyst 整合"
+                    )
 
                 # Tracing: Gap detection
                 if tracer:
@@ -702,7 +938,13 @@ class DeepResearchOrchestrator(OrchestratorBase):
                         if overlap:
                             self.logger.error(f"SEC-6: source_map ID collision detected: {overlap}")
                         state.source_map.update(new_source_map)
-                        state.formatted_context = new_formatted  # Only new docs for Analyst
+                        pending_web = getattr(state, "pending_web_formatted", None)
+                        if pending_web:
+                            # 防線三 B-ISO：web 新 docs 也是本迭代新 docs，與站內新 docs 串接（SEC-6 語意擴充）
+                            state.formatted_context = pending_web + "\n\n" + new_formatted
+                            state.pending_web_formatted = None  # 消費後清空，避免下輪重複串接
+                        else:
+                            state.formatted_context = new_formatted  # Only new docs for Analyst
                         # SYNC: Keep self.* in sync for helper methods that read self.source_map
                         self.formatted_context = state.formatted_context
                         self.source_map = state.source_map
@@ -719,6 +961,21 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
                     # Continue to next iteration (Analyst will retry with expanded context)
                     iteration += 1
+                    # 防線三 B-LAST 孿生洞（land-review blocker）：本迭代 helper 補了 web docs
+                    # （站內 secondary 有結果、web 也有料）時，若這是最後一輪，:963 iteration+=1 + :964
+                    # continue 會在 :724 while 邊界退出 → 空 draft → :1307 SEARCH_REQUIRED → no-results
+                    # 頁，把剛補的 web+站內源整個丟棄。與 :995 「站內查無」case 完全同構，退回一格保證
+                    # 下一輪 Analyst pass 消費補源。
+                    # 有界性同 :995：dedup（同 web query 下輪已在 web_searched_queries → helper no-op
+                    #        → web_added 回 False → 不再退）+ run 級 cap → 額外 pass ≤ min(distinct web
+                    #        query 數, cap)，天然有限。
+                    if web_added:
+                        iteration -= 1  # 退回一格：本輪 web pass 不計入 budget
+                        self.logger.info(
+                            "[WEB-GAP-RESOLVE][extra-pass] 站內 secondary 有結果且本輪補了 web docs，"
+                            "退回一格保證一次 Analyst pass 消費（不在 :724 while 邊界丟棄補源）；"
+                            "此 iteration 編號因 web extra-pass 退一格、與下一次正常 pass 共用編號"
+                        )
                     continue
                 else:
                     # No results found - force Analyst to work with existing data
@@ -726,7 +983,18 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
                     # RSN-5: Rebuild formatted_context fresh instead of accumulating hints
                     # Re-format from source of truth to avoid stale hints from previous iterations
-                    state.formatted_context, state.source_map = self._format_context_shared(state.current_context)
+                    # 防線三 B-ISO / SF1（修訂 2，Codex B3）：isolation 下若本輪 helper 已補 web docs，
+                    # 不做全量重建（全量重建重新分配 id 會與引擎登記的 web marker id 脫節=組合重複）。
+                    # 直接用 web 新 docs 當本迭代 formatted（SEC-6「只看本迭代新 docs」語意維持），
+                    # source_map 保持引擎登記不再動；web 不重複、無雙套 id。
+                    pending_web = getattr(state, "pending_web_formatted", None)
+                    if getattr(state, "enable_isolation", False) and pending_web:
+                        state.formatted_context = pending_web
+                        state.pending_web_formatted = None  # SF1：消費即清
+                        # source_map 不動（引擎已登記 web 區間；站內無新結果，無站內 docs 要重建）
+                    else:
+                        # non-isolation（或 isolation 但本輪無 web docs）：維持原全量重建，行為 byte-identical。
+                        state.formatted_context, state.source_map = self._format_context_shared(state.current_context)
                     system_hint = "\n\n[系統提示] 針對缺口的補充搜尋未發現有效結果，請基於現有資訊推論。"
                     state.formatted_context += system_hint
                     # SYNC: Keep self.* in sync for helper methods
@@ -735,8 +1003,23 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
                     # Increment iteration and let it proceed to Critic evaluation
                     iteration += 1
+                    # 防線三 B-LAST：本迭代 helper 補了 web docs（站內 secondary 查無但 web 有料）時，
+                    # 不能在此邊界 error return 丟棄 web docs——退回一格保證下一輪 Analyst pass 消費。
+                    # 有界性：dedup（同 web query 下輪已在 web_searched_queries → helper no-op → web_added 回 False）
+                    #        + run 級 cap → 額外 pass ≤ min(distinct web query 數, cap)，天然有限。
+                    if web_added:
+                        iteration -= 1  # 退回一格：本輪 web pass 不計入 budget
+                        self.logger.info(
+                            "[WEB-GAP-RESOLVE][extra-pass] 站內 secondary 查無但本輪補了 web docs，"
+                            "退回一格保證一次 Analyst pass 消費（不在 :794 邊界丟棄 web docs）；"
+                            "此 iteration 編號因 web extra-pass 退一格、與下一次正常 pass 共用編號"
+                        )
+                        # 落下去（不 continue）：接著跑 empty-draft guard；draft 仍空 → :829 也有 web_added 保命 continue。
                     if iteration >= max_iterations:
                         self.logger.error("Max iterations reached after failed gap search")
+                        # 防線四：final-pass 指示下仍拒絕產文 → 可觀測（未來調 prompt 措辭的驗偽依據，no silent）。
+                        if final_pass:
+                            self.logger.warning("[FINAL-PASS] analyst still refused (exit=stalled_secondary_max_iter)")
                         # Return error result
                         state.early_return = [{
                             "@type": "Item",
@@ -771,6 +1054,14 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
             # RSN-1: Guard against empty draft before proceeding to Critic
             if not draft or not draft.strip():
+                # 防線三 B-LAST：本迭代補了 web docs 但 draft 空時，continue 讓下輪 Analyst 拿 web docs 重寫，
+                # 不落原 empty-draft error 分支丟棄。有界性同 :794（dedup + cap）。
+                if web_added:
+                    self.logger.info(
+                        "[WEB-GAP-RESOLVE][extra-pass] empty draft 但本輪補了 web docs，"
+                        "continue 保證一次 Analyst pass 消費（不丟棄 web docs）"
+                    )
+                    continue
                 self.logger.warning("Empty draft detected after gap resolution, cannot proceed to review")
                 # If we still have iterations left, increment and retry
                 if iteration + 1 < max_iterations:
@@ -780,6 +1071,9 @@ class DeepResearchOrchestrator(OrchestratorBase):
                 else:
                     # Max iterations exhausted with empty draft
                     self.logger.error("Max iterations reached with empty draft")
+                    # 防線四：final-pass 指示下仍拒絕產文 → 可觀測（未來調 prompt 措辭的驗偽依據，no silent）。
+                    if final_pass:
+                        self.logger.warning("[FINAL-PASS] analyst still refused (exit=empty_draft_max_iter)")
                     state.early_return = self._format_error_result(
                         query,
                         "分析階段無法產生有效內容，請嘗試調整搜尋條件或使用不同的查詢。"
@@ -804,7 +1098,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
                     current_context=state.current_context,
                     enable_web_search=enable_web_search,
                     tracer=tracer,
-                    query_id=query_id
+                    query_id=query_id,
+                    web_searched_queries=web_searched_queries,  # 防線三 B-DEDUP-SCOPE：跨路徑共享 dedup
                 )
                 context_after = len(state.current_context)
                 gap_resolution_added_data = context_after > context_before
@@ -878,7 +1173,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
                             temporal_context=temporal_context,
                             enable_kg=enable_kg,
                             enable_web_search=False,  # Disable for re-analysis (already got data)
-                            previous_draft=previous_draft_for_analyst  # SEC-6
+                            previous_draft=previous_draft_for_analyst,  # SEC-6
+                            final_pass=final_pass  # 防線四：enriched re-run 最後一輪也強制寫稿
                         )
                         span.set_result(response)
                 else:
@@ -889,7 +1185,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
                         temporal_context=temporal_context,
                         enable_kg=enable_kg,
                         enable_web_search=False,  # Disable for re-analysis (already got data)
-                        previous_draft=previous_draft_for_analyst  # SEC-6
+                        previous_draft=previous_draft_for_analyst,  # SEC-6
+                        final_pass=final_pass  # 防線四：enriched re-run 最後一輪也強制寫稿
                     )
 
                 draft = response.draft
@@ -1014,6 +1311,13 @@ class DeepResearchOrchestrator(OrchestratorBase):
         # Check if we have a valid draft
         if not draft:
             self.logger.error("No draft generated after iterations")
+            # 防線四：final-pass 指示下仍拒絕產文 → 可觀測（未來調 prompt 措辭的驗偽依據，no silent）。
+            # final_pass 迴圈內 local，迴圈結束後仍持有最後一輪值（配合迴圈前初始化，零 NameError）。
+            if final_pass:
+                self.logger.warning(
+                    "[FINAL-PASS] analyst still refused (exit=post_loop_no_draft, status=%s)",
+                    getattr(response, "status", "?"),
+                )
             # Check if this was due to continuous SEARCH_REQUIRED without results
             if response and response.status == "SEARCH_REQUIRED":
                 state.early_return = self._format_friendly_no_data_result(
@@ -1031,7 +1335,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
                 error_details = f"\n\n**分析過程：**\n{response.reasoning_chain}"
             state.early_return = self._format_error_result(
                 query,
-                f"Failed to generate draft{error_details}"
+                f"分析階段未能產生有效內容，請嘗試調整搜尋條件或使用不同的查詢。{error_details}"
             )
             await self._emit_phase_event("actor_critic_loop", "completed")
             return state
@@ -1342,9 +1646,6 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
         Returns:
             Prepared items list
-
-        Raises:
-            ValueError: If no sources are available
         """
         # Phase 1: Prepare context (source tier enrichment removed; pass-through)
         current_context = self.source_filter.filter_and_enrich(items, mode)
@@ -1358,12 +1659,16 @@ class DeepResearchOrchestrator(OrchestratorBase):
                 mode=mode
             )
 
-        # Check if we have any sources to work with
-        if not current_context or len(current_context) == 0:
-            self.logger.error(f"No sources available for research! Original items: {len(items)}")
-            raise ValueError(
-                f"No sources available. "
-                f"Original: {len(items)}, Prepared: 0, Mode: {mode}"
+        # §v5: empty current_context is NOT an error — it means upstream retrieval
+        # returned 0 sources. Return empty so Phase 1b formats an empty source_map,
+        # which the β-path (:598) picks up for zero-results web backfill. The old
+        # `raise ValueError` here (plus the filter-layer raise removed in V5-1) was
+        # a leftover guardrail from the removed source-tier mechanism that shadowed
+        # the β-path, making §v1 dead code in the real 0-source path.
+        if not current_context:
+            self.logger.info(
+                f"No prepared sources (original items: {len(items)}); "
+                "flowing to β-path for zero-results web backfill."
             )
 
         return current_context
@@ -1390,33 +1695,6 @@ class DeepResearchOrchestrator(OrchestratorBase):
             )
 
         return formatted_context, source_map
-
-    def _create_no_sources_error_response(
-        self,
-        items_count: int,
-        filtered_count: int,
-        mode: str,
-    ) -> List[Dict[str, Any]]:
-        """Create error response for no sources case."""
-        return [{
-            "@type": "Item",
-            "url": "internal://error",
-            "name": "Deep Research 無法執行",
-            "site": "系統訊息",
-            "siteUrl": "internal",
-            "score": 0,
-            "description": (
-                f"**錯誤：無法執行 Deep Research**\n\n"
-                f"原因：檢索階段未找到任何相關資料來源。\n\n"
-                f"- 檢索到的項目數：{items_count}\n"
-                f"- 經過濾後的項目數：{filtered_count}\n\n"
-                f"請嘗試：\n"
-                f"1. 使用不同的關鍵詞重新搜尋\n"
-                f"2. 在搜尋介面調整來源篩選，包含更多新聞來源\n"
-                f"3. 確認資料庫中有相關內容"
-            )
-        }]
-
 
     async def run_research(
         self,
@@ -1491,9 +1769,6 @@ class DeepResearchOrchestrator(OrchestratorBase):
         Returns:
             List of NLWeb Item dicts compatible with create_assistant_result().
             Each dict contains: @type, url, name, site, siteUrl, score, description
-
-        Raises:
-            NoValidSourcesError: If no sources are available
         """
         # Setup: Initialize logging and tracing
         query_id = getattr(self.handler, 'query_id', f'reasoning_{hash(query)}')
@@ -1558,7 +1833,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
                 tracer.error(f"No valid sources after filtering: {e}")
             return self._format_error_result(
                 query,
-                f"No valid sources available in {mode} mode. Try using 'discovery' mode for broader source coverage."
+                self._NO_VALID_SOURCES_MESSAGE
             )
 
         except (asyncio.TimeoutError, TimeoutError) as e:
@@ -1587,7 +1862,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
             if CONFIG.should_raise_exceptions():
                 raise
             sentry_sdk.capture_exception(e)
-            return self._format_error_result(query, f"系統發生未預期錯誤: {str(e)}")
+            return self._format_error_result(query, "系統發生未預期的錯誤，我們已記錄此問題，請稍後再試。")
 
     async def run_research_rerun(
         self,
@@ -1708,7 +1983,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
             if CONFIG.should_raise_exceptions():
                 raise
             sentry_sdk.capture_exception(e)
-            return self._format_error_result(modified_query, f"重新分析發生錯誤: {str(e)}")
+            return self._format_error_result(modified_query, "重新分析時發生未預期的錯誤，請稍後再試。")
 
     def _format_result(
         self,
@@ -1826,10 +2101,10 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
         return [{
             "@type": "Item",
-            "url": f"https://deep-research.internal/{mode}/{query[:50]}",
+            "url": f"internal://system/{mode}/{query[:50]}",
             "name": f"深度研究報告：{query}",
-            "site": "Deep Research Module",
-            "siteUrl": "https://deep-research.internal",
+            "site": "讀豹系統",
+            "siteUrl": "internal://system",
             "score": 95,
             "description": final_report.final_report,
             "schema_object": schema_obj
@@ -1860,7 +2135,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
         description_parts = [
             f"# 抱歉，目前找不到關於「{query}」的相關資料\n",
             f"## 搜尋說明\n",
-            f"我們已經在 **{mode.upper()} 模式**下進行了深度搜尋，但資料庫中沒有找到符合條件的新聞或資料。\n"
+            "我們已進行了深度搜尋，但資料庫中沒有找到符合條件的新聞或資料。\n"
         ]
 
         if missing_info:
@@ -1892,10 +2167,10 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
         return [{
             "@type": "Item",
-            "url": "https://deep-research.internal/no-data",
+            "url": "internal://system/no-data",
             "name": f"找不到相關資料：{query}",
-            "site": "Deep Research Module",
-            "siteUrl": "https://deep-research.internal",
+            "site": "讀豹系統",
+            "siteUrl": "internal://system",
             "score": 0,
             "description": "".join(description_parts),
             "schema_object": {
@@ -1924,10 +2199,10 @@ class DeepResearchOrchestrator(OrchestratorBase):
         """
         return [{
             "@type": "Item",
-            "url": "https://deep-research.internal/error",
+            "url": "internal://system/error",
             "name": f"研究錯誤：{query}",
-            "site": "深度研究模組",
-            "siteUrl": "https://deep-research.internal",
+            "site": "讀豹系統",
+            "siteUrl": "internal://system",
             "score": 0,
             "description": f"## 錯誤\n\n{error_message}",
             "schema_object": {
@@ -1943,7 +2218,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
         current_context: List[Dict[str, Any]],
         enable_web_search: bool,
         tracer: Any = None,
-        query_id: str = None
+        query_id: str = None,
+        web_searched_queries: Optional[set] = None,
     ) -> None:
         """
         Process gap_resolutions from Analyst output (Stage 5).
@@ -1975,6 +2251,15 @@ class DeepResearchOrchestrator(OrchestratorBase):
         company_tw_gaps = []
         company_global_gaps = []
 
+        # R3 記帳集中：normalize / response 內部去重 / 跨路徑 dedup / cap / mark 全在下方收集迴圈。
+        _seen_this_response: set = set()           # (2) response 內部去重（區域）
+        # (4) run 級 cap（沿用 LR 鍵，source-agnostic）。
+        # ★ 本 cap 僅限 distinct web-search queries；Wikipedia/stock/weather 等其他外部 API
+        #   呼叫刻意不計入此 cap（parallel 補料策略下這些源另有各自的觸發條件，不共用 Google 額度）。
+        _web_cap = CONFIG.reasoning_params.get("tier_6", {}).get("gap_routing", {}).get(
+            "max_external_calls_per_run", 6
+        )
+
         for gap in response.gap_resolutions:
             if gap.resolution == GapResolutionType.LLM_KNOWLEDGE:
                 # Create virtual document for LLM knowledge
@@ -1999,7 +2284,38 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
             elif gap.resolution == GapResolutionType.WEB_SEARCH:
                 if enable_web_search and gap.search_query:
-                    web_search_gaps.append(gap)
+                    if web_searched_queries is None:
+                        # v1 相容：不傳 set → 不 dedup/不 cap，byte-identical（v1 β-path 呼叫點）。
+                        web_search_gaps.append(gap)
+                    else:
+                        key = _normalize_web_query(gap.search_query)
+                        # (0) SF2（land-review should-fix，Codex）：whitespace-only search_query
+                        #     normalize 成空 key → 在 dedup/cap/mark **之前** skip，避免空 query 佔 cap
+                        #     slot 並被 mark（空 key 對 Google 無意義、mark '' 會白佔 distinct query 額度）。
+                        if not key:
+                            self.logger.info(
+                                f"[WEB-GAP-RESOLVE] empty-after-normalize skip query={gap.search_query!r}"
+                            )
+                        # (2) response 內部去重：同一 response 內重複 query 只送一次（SF-3 ASCII key）。
+                        elif key in _seen_this_response:
+                            self.logger.info(f"[WEB-GAP-RESOLVE] intra_response_skip query={gap.search_query!r}")
+                        # (3) 跨路徑 dedup：全 session 同 query 只打一次 Google（SF-3 ASCII key）。
+                        elif key in web_searched_queries:
+                            self.logger.info(f"[WEB-GAP-RESOLVE] dedup_skipped query={gap.search_query!r}（跨迭代/跨路徑已搜過）")
+                        # (4) run 級 hard cap：達上限不再收新 distinct web query（bound Google 燒錢源，SF-3 ASCII key）。
+                        #     len(web_searched_queries) 已含「prior + 本輪已 accept」（每 accept 同步 mark，見下）。
+                        elif len(web_searched_queries) >= _web_cap:
+                            self.logger.warning(
+                                f"[WEB-GAP-RESOLVE] cap_skipped query={gap.search_query!r} "
+                                f"distinct_web_query_cap={_web_cap}（cap 計 distinct web query 數，非外部 API 呼叫總數；"
+                                f"parallel 策略下 Wikipedia 不另計）"
+                            )
+                        else:
+                            web_search_gaps.append(gap)
+                            _seen_this_response.add(key)
+                            # (5) mark 時點 = 收集決定送出的當下（Codex B2：mark 在收集迴圈，不在被 mock 的 _execute_web_searches）。
+                            #     accept 同步 mark → len(web_searched_queries) 即時反映本輪已 accept 數，供 (4) cap 判定。
+                            web_searched_queries.add(key)
                 elif gap.requires_web_search:
                     # Mark as needing web search but not enabled
                     self.logger.info(f"Web search required but not enabled for: {gap.search_query}")

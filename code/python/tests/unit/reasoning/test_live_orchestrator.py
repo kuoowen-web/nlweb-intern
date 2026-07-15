@@ -44,6 +44,91 @@ class TestLiveResearchOrchestrator:
             orch = LiveResearchOrchestrator(handler=mock_handler)
             return orch
 
+    @pytest.mark.asyncio
+    async def test_generate_report_title_success(self, orchestrator, monkeypatch):
+        """LLM 回標題 → helper 回 (title, was_generated=True)。"""
+        from reasoning.schemas_live import ContextMap, ContextMapTopic
+        cm = ContextMap(research_question="台灣綠能衝突", topics=[
+            ContextMapTopic(topic_id="t1", name="土地", domain="能源", relevance="core"),
+        ], version=1)
+        written = [{"section_index": 0, "title": "前言", "chapter_summary": "背景說明",
+                    "content": "x", "status": "drafted"}]
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.ask_llm",
+            AsyncMock(return_value={"title": "綠能開發與土地正義的拉鋸"}),
+        )
+        title, was_generated = await orchestrator._generate_report_title(cm, written)
+        assert title == "綠能開發與土地正義的拉鋸"
+        assert was_generated is True
+
+    @pytest.mark.asyncio
+    async def test_generate_report_title_llm_fail_degrades(
+        self, orchestrator, monkeypatch, capfd
+    ):
+        """LLM 拋例外 → 回 (research_question, False) + logger.warning（不 silent fail）。
+        NOTE: orchestrator 用自訂 LazyLogger（propagate=False，背景 thread 寫 JSON），
+        caplog 抓不到 → 依專案慣例（test_deep_research_ambiguity.py）用 capfd + flush。
+        """
+        import time
+        from reasoning.schemas_live import ContextMap, ContextMapTopic
+        cm = ContextMap(research_question="台灣綠能衝突", topics=[
+            ContextMapTopic(topic_id="t1", name="土地", domain="能源", relevance="core"),
+        ], version=1)
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.ask_llm",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+        title, was_generated = await orchestrator._generate_report_title(cm, [])
+        assert title == "台灣綠能衝突"
+        assert was_generated is False
+        time.sleep(0.2)  # 讓背景 JSON logger worker flush
+        out, err = capfd.readouterr()
+        assert "report title" in (out + err).lower()  # 不 silent fail
+
+    @pytest.mark.asyncio
+    async def test_generate_report_title_empty_response_degrades(
+        self, orchestrator, monkeypatch, capfd
+    ):
+        """LLM 回空/純空白標題 → 回 (research_question, False) + warning。
+        NOTE: 同上，自訂 LazyLogger 用 capfd 抓（caplog 抓不到）。
+        """
+        import time
+        from reasoning.schemas_live import ContextMap, ContextMapTopic
+        cm = ContextMap(research_question="台灣綠能衝突", topics=[
+            ContextMapTopic(topic_id="t1", name="土地", domain="能源", relevance="core"),
+        ], version=1)
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.ask_llm",
+            AsyncMock(return_value={"title": "   "}),
+        )
+        title, was_generated = await orchestrator._generate_report_title(cm, [])
+        assert title == "台灣綠能衝突"
+        assert was_generated is False
+        time.sleep(0.2)
+        out, err = capfd.readouterr()
+        assert "report title" in (out + err).lower()
+
+    @pytest.mark.asyncio
+    async def test_generate_report_title_sanitizes_multiline_and_truncates(
+        self, orchestrator, monkeypatch
+    ):
+        """AR P2：LLM 回多行/含 markdown 標記/超長 → 後處理成單行 markdown-safe + 截斷。"""
+        from reasoning.schemas_live import ContextMap, ContextMapTopic
+        cm = ContextMap(research_question="Q", topics=[
+            ContextMapTopic(topic_id="t1", name="n", domain="d", relevance="core"),
+        ], version=1)
+        # 多行 + 前導 # + 超長（>40 字）
+        raw = "# 綠能\n開發與土地正義\n" + "拉" * 50
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.ask_llm",
+            AsyncMock(return_value={"title": raw}),
+        )
+        title, was_generated = await orchestrator._generate_report_title(cm, [])
+        assert was_generated is True
+        assert "\n" not in title  # 換行摺成空格
+        assert not title.startswith("#")  # 前導 markdown 標記剝除
+        assert len(title) <= 40  # 超長截斷
+
     def test_init(self, orchestrator):
         assert orchestrator is not None
 
@@ -245,6 +330,7 @@ class TestLiveResearchOrchestrator:
         orchestrator._emit_narration = AsyncMock()
         orchestrator._persist_checkpoint_boundary = AsyncMock()
         orchestrator._build_references_block = lambda *a, **k: ""
+        orchestrator._generate_report_title = AsyncMock(return_value=("測試標題", True))
         captured = []
         monkeypatch.setattr(
             "reasoning.live_research.orchestrator.emit_sse",
@@ -273,6 +359,147 @@ class TestLiveResearchOrchestrator:
         export_md = export_payloads[0]["content"]
         assert "第 4 章" in export_md       # index 3 → 第 4 章（接線對）
         assert "第 3 章" not in export_md and "第 0 章" not in export_md
+
+    @pytest.mark.asyncio
+    async def test_stage6_h1_uses_generated_title_query_as_subtitle(
+        self, orchestrator, monkeypatch
+    ):
+        """Stage 6：H1 = 生成標題；原始查詢降為副標（CEO 拍板呈現）。"""
+        orchestrator._emit_stage_change = AsyncMock()
+        orchestrator._emit_narration = AsyncMock()
+        orchestrator._persist_checkpoint_boundary = AsyncMock()
+        orchestrator._build_references_block = lambda *a, **k: ""
+        # helper 回 (title, was_generated=True)
+        orchestrator._generate_report_title = AsyncMock(
+            return_value=("綠能開發與土地正義的拉鋸", True)
+        )
+        captured = []
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.emit_sse",
+            AsyncMock(side_effect=lambda handler, payload: captured.append(payload)),
+        )
+        state = LiveResearchStageState(
+            current_stage=5,
+            context_map_json=_make_context_map().model_dump_json(),  # research_question="台灣綠能衝突"
+            written_sections=[
+                {"section_index": 0, "title": "前言", "chapter_summary": "背景",
+                 "content": "本章內容。", "status": "drafted"},
+            ],
+        )
+        await orchestrator._run_stage_6(state)
+        export_md = [p for p in captured
+                     if p.get("message_type") == "live_research_export"][0]["content"]
+        assert "# 綠能開發與土地正義的拉鋸" in export_md   # H1 = 生成標題
+        assert "> 原始查詢：台灣綠能衝突" in export_md      # 原始查詢降為副標
+        assert "# 台灣綠能衝突" not in export_md          # 不再是 H1
+        assert state.generated_report_title == "綠能開發與土地正義的拉鋸"  # 純標題值存 state
+
+    @pytest.mark.asyncio
+    async def test_stage6_title_degraded_falls_back_to_query_h1_no_subtitle(
+        self, orchestrator, monkeypatch
+    ):
+        """helper 降級（was_generated=False）→ H1 退回原查詢、抑制副標、state 存空字串。"""
+        orchestrator._emit_stage_change = AsyncMock()
+        orchestrator._emit_narration = AsyncMock()
+        orchestrator._persist_checkpoint_boundary = AsyncMock()
+        orchestrator._build_references_block = lambda *a, **k: ""
+        # helper 回 (research_question, was_generated=False) 模擬降級
+        orchestrator._generate_report_title = AsyncMock(
+            return_value=("台灣綠能衝突", False)
+        )
+        captured = []
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.emit_sse",
+            AsyncMock(side_effect=lambda handler, payload: captured.append(payload)),
+        )
+        state = LiveResearchStageState(
+            current_stage=5,
+            context_map_json=_make_context_map().model_dump_json(),
+            written_sections=[
+                {"section_index": 0, "title": "前言", "content": "x", "status": "drafted"},
+            ],
+        )
+        await orchestrator._run_stage_6(state)
+        export_md = [p for p in captured
+                     if p.get("message_type") == "live_research_export"][0]["content"]
+        assert "# 台灣綠能衝突" in export_md          # H1 退回原始查詢
+        assert "> 原始查詢：" not in export_md        # 降級抑制副標（不冗餘）
+        assert state.generated_report_title == ""    # 降級 → state 存空字串（P1-1）
+
+    @pytest.mark.asyncio
+    async def test_stage6_title_llm_fail_end_to_end_warns_and_empty_state(
+        self, orchestrator, monkeypatch
+    ):
+        """P1-3 端到端：不 mock helper，patch ask_llm raise → 真跑降級全鏈路。
+        驗 H1=query + 無副標 + logger.warning（不 silent fail）+ state=""。
+        NOTE: 自訂 LazyLogger 走「背景 worker thread + async queue」dispatch，warning 最終
+        會由 worker thread 走底層 logging.getLogger("live_research.orchestrator")（其 StreamHandler
+        綁 sys.stdout）非同步 emit。原 plan 用 capfd 抓 fd 級輸出，但該 StreamHandler 的 stream
+        參照會被前一個真跑 _run_stage_6 的 sibling test 汙染成舊 capture 物件，fd 級抓不到
+        （sibling ordering 決定成敗，非 silent-fail 本身）。改用「掛 handler 到底層 logger +
+        poll 等 worker flush」抓 LogRecord — 觀測點在 log source，不受 stdout 重綁影響，穩定。
+        另注意 LoggerUtility.__init__ 首次建構會「clear 既有 handlers」，故必須先 pre-warm
+        （逼 worker 端 real_logger 快取建好）後再掛我的 handler，否則會被 lazy 建構清掉。"""
+        import logging as _logging
+        import time
+        from misc.logger.logging_config_helper import _get_async_processor
+        orchestrator._emit_stage_change = AsyncMock()
+        orchestrator._emit_narration = AsyncMock()
+        orchestrator._persist_checkpoint_boundary = AsyncMock()
+        orchestrator._build_references_block = lambda *a, **k: ""
+        # 關鍵：不 mock _generate_report_title，改 patch 底層 ask_llm raise
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.ask_llm",
+            AsyncMock(side_effect=RuntimeError("LLM down")),
+        )
+        captured = []
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.emit_sse",
+            AsyncMock(side_effect=lambda handler, payload: captured.append(payload)),
+        )
+        # pre-warm：逼 worker 端 real_logger 建好（其 __init__ 會 clear handlers），之後我掛的
+        # handler 才不會被 lazy 建構清掉。直接呼叫 worker 的 _get_real_logger 確保快取存在。
+        _proc = _get_async_processor()
+        _proc._get_real_logger("live_research.orchestrator")
+        # 掛捕捉 handler 到底層 non-propagating logger（worker thread emit 於此，見 docstring）。
+        # handler 全程掛著（含 assert 期間），等 worker flush 而非提前移除。
+        log_records = []
+
+        class _CaptureHandler(_logging.Handler):
+            def emit(self, record):
+                log_records.append(record.getMessage())
+
+        _capture = _CaptureHandler()
+        _capture.setLevel(_logging.WARNING)
+        _underlying = _logging.getLogger("live_research.orchestrator")
+        _prev_level = _underlying.level
+        _underlying.addHandler(_capture)
+        if _underlying.level > _logging.WARNING:
+            _underlying.setLevel(_logging.WARNING)
+        try:
+            state = LiveResearchStageState(
+                current_stage=5,
+                context_map_json=_make_context_map().model_dump_json(),
+                written_sections=[
+                    {"section_index": 0, "title": "前言", "content": "x", "status": "drafted"},
+                ],
+            )
+            await orchestrator._run_stage_6(state)
+            export_md = [p for p in captured
+                         if p.get("message_type") == "live_research_export"][0]["content"]
+            assert "# 台灣綠能衝突" in export_md
+            assert "> 原始查詢：" not in export_md
+            assert state.generated_report_title == ""
+            # poll 等背景 worker thread 把 warning dispatch 到底層 logger（非同步 queue）
+            _deadline = time.time() + 3.0
+            while time.time() < _deadline and not any(
+                "report title" in m.lower() for m in log_records
+            ):
+                time.sleep(0.05)
+            assert any("report title" in m.lower() for m in log_records)  # 不 silent fail
+        finally:
+            _underlying.removeHandler(_capture)
+            _underlying.setLevel(_prev_level)
 
     @pytest.mark.asyncio
     async def test_emit_checkpoint_called_in_stage_1(self, orchestrator, mock_handler):
@@ -1178,8 +1405,10 @@ class TestWriteSectionSpecialElementsFilter:
         ]
 
     @pytest.mark.asyncio
-    async def test_target_chapter_substring_match_lenient(self, orch):
-        """user 寫「結果」vs topic「結果與討論」→ 雙向 substring match 命中。"""
+    async def test_target_chapter_substring_no_longer_matches(self, orch):
+        """R2（2026-07，C-7）新契約：Stage 5 filter 改 exact 命中，**不再**雙向 substring 容錯。
+        user 寫短版「結果」vs section「結果與討論」→ 不注入（交 Stage 5 後衛診斷）。
+        substring 對不到章名的病根改由 Stage 4 澄清把 target 定位成章名原文根治。"""
         from reasoning.schemas_live import LiveWriterSectionOutput
 
         cm = self._build_cm()
@@ -1187,7 +1416,7 @@ class TestWriteSectionSpecialElementsFilter:
             "special_elements": [
                 {
                     "type": "table",
-                    "target_chapter": "結果",  # 短版
+                    "target_chapter": "結果",  # 短版，非章名原文
                     "description": "5 國",
                 },
             ],
@@ -1217,14 +1446,8 @@ class TestWriteSectionSpecialElementsFilter:
                 format_specs=format_specs,
             )
 
-        # substring match 命中（「結果」⊆「結果與討論」）
-        assert captured_args[0] == [
-            {
-                "type": "table",
-                "target_chapter": "結果",
-                "description": "5 國",
-            },
-        ]
+        # exact 契約：短版「結果」≠ section「結果與討論」→ 不注入（不再 substring 容錯）
+        assert captured_args[0] == []
 
     @pytest.mark.asyncio
     async def test_target_chapter_empty_injects_into_all_sections(self, orch):

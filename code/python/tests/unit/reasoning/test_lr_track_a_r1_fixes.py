@@ -39,7 +39,7 @@ def _make_orchestrator(dry_run: bool = False):
     handler.query_params = {}
     handler.message_sender = None
     handler.connection_alive_event = None
-    handler.request_handler = None
+    handler.http_handler = None
     return LiveResearchOrchestrator(handler=handler, dry_run=dry_run)
 
 

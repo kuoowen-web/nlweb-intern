@@ -23,8 +23,9 @@ from webserver.middleware.concurrency_limiter import (
     DR_USER_LIMIT,
     DR_IP_LIMIT,
 )
+from misc.logger.logging_config_helper import get_configured_logger
 
-logger = logging.getLogger(__name__)
+logger = get_configured_logger("api_routes")
 
 # Mock session state for Live Research mock mode (in-memory, dev only)
 _mock_lr_sessions: dict = {}
@@ -596,6 +597,21 @@ async def sites_config_handler(request: web.Request) -> web.Response:
         }, status=500)
 
 
+def inject_auth_user_into_params(query_params, user):
+    """把 server 端可信的 authenticated user identity 灌進 query_params，
+    覆蓋 client 傳入的任何偽造 user_id/org_id（P0 私文隔離）。
+
+    org_id 用**無條件覆蓋**（authenticated 時 query_params['org_id'] = user.get('org_id')，
+    JWT 無 org 時清成 None）—— 這是資安根解正確性前提，清偽造殘留。
+    未 authenticated 時不動 query_params（維持既有 fallback 語義）。
+
+    共用點：deep_research_handler（本次）；DR 持久化 session 的 rerun 路徑後續複用。
+    """
+    if user and user.get('authenticated'):
+        query_params['user_id'] = user['id']
+        query_params['org_id'] = user.get('org_id')
+
+
 async def deep_research_handler(request: web.Request) -> web.Response:
     """Handle /api/deep_research endpoint for Deep Research mode with SSE streaming"""
 
@@ -618,12 +634,15 @@ async def deep_research_handler(request: web.Request) -> web.Response:
     query_params['generate_mode'] = 'deep_research'
     query_params['streaming'] = 'true'  # Always use streaming for Deep Research
 
+    # P0 security: inject auth user info（overrides spoofing）。抽 helper 供 DR 持久化 rerun 複用。
+    inject_auth_user_into_params(query_params, request.get('user'))
+
     # Extract query
     query = get_param(query_params, "query", str, "")
     if not query:
         return web.json_response({
             "message_type": "error",
-            "error": "Missing query parameter"
+            "error": "缺少查詢內容，請輸入搜尋關鍵字後再試。"
         }, status=400)
 
     # P1-2: Query length pre-check (before SSE stream starts — must return HTTP 400 JSON)
@@ -739,6 +758,10 @@ async def deep_research_handler(request: web.Request) -> web.Response:
         wrapper = AioHttpStreamingWrapper(request, response, query_params)
         await wrapper.prepare_response()
 
+        # 層3 前置：把認證 user 注入 query_params（覆蓋 client 偽造，對齊資安私文隔離）——
+        # DR handler / server-side persist 需正確 owner。deep_research_handler 過去漏做此步。
+        inject_auth_user_into_params(query_params, request.get('user'))
+
         # Import and create Deep Research handler
         from methods.deep_research import DeepResearchHandler
         handler = DeepResearchHandler(query_params, wrapper)
@@ -786,7 +809,10 @@ async def deep_research_handler(request: web.Request) -> web.Response:
         result = await handler.runQuery()
 
         # Send final result message (skip if clarification is pending)
-        if result and result.get('status') != 'clarification_pending':
+        # W1: 中斷時 handler 會把 status 設為 'interrupted' 並已透過 SSE 送出
+        # research_interrupted 通知；此處必須一併跳過，否則仍會送出空的 final_result
+        # 讓前端誤 render 成一份空的「成功」報告（silent fail）。
+        if result and result.get('status') not in ('clarification_pending', 'interrupted'):
             final_message = {
                 "message_type": "final_result",
                 "final_report": result.get('answer', ''),
@@ -818,6 +844,12 @@ async def deep_research_handler(request: web.Request) -> web.Response:
                     final_message['verification_message'] = schema_obj['verification_message']
             else:
                 logger.warning(f"[Deep Research] No items in result — KG cannot be extracted")
+
+            # 層3（B1 冗餘）：把 server 建/採用的 session UUID 帶回前端，供 reload 定位。
+            # 非唯一送達點——run 前的 deep_research_session_created event 才是主送達（斷線也拿得到）。
+            dr_sid = handler.return_value.get("dr_session_id") if hasattr(handler, "return_value") else None
+            if dr_sid:
+                final_message["dr_session_id"] = dr_sid
 
             logger.info(f"[Deep Research] final_message keys: {list(final_message.keys())}")
             # Phase 4b.5 Fix 1: stamp user_id on final_message (ad-hoc envelope).
@@ -882,7 +914,7 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
     )
     if not enable_composable:
         return web.json_response(
-            {'error': 'not_implemented', 'message': 'Selective re-run requires composable_pipeline feature flag'},
+            {'error': 'not_implemented', 'message': '此功能目前尚未開放，請聯絡支援團隊。'},
             status=501,
         )
 
@@ -890,7 +922,7 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
     try:
         data = await request.json()
     except Exception:
-        return web.json_response({'error': 'Invalid JSON'}, status=400)
+        return web.json_response({'error': '請求格式錯誤。'}, status=400)
 
     original_query_id = data.get('query_id')
     kg_edits = data.get('kg_edits')
@@ -912,7 +944,7 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
     from reasoning.orchestrator import get_cached_research_state
     if get_cached_research_state(original_query_id) is None:
         return web.json_response(
-            {'error': 'cache_miss', 'message': f'No cached research state for query_id={original_query_id}. The original research may have expired or the server was restarted.'},
+            {'error': 'cache_miss', 'message': '找不到原始研究紀錄（可能已過期或伺服器重啟）。請重新執行深度研究。'},
             status=400,
         )
 
@@ -968,12 +1000,8 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
         'skip_clarification': 'true',  # Skip clarification for rerun
     }
 
-    # Inject auth user info
-    user = request.get('user')
-    if user and user.get('authenticated'):
-        query_params['user_id'] = user['id']
-        if user.get('org_id'):
-            query_params['org_id'] = user['org_id']
+    # Inject auth user info（[R6 should-fix 3] 改用同一 helper，消除與 deep_research_handler 的注入 drift）
+    inject_auth_user_into_params(query_params, request.get('user'))
 
     try:
         # Create SSE response
@@ -1113,7 +1141,7 @@ async def feedback_handler(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except Exception:
-        return web.json_response({"error": "Invalid JSON"}, status=400)
+        return web.json_response({"error": "請求格式錯誤。"}, status=400)
 
     rating = body.get("rating", "")
     if rating not in ("positive", "negative"):

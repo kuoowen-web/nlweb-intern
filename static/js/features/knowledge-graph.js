@@ -70,15 +70,16 @@
 
 // v4.0 Commit 21 (2026-05-25, Phase 8 part C) — direct cross-module imports per D-V6 relax.
 import { getResearchReport, getArgumentGraph, getChainAnalysis } from './research.js';
-import { getConversationHistory } from './search.js?v=20260705c';
+import { getConversationHistory } from './search.js?v=20260714a';
 import {
     getCurrentResearchQueryId,
     displayDeepResearchResults,
     showDRError
-} from './deep-research.js?v=20260705c';
-import { setCurrentConversationId } from './search.js?v=20260705c';
+} from './deep-research.js?v=20260715b';
+import { setCurrentConversationId } from './search.js?v=20260714a';
 import { getSessionHistory } from './sessions-list.js';
 import { copyAndOpen } from './sharing.js';
+import { markSessionDirty } from './session-manager.js';
 
 // ============================================================================
 // KG Constants — entity-type → color/shape/label, relation-type → label
@@ -1918,6 +1919,11 @@ async function confirmKGEdit() {
                             window.renderConversationHistory();
                         }
                         if (typeof window.saveCurrentSession === 'function') {
+                            // 2026-07-13 regression fix: displayDeepResearchResults (:1889) saved
+                            // and cleared the dirty flag BEFORE the rerun sessionHistory entry above
+                            // was pushed — re-mark or the dirty-gate (session-coordinator.js:70)
+                            // silently swallows this save and the rerun entry never persists.
+                            markSessionDirty();
                             window.saveCurrentSession();
                         }
 

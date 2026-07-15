@@ -137,7 +137,7 @@ mmr_params:
   enabled: true           # Enable/disable MMR
   lambda: 0.7             # Default trade-off (0.0-1.0)
   threshold: 3            # Min results needed
-  include_vectors: true   # Retrieve vectors from Qdrant
+  include_vectors: true   # Retrieve vectors from PostgreSQL pgvector（原 Qdrant，已廢除 2026-06；見 Changelog 2026-03-19 PG 適配）
 ```
 
 **Feature Flags**:

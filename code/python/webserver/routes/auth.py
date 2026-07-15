@@ -39,10 +39,10 @@ async def register_handler(request: web.Request) -> web.Response:
     bootstrap_token = body.get('bootstrap_token', '')
 
     if not email or not password or not name:
-        return web.json_response({'error': 'email, password, and name are required'}, status=400)
+        return web.json_response({'error': '請填寫所有必要欄位。'}, status=400)
 
     if not bootstrap_token:
-        return web.json_response({'error': 'bootstrap_token is required'}, status=400)
+        return web.json_response({'error': '缺少管理者初始化令牌。'}, status=400)
 
     try:
         user = await _get_service().register_user(email, password, name, org_name, bootstrap_token)
@@ -92,7 +92,7 @@ async def verify_email_handler(request: web.Request) -> web.Response:
 
     try:
         user = await _get_service().verify_email(token)
-        return web.json_response({'success': True, 'message': 'Email verified successfully', 'user': user})
+        return web.json_response({'success': True, 'message': '電子郵件驗證成功。', 'user': user})
     except ValueError as e:
         return web.json_response({'error': str(e)}, status=400)
     except Exception as e:

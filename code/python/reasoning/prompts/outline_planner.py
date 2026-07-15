@@ -190,7 +190,7 @@ def build_outline_planner_prompt(
       "chapter_index": 0,
       "title": "章節標題（必須對齊上方章節清單 title）",
       "brief": "50-100 字章節 brief（這章要講什麼、定位、與其他章關係）",
-      "target_word_count": 800,
+      "target_word_count": 0,
       "planned_evidence_ids": [1, 2],
       "transition_hint": "50 字承接上章、引出下章的 hint；第一章可空字串",
       "role": "intro | body | conclusion"
@@ -200,6 +200,8 @@ def build_outline_planner_prompt(
   "redundancy_warnings": ["如有發現多章可能講重複的議題，列出警告"]
 }}
 ```
+
+（`target_word_count` 此欄僅在 user 明確指定字數時填非 0；user 未指定 → 一律 0。）
 
 ---
 
@@ -219,7 +221,9 @@ def build_outline_planner_prompt(
    - 前言用少量 framing evidence，body 用 topic-relevant；不必擔心同一筆被多章引用。
    - 若某章 brief 與所有 evidence 都低度相關，**仍至少列最接近的優先建議**（writer
      讀全 pool 不會因此斷料）— 不要硬塞完全無關 evidence 充數。
-4. **target_word_count**：合理分配，加總對應格式要求。若無格式要求，預設每章 800-1500 字。
+4. **target_word_count**：
+   - **上方「格式要求」段有出現「使用者拍板總字數」或某章標「使用者指定字數」** → 合理分配、加總對應該 budget，已標「使用者指定字數」的章必須採標示值。
+   - **上方「格式要求」段完全沒有任何字數標示（user 未指定）** → 每章 `target_word_count` 一律填 **0**（未指定，交由 writer 自決長度）。**不要腦補一個預設字數。**
 5. **transition_hint**：第 1 章可留空字串；其餘章必填，承接上章重點、引出本章焦點。
 6. **redundancy_warnings**：如發現第 N、第 M 章可能涵蓋相同議題，列警告，例如「第2、第3章都會碰到 X，請 writer 注意分工」。
 7. **brief 不要重複 title**：brief 是「這章要幹嘛」的 50-100 字定位，不是把 title 改寫。

@@ -24,7 +24,7 @@ def _make_handler():
     h.query_params = {}
     h.message_sender = None
     h.connection_alive_event = None
-    h.request_handler = None
+    h.http_handler = None
     return h
 
 

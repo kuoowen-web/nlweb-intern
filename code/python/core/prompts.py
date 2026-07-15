@@ -12,6 +12,7 @@ Backwards compatibility is not guaranteed at this time.
 from xml.etree import ElementTree as ET
 import json
 import secrets
+import functools
 from datetime import datetime
 import os  # Add this import
 from misc.logger.logging_config_helper import get_configured_logger
@@ -48,6 +49,17 @@ RETURN_STRUC_TAG = "{" + BASE_NS + "}returnStruc"
 # type, site and prompt-name. 
 # Also deals with filling in the prompt.
 # #Yet to do the subclass check.
+
+@functools.lru_cache(maxsize=1)
+def prompt_default_fallback_enabled() -> bool:
+    """find_prompt matched-site miss 是否 fallback 到 Site id="default"。
+
+    STARTUP-ONLY frozen flag（對齊 openai_keepalive_timeout 先例，lru_cache 啟動讀一次）：
+    find_prompt 有 per-process 快取（含負向快取 (None, None)），flag 若運行中翻轉會產生
+    新舊語義混雜的 cache 條目——凍結使不一致結構上不可能。改 config 需重啟 server。
+    """
+    return CONFIG.is_prompt_default_fallback_enabled()
+
 
 prompt_roots = []
 def init_prompts(files=["prompts.xml"]):
@@ -228,6 +240,33 @@ def get_cached_values(site, item_type, prompt_name):
     logger.debug(f"Cache miss for prompt: {cache_key}")
     return None
 
+def _search_site_for_prompt(candidate_site, item_type, prompt_name):
+    """Search one Site element for prompt_name. Returns the Prompt element or None.
+
+    語義等價復刻現行 find_prompt 內層（含 last-match-wins）：direct 段命中即回；
+    Item/Type 段 last-match-wins——後面的 type child 若含同名 prompt 會覆蓋前面的
+    （現行 :295 break 只出內層 for pe，不出 for child）。改為 first-match-wins 會
+    silently 翻轉 default 下 <Item> vs <Statistics> 同名 prompt 的選擇（B1）。
+    """
+    site_id = candidate_site.get('id')
+    # First check for prompts directly under Site (shouldn't exist, but check anyway)
+    for pe in candidate_site.findall(PROMPT_TAG):
+        if pe.get("ref") == prompt_name:
+            logger.debug(f"Found prompt '{prompt_name}' directly under site '{site_id}'")
+            return pe
+    # If not found, search within Item/Type elements under Site.
+    # last-match-wins: keep scanning subsequent type children after a hit (mirror :285-295).
+    found = None
+    for child in candidate_site:
+        if super_class_of(item_type, child.tag):
+            for pe in child.findall(PROMPT_TAG):
+                if pe.get("ref") == prompt_name:
+                    found = pe
+                    logger.debug(f"Found prompt '{prompt_name}' in site '{site_id}' under {child.tag}")
+                    break  # only breaks inner for pe; keep scanning children (last-match-wins)
+    return found
+
+
 def find_prompt(site, item_type, prompt_name):
     if isinstance(site, list):
         site = site[0] if site else None
@@ -271,33 +310,29 @@ def find_prompt(site, item_type, prompt_name):
     # Search within each candidate Site for the prompt
     logger.debug(f"Searching for prompt '{prompt_name}' with item_type='{item_type}' in {len(candidate_sites)} sites")
     for candidate_site in candidate_sites:
-        site_id = candidate_site.get('id')
-        # First check for prompts directly under Site (shouldn't exist, but check anyway)
-        site_prompts = candidate_site.findall(PROMPT_TAG)
-        for pe in site_prompts:
-            if pe.get("ref") == prompt_name:
-                prompt_element = pe
-                logger.debug(f"Found prompt '{prompt_name}' directly under site '{site_id}'")
-                break
-
-        # If not found, search within Item/Type elements under Site
-        if prompt_element is None:
-            for child in candidate_site:
-                logger.debug(f"Checking child element: tag='{child.tag}', super_class_of({item_type}, {child.tag})={super_class_of(item_type, child.tag)}")
-                if (super_class_of(item_type, child.tag)):
-                    children = child.findall(PROMPT_TAG)
-                    logger.debug(f"Found {len(children)} prompts under {child.tag}")
-
-                    for pe in children:
-                        if pe.get("ref") == prompt_name:
-                            prompt_element = pe
-                            logger.debug(f"Found prompt '{prompt_name}' in site '{site_id}' under {child.tag}")
-                            break
-
-        # If found, stop searching other sites
+        prompt_element = _search_site_for_prompt(candidate_site, item_type, prompt_name)
         if prompt_element is not None:
             break
-    
+
+    # Flag-gated fallback (prompt_default_fallback_enabled, startup-only, default OFF):
+    # a matched Site element that lacks the prompt falls back to Site id="default".
+    # Only fires on matched-site miss — never hijacks a matched-site hit, and the
+    # legacy unmatched-site fallback above is untouched.
+    if (prompt_element is None and found_matching_site and site != "default"
+            and prompt_default_fallback_enabled()):
+        logger.info(
+            f"Prompt '{prompt_name}' not in matched site '{site}', "
+            f"falling back to Site id='default' (prompt_default_fallback_enabled)"
+        )
+        for root_element in prompt_roots:
+            for se in root_element.findall(SITE_TAG):
+                if se.get("id") == "default":
+                    prompt_element = _search_site_for_prompt(se, item_type, prompt_name)
+                    if prompt_element is not None:
+                        break
+            if prompt_element is not None:
+                break
+
     if prompt_element is not None:
         prompt_text = prompt_element.find(PROMPT_STRING_TAG).text
         return_struc_element = prompt_element.find(RETURN_STRUC_TAG)

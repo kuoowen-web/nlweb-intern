@@ -163,25 +163,25 @@ class TestRegisterUser:
         token1 = await _create_bootstrap_token(service)
         await service.register_user("dup@example.com", "Passw0rd", "First", bootstrap_token=token1)
         token2 = await _create_bootstrap_token(service)
-        with pytest.raises(ValueError, match="Email already registered"):
+        with pytest.raises(ValueError, match="已被註冊"):
             await service.register_user("dup@example.com", "Passw0rd", "Second", bootstrap_token=token2)
 
     @pytest.mark.asyncio
     async def test_register_weak_password_too_short(self, service, _no_email):
         token = await _create_bootstrap_token(service)
-        with pytest.raises(ValueError, match="at least 8 characters"):
+        with pytest.raises(ValueError, match="至少須 8 個字元"):
             await service.register_user("a@b.com", "Ab1", "X", bootstrap_token=token)
 
     @pytest.mark.asyncio
     async def test_register_weak_password_no_uppercase(self, service, _no_email):
         token = await _create_bootstrap_token(service)
-        with pytest.raises(ValueError, match="uppercase"):
+        with pytest.raises(ValueError, match="大寫字母"):
             await service.register_user("a@b.com", "password1", "X", bootstrap_token=token)
 
     @pytest.mark.asyncio
     async def test_register_weak_password_no_digit(self, service, _no_email):
         token = await _create_bootstrap_token(service)
-        with pytest.raises(ValueError, match="digit"):
+        with pytest.raises(ValueError, match="數字"):
             await service.register_user("a@b.com", "Password", "X", bootstrap_token=token)
 
 
@@ -205,7 +205,7 @@ class TestVerifyEmail:
 
     @pytest.mark.asyncio
     async def test_verify_email_invalid_token(self, service, _no_email):
-        with pytest.raises(ValueError, match="Invalid or expired"):
+        with pytest.raises(ValueError, match="驗證連結無效"):
             await service.verify_email("nonexistent-token")
 
     @pytest.mark.asyncio
@@ -218,7 +218,7 @@ class TestVerifyEmail:
         token = row['email_verification_token']
 
         await service.verify_email(token)
-        with pytest.raises(ValueError, match="Invalid or expired"):
+        with pytest.raises(ValueError, match="驗證連結無效"):
             await service.verify_email(token)
 
 
@@ -239,12 +239,12 @@ class TestLogin:
     @pytest.mark.asyncio
     async def test_login_wrong_password(self, service, _no_email):
         await _register_and_verify(service)
-        with pytest.raises(ValueError, match="Invalid email or password"):
+        with pytest.raises(ValueError, match="電子郵件或密碼錯誤"):
             await service.login("test@example.com", "WrongPass1", ip="127.0.0.1")
 
     @pytest.mark.asyncio
     async def test_login_nonexistent_email(self, service, _no_email):
-        with pytest.raises(ValueError, match="Invalid email or password"):
+        with pytest.raises(ValueError, match="電子郵件或密碼錯誤"):
             await service.login("nobody@example.com", "Passw0rd", ip="127.0.0.1")
 
     @pytest.mark.asyncio
@@ -261,7 +261,7 @@ class TestLogin:
             "VALUES (?, ?, ?, ?, ?, ?)",
             (str(uuid.uuid4()), "unv@e.com", password_hash, "Unv", False, time.time())
         )
-        with pytest.raises(ValueError, match="Email not verified"):
+        with pytest.raises(ValueError, match="電子郵件尚未驗證"):
             await service.login("unv@e.com", "Passw0rd", ip="127.0.0.1")
 
     @pytest.mark.asyncio
@@ -270,7 +270,7 @@ class TestLogin:
         db = AuthDB.get_instance()
         await db.execute("UPDATE users SET is_active = 0 WHERE id = ?", (user['id'],))
         # B2B: deactivated account returns a clear message so user doesn't keep retrying
-        with pytest.raises(ValueError, match="Account is deactivated"):
+        with pytest.raises(ValueError, match="帳號已停用"):
             await service.login("test@example.com", "Password1", ip="127.0.0.1")
 
     @pytest.mark.asyncio
@@ -395,7 +395,7 @@ class TestForgotPassword:
 
     @pytest.mark.asyncio
     async def test_reset_password_invalid_token(self, service, _no_email):
-        with pytest.raises(ValueError, match="Invalid or expired"):
+        with pytest.raises(ValueError, match="重設密碼連結"):
             await service.reset_password("bogus-token", "NewPassword1")
 
 
@@ -410,11 +410,11 @@ class TestBruteForce:
         await _register_and_verify(service)
 
         for i in range(BRUTE_FORCE_MAX_ATTEMPTS):
-            with pytest.raises(ValueError, match="Invalid email or password"):
+            with pytest.raises(ValueError, match="電子郵件或密碼錯誤"):
                 await service.login("test@example.com", "WrongPass1", ip="127.0.0.1")
 
         # Next attempt should get the lockout message
-        with pytest.raises(ValueError, match="Too many failed login attempts"):
+        with pytest.raises(ValueError, match="登入失敗次數過多"):
             await service.login("test@example.com", "Password1", ip="127.0.0.1")
 
     @pytest.mark.asyncio
@@ -423,10 +423,10 @@ class TestBruteForce:
         await _register_and_verify(service)
 
         for _ in range(BRUTE_FORCE_MAX_ATTEMPTS):
-            with pytest.raises(ValueError, match="Invalid email or password"):
+            with pytest.raises(ValueError, match="電子郵件或密碼錯誤"):
                 await service.login("test@example.com", "Wrong1234", ip="127.0.0.1")
 
-        with pytest.raises(ValueError, match="Too many failed login attempts"):
+        with pytest.raises(ValueError, match="登入失敗次數過多"):
             await service.login("test@example.com", "Password1", ip="127.0.0.1")
 
     @pytest.mark.asyncio
@@ -435,7 +435,7 @@ class TestBruteForce:
         await _register_and_verify(service)
 
         for _ in range(BRUTE_FORCE_MAX_ATTEMPTS - 1):
-            with pytest.raises(ValueError, match="Invalid email or password"):
+            with pytest.raises(ValueError, match="電子郵件或密碼錯誤"):
                 await service.login("test@example.com", "Wrong1234", ip="127.0.0.1")
 
         # Should still be able to login
@@ -455,7 +455,7 @@ class TestChangePassword:
         result = await service.change_password(user_id, "Password1", "NewPassw0rd")
         assert result is True
         # Old password no longer works
-        with pytest.raises(ValueError, match="Invalid email or password"):
+        with pytest.raises(ValueError, match="電子郵件或密碼錯誤"):
             await service.login("test@example.com", "Password1", ip="127.0.0.1")
         # New password works
         new_login = await service.login("test@example.com", "NewPassw0rd", ip="127.0.0.1")
@@ -465,14 +465,14 @@ class TestChangePassword:
     async def test_change_password_wrong_current(self, service, _no_email):
         login_result = await _register_verify_and_login(service)
         user_id = login_result['user']['id']
-        with pytest.raises(ValueError, match="Current password is incorrect"):
+        with pytest.raises(ValueError, match="目前密碼不正確"):
             await service.change_password(user_id, "WrongPass1", "NewPassw0rd")
 
     @pytest.mark.asyncio
     async def test_change_password_weak_new_password(self, service, _no_email):
         login_result = await _register_verify_and_login(service)
         user_id = login_result['user']['id']
-        with pytest.raises(ValueError, match="at least 8 characters"):
+        with pytest.raises(ValueError, match="至少須 8 個字元"):
             await service.change_password(user_id, "Password1", "short")
 
     @pytest.mark.asyncio
@@ -566,13 +566,13 @@ class TestSetUserActive:
     @pytest.mark.asyncio
     async def test_cannot_deactivate_self(self, service, _no_email):
         admin_id, org_id, _ = await self._setup_admin_and_member(service)
-        with pytest.raises(PermissionError, match="Cannot deactivate your own account"):
+        with pytest.raises(PermissionError, match="無法停用您自己的帳號"):
             await service.set_user_active(admin_id, False, admin_id, org_id)
 
     @pytest.mark.asyncio
     async def test_non_admin_cannot_deactivate(self, service, _no_email):
         admin_id, org_id, member_id = await self._setup_admin_and_member(service)
-        with pytest.raises(PermissionError, match="Only admins"):
+        with pytest.raises(PermissionError, match="只有管理員"):
             await service.set_user_active(admin_id, False, member_id, org_id)
 
 
@@ -627,13 +627,13 @@ class TestDeleteUser:
     @pytest.mark.asyncio
     async def test_cannot_delete_self(self, service, _no_email):
         admin_id, org_id, _ = await self._setup_admin_and_member(service)
-        with pytest.raises(PermissionError, match="Cannot delete your own account"):
+        with pytest.raises(PermissionError, match="無法刪除您自己的帳號"):
             await service.delete_user(admin_id, admin_id, org_id)
 
     @pytest.mark.asyncio
     async def test_non_admin_cannot_delete(self, service, _no_email):
         admin_id, org_id, member_id = await self._setup_admin_and_member(service)
-        with pytest.raises(PermissionError, match="Only admins"):
+        with pytest.raises(PermissionError, match="只有管理員"):
             await service.delete_user(admin_id, member_id, org_id)
 
 
@@ -681,13 +681,13 @@ class TestChangeMemberRole:
     @pytest.mark.asyncio
     async def test_cannot_change_own_role(self, service, _no_email):
         admin_id, org_id, _ = await self._setup_admin_and_member(service)
-        with pytest.raises(PermissionError, match="Cannot change your own role"):
+        with pytest.raises(PermissionError, match="無法變更您自己的角色"):
             await service.change_member_role(org_id, admin_id, "member", admin_id)
 
     @pytest.mark.asyncio
     async def test_non_admin_cannot_change_role(self, service, _no_email):
         admin_id, org_id, member_id = await self._setup_admin_and_member(service)
-        with pytest.raises(PermissionError, match="Only admins"):
+        with pytest.raises(PermissionError, match="只有管理員"):
             await service.change_member_role(org_id, admin_id, "member", member_id)
 
 
@@ -811,7 +811,7 @@ class TestAdminResendActivation:
         )
         await service.activate_account(row['email_verification_token'], "MemberPass1")
 
-        with pytest.raises(ValueError, match="already activated"):
+        with pytest.raises(ValueError, match="已啟用"):
             await service.admin_resend_activation(member_id, admin_id, org_id)
 
     @pytest.mark.asyncio
@@ -827,7 +827,7 @@ class TestAdminResendActivation:
             "SELECT id FROM organizations WHERE id != ? LIMIT 1", (org_id,)
         )
 
-        with pytest.raises(PermissionError, match="Only admins"):
+        with pytest.raises(PermissionError, match="只有管理員"):
             await service.admin_resend_activation(member_id, admin2['id'], org_id)
 
     @pytest.mark.asyncio
@@ -841,5 +841,5 @@ class TestAdminResendActivation:
             "UPDATE users SET is_active = 0 WHERE id = ?", (member_id,)
         )
 
-        with pytest.raises(ValueError, match="deactivated"):
+        with pytest.raises(ValueError, match="已停用"):
             await service.admin_resend_activation(member_id, admin_id, org_id)

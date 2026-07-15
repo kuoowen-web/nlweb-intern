@@ -13,7 +13,9 @@ import logging
 from typing import Dict, Any, Optional
 from aiohttp import web
 
-logger = logging.getLogger(__name__)
+from misc.logger.logging_config_helper import get_configured_logger
+
+logger = get_configured_logger("aiohttp_streaming_wrapper")
 
 
 class AioHttpStreamingWrapper:
@@ -51,7 +53,6 @@ class AioHttpStreamingWrapper:
             return  # Already marked
         self.connection_alive = False
         logger.info("Client disconnected - SSE connection closed")
-        logger.debug("[CANCEL] Client disconnected - SSE connection closed")
         if self._on_disconnect:
             try:
                 self._on_disconnect()
@@ -79,6 +80,8 @@ class AioHttpStreamingWrapper:
         try:
             await self.response.write(b": keepalive\n\n")
         except Exception:
+            # 觀測性（層1，F15/H4）：keepalive 失敗是 half-open 斷線偵測的關鍵訊號。
+            logger.info("keepalive write failed → mark disconnected")
             self._mark_disconnected()
     
     async def write_stream(self, message: Dict[str, Any], end_response: bool = False):
@@ -90,8 +93,13 @@ class AioHttpStreamingWrapper:
             end_response: Whether this is the last message
         """
         if not self.connection_alive:
+            # 觀測性（層1）：斷線後訊息被丟棄必須留痕，不可靜默（no-silent-fail）。
+            logger.warning(
+                f"write_stream dropped message (connection_alive=False): "
+                f"type={message.get('message_type') if isinstance(message, dict) else 'raw'}"
+            )
             return
-            
+
         try:
             # Check if connection is still alive
             if self.request.transport and self.request.transport.is_closing():
@@ -111,7 +119,8 @@ class AioHttpStreamingWrapper:
                     self.heartbeat_task.cancel()
 
         except Exception as e:
-            logger.debug(f"Error writing to stream: {e}")
+            # 觀測性（層1）：write 失敗是斷線的一手訊號，升 warning 不可靜默。
+            logger.warning(f"Error writing to stream: {e}")
             self._mark_disconnected()
             if self.heartbeat_task:
                 self.heartbeat_task.cancel()

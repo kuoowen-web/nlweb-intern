@@ -34,6 +34,16 @@ DEFAULT_DSN = "postgresql://nlweb@localhost:5432/nlweb"
 CHUNK_INSERT_BATCH = 500  # chunks per transaction
 
 
+class BulkLoadError(Exception):
+    """檔案級（file-pair-level）致命錯誤 —— 不該被 article-level 的
+    per-article rollback 吞掉。遇到這類錯誤整個檔案對視為失敗，
+    不寫入 .bulk_load_done，下次重跑。
+
+    例：embedding_offset 超出 .npy 範圍（少 chunk 卻無錯是資料完整性
+    問題，必須當檔案級失敗，不可靜默跳過）。
+    """
+
+
 DATE_FORMATS = [
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%dT%H:%M:%S%z",
@@ -64,6 +74,13 @@ def load_file_pair(jsonl_path: Path, npy_path: Path, conn) -> dict:
 
     # Load embeddings (memory-mapped to avoid RAM spike on large files)
     embeddings = np.load(npy_path, mmap_mode='r')
+    # 防呆：非 2-D array（例如 1-D）取 shape[1] 會 IndexError crash。
+    # 先驗維度，給乾淨的檔案級錯誤訊息（不 silent，不裸 crash）。
+    if embeddings.ndim != 2:
+        raise ValueError(
+            f"Expected 2-D embeddings array (N, 1024), got ndim={embeddings.ndim} "
+            f"shape={embeddings.shape} in {npy_path.name}"
+        )
     if embeddings.shape[1] != 1024:
         raise ValueError(f"Expected 1024-dim embeddings, got {embeddings.shape[1]}")
     logger.info(f"  Loaded {embeddings.shape[0]} embeddings from {npy_path.name}")
@@ -122,8 +139,14 @@ def load_file_pair(jsonl_path: Path, npy_path: Path, conn) -> dict:
                 chunk_rows = []
                 for c in chunks:
                     offset = c["embedding_offset"]
+                    # out-of-range offset：不可靜默 continue（會少 chunk 卻無錯，
+                    # 資料完整性問題）。當檔案級失敗，整檔不進 done、下次重跑。
                     if offset >= len(embeddings):
-                        continue
+                        raise BulkLoadError(
+                            f"embedding_offset {offset} out of range "
+                            f"(npy has {len(embeddings)} embeddings) "
+                            f"for url={url} chunk_index={c.get('chunk_index')}"
+                        )
                     emb = embeddings[offset]
                     emb_str = "[" + ",".join(f"{v:.8f}" for v in emb.tolist()) + "]"
                     chunk_rows.append((
@@ -133,6 +156,16 @@ def load_file_pair(jsonl_path: Path, npy_path: Path, conn) -> dict:
                         emb_str,
                         c["chunk_text"],  # tsv = chunk_text for pg_bigm
                     ))
+
+                # orphan chunks 防護（原子替換）：先刪這篇文章的所有舊 chunks 再
+                # insert 新的。若新 chunk 數 < 舊 chunk 數，純 ON CONFLICT UPDATE
+                # 只更新不刪 → 舊的高 index chunk 殘留 → 搜尋返回過期內容。
+                # DELETE + INSERT 同一 transaction（下方 conn.commit() 一起提交），
+                # 首次載入 DELETE 空集合是 no-op（正常）。
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM chunks WHERE article_id = %s", (article_id,)
+                    )
 
                 # Batch insert chunks
                 chunk_sql = """
@@ -154,6 +187,12 @@ def load_file_pair(jsonl_path: Path, npy_path: Path, conn) -> dict:
                 stats["articles"] += 1
                 stats["chunks"] += len(chunk_rows)
 
+            except BulkLoadError:
+                # 檔案級致命錯誤：rollback 當前文章的 partial 寫入後往外拋，
+                # 讓整個檔案對視為失敗（不進 done）。不可降級成 article-level
+                # error 吞掉（否則會少 chunk 卻靜默成功）。
+                conn.rollback()
+                raise
             except Exception as e:
                 logger.error(f"  Error processing {url}: {e}")
                 conn.rollback()
@@ -162,14 +201,17 @@ def load_file_pair(jsonl_path: Path, npy_path: Path, conn) -> dict:
     return stats
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Bulk load cloud embeddings into PostgreSQL")
-    parser.add_argument("results_dir", help="Directory with .jsonl + .npy files")
-    parser.add_argument("--pg-dsn", default=None, help=f"PostgreSQL DSN (default: env POSTGRES_CONNECTION_STRING or {DEFAULT_DSN})")
-    args = parser.parse_args()
+def main_load_dir(results_dir: str, dsn: str) -> dict:
+    """掃描 results_dir 的 .jsonl+.npy 配對逐對載入 dsn 指向的 PG。
 
-    results_dir = Path(args.results_dir)
-    dsn = args.pg_dsn or os.environ.get("POSTGRES_CONNECTION_STRING", DEFAULT_DSN)
+    從 main() 抽出的可測核心（main() 只負責解析 argv + 決定 dsn）。
+    回傳 grand 統計 dict。
+
+    .bulk_load_done gate：**只有 stats.errors == 0 才寫入 done**（原本 errors>0
+    也寫，導致含壞資料的檔被永久跳過、漏資料）。檔案級失敗（load_file_pair
+    raise，例如 out-of-range offset / 維度不符）同樣不寫 done，下次重跑。
+    """
+    results_dir = Path(results_dir)
 
     # Find all .jsonl files with matching .npy
     pairs = []
@@ -182,9 +224,11 @@ def main():
     logger.info(f"Results dir: {results_dir}")
     logger.info(f"File pairs: {len(pairs)}")
 
+    grand = {"articles": 0, "chunks": 0, "errors": 0}
+
     if not pairs:
         logger.error("No .jsonl + .npy pairs found")
-        return
+        return grand
 
     # Track done files
     done_file = results_dir / ".bulk_load_done"
@@ -195,8 +239,6 @@ def main():
 
     remaining = [(j, n) for j, n in pairs if j.name not in done_set]
     logger.info(f"Done: {len(done_set)}, Remaining: {len(remaining)}")
-
-    grand = {"articles": 0, "chunks": 0, "errors": 0}
 
     with psycopg.connect(dsn, row_factory=dict_row) as conn:
         logger.info("Connected to PostgreSQL")
@@ -214,17 +256,39 @@ def main():
                 for k in grand:
                     grand[k] += stats[k]
 
-                with open(done_file, "a", encoding="utf-8") as f:
-                    f.write(jsonl.name + "\n")
+                # errors gate：僅在完全無錯時才記 done。errors>0 代表本檔有文章
+                # 沒進 DB（漏資料），必須讓下次重跑，不可寫 done 永久跳過。
+                if stats["errors"] == 0:
+                    with open(done_file, "a", encoding="utf-8") as f:
+                        f.write(jsonl.name + "\n")
+                else:
+                    logger.warning(
+                        f"  SKIP done-mark: {jsonl.name} 有 {stats['errors']} 個 error，"
+                        f"不寫入 .bulk_load_done（下次重跑）"
+                    )
 
             except Exception as e:
+                # 檔案級失敗（load_file_pair raise：BulkLoadError / 維度不符 / 檔損壞）
+                # → 不寫 done，下次重跑。errors 計入 grand 讓最終統計反映失敗檔。
                 logger.error(f"  FATAL: {e}")
                 conn.rollback()
+                grand["errors"] += 1
                 continue
 
     logger.info("=== Complete ===")
     logger.info(f"Total: {grand['articles']} articles, {grand['chunks']} chunks, "
                 f"{grand['errors']} errors")
+    return grand
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Bulk load cloud embeddings into PostgreSQL")
+    parser.add_argument("results_dir", help="Directory with .jsonl + .npy files")
+    parser.add_argument("--pg-dsn", default=None, help=f"PostgreSQL DSN (default: env POSTGRES_CONNECTION_STRING or {DEFAULT_DSN})")
+    args = parser.parse_args()
+
+    dsn = args.pg_dsn or os.environ.get("POSTGRES_CONNECTION_STRING", DEFAULT_DSN)
+    main_load_dir(args.results_dir, dsn)
 
 
 if __name__ == "__main__":

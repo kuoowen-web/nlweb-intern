@@ -1,12 +1,16 @@
 # NLWeb Development Setup
 
+> 與 `scripts/setup.sh` / `scripts/dev-up.sh` 對齊（2026-07-10 更新）。腳本行為變更時請同步本檔。
+
 ## 系統需求
 
-| 需求              | 說明                                       |
-| --------------- | ---------------------------------------- |
-| **Python 3.11** | 必須是 3.11，3.12/3.13 會導致 qdrant-client 不相容 |
-| **Git**         | 版本管理                                     |
-| **C++ 編譯器**     | 部分 Python 套件（chroma-hnswlib）需要從原始碼編譯     |
+| 需求              | 說明                                                  |
+| --------------- | --------------------------------------------------- |
+| **Python 3.11** | 必須是 3.11，多個依賴套件尚未支援 3.12/3.13                       |
+| **Git**         | 版本管理                                                |
+| **uv**          | 依賴管理（`setup.sh` 未偵測到會自動安裝）                          |
+| **Docker**      | 本機 PostgreSQL（`docker-compose.dev.yml`）             |
+| **C++ 編譯器**     | 部分 Python 套件需從原始碼編譯                                 |
 
 ### 安裝 Python 3.11
 
@@ -27,19 +31,20 @@
 git clone https://github.com/kuoowen-web/taiwan-news-ai-search.git
 cd taiwan-news-ai-search
 
-# 2. 一鍵 setup（自動檢查環境 + 建 venv + 裝 dependencies + 建 .env）
+# 2. 一鍵 setup（檢查環境 + uv sync 裝依賴 + 從 .env.example 建 .env）
 bash scripts/setup.sh
 
 # 3. 填入 API keys（找專案負責人拿）
-#    編輯 .env，填入 OPENAI_API_KEY, QDRANT_URL, QDRANT_API_KEY
+#    編輯 .env，至少需要 OPENAI_API_KEY, POSTGRES_CONNECTION_STRING
 
-# 4. 啟動 server
-source venv/bin/activate        # macOS
-source venv/Scripts/activate    # Windows (Git Bash)
+# 4. 啟動本機 DB（docker compose 起 PostgreSQL + alembic upgrade head）
+bash scripts/dev-up.sh
+
+# 5. 啟動 server
 cd code/python
-python app-file.py
+uv run python app-aiohttp.py
 
-# 5. 打開 http://localhost:8000
+# 6. 打開 http://localhost:8000
 ```
 
 ## 日常開發
@@ -48,30 +53,29 @@ python app-file.py
 
 ```bash
 cd taiwan-news-ai-search
-source venv/bin/activate        # macOS
-source venv/Scripts/activate    # Windows (Git Bash)
+bash scripts/dev-up.sh          # 確保 PG container 起來 + migration 對齊
 cd code/python
-python app-file.py
+uv run python app-aiohttp.py
 ```
 
-改 code → Ctrl+C 停 server → 重新 `python app-file.py`。
+改 code → Ctrl+C 停 server → 重新 `uv run python app-aiohttp.py`。
 
 ## Environment Variables
 
-把我後來給你們的那個.env版本放進去。
+`scripts/setup.sh` 會從 `.env.example` 複製出 `.env`，再填入實際值（找專案負責人拿）。
 
 ## Troubleshooting
 
-### `pip install` 失敗
+### `uv sync` 失敗
 
-通常是 chroma-hnswlib 編譯問題，缺 C++ 編譯器：
+通常是缺 C++ 編譯器：
 
 - **macOS**: `xcode-select --install`
 - **Windows**: 安裝 Visual Studio Build Tools（C++ workload）
 
-### `qdrant-client` 報錯
+### Python 版本不對
 
-Python 版本不對。確認：
+多個依賴需要 3.11。確認：
 
 ```bash
 python --version  # 必須是 3.11.x
@@ -79,6 +83,6 @@ python --version  # 必須是 3.11.x
 
 ### Server 起不來
 
-1. 確認 `.env` 已填入 API keys
-2. 確認在 `code/python/` 目錄下執行
-3. 確認 venv 已 activate（terminal 前面應該有 `(venv)` 字樣）
+1. 確認 `.env` 已填入 API keys（`OPENAI_API_KEY`、`POSTGRES_CONNECTION_STRING`）
+2. 確認 PostgreSQL container 已啟動（先跑 `bash scripts/dev-up.sh`，任一步失敗會直接 exit non-zero）
+3. 確認在 `code/python/` 目錄下執行

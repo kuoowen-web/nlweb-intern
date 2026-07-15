@@ -129,7 +129,7 @@ Help Center 是讀豹的使用者支援介面，提供三項功能：
 3. Soft auth：若 JWT 有效，讀取 `user_id` 與 `email`
 4. 截圖處理：
    - base64 decode
-   - 大小檢查：超過 5 MB（`MAX_SCREENSHOT_BYTES`）拒絕（錯誤訊息顯示「1MB」為 UI 文案不一致，實際限制為 5 MB）
+   - 大小檢查：超過 5 MB（`MAX_SCREENSHOT_BYTES`）拒絕（~~錯誤訊息顯示「1MB」文案不一致~~ → 已修，commit `c9c7a45b` 2026-06-17，前後端統一 5MB）
    - Magic bytes 驗證：僅接受 JPEG（`\xff\xd8\xff`）或 PNG（`\x89PNG...`）
    - 儲存至 `static/uploads/feedback/{uuid}.{ext}`（路徑由 `SCREENSHOT_DIR` 計算，以 `help.py` 所在位置向上 5 層定位專案根目錄）
    - 截圖儲存失敗時記 warning log 並繼續（`screenshot_path = None`）
@@ -199,7 +199,7 @@ Content-Security-Policy:
 ### 已知限制
 
 1. **FAQ 無動態管理**：內容硬編碼於 JS；更新需重新部署前端
-2. **截圖大小訊息不一致**：後端限制 5 MB，前端錯誤訊息顯示「1MB」
+2. ~~**截圖大小訊息不一致**：後端限制 5 MB，前端錯誤訊息顯示「1MB」~~ → 已修（commit `c9c7a45b`，2026-06-17）
 3. **截圖無存取控制**：上傳後可透過靜態路由公開存取，無需認證
 4. **feedbacks 無管理介面**：目前無法在後台瀏覽/處理回饋資料
 5. **`/api/faq` GET 端點**：`auth.py` 的 `PUBLIC_GET_ENDPOINTS` 已預留 `/api/faq`，但 `help.py` 尚未實作
@@ -209,4 +209,4 @@ Content-Security-Policy:
 1. **FAQ CRUD API**：實作 `GET /api/faq`（公開）+ `POST/PUT/DELETE /api/faq`（admin only），從 `faqs` 資料表動態讀取
 2. **Feedback 後台**：admin dashboard 顯示回饋列表、狀態管理
 3. **截圖存取控制**：上傳後僅限 admin 或上傳者存取
-4. **截圖大小訊息修正**：前後端統一為 5 MB
+4. ~~**截圖大小訊息修正**：前後端統一為 5 MB~~ → 已完成（commit `c9c7a45b`，2026-06-17）

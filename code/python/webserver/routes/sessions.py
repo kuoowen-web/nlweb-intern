@@ -81,7 +81,7 @@ async def create_session_handler(request: web.Request) -> web.Response:
             session_history=body.get('session_history'),
             chat_history=body.get('chat_history'),
             accumulated_articles=body.get('accumulated_articles'),
-            research_report=body.get('research_report'),
+            # [R2] B4：不以 client body 值建立 research_report（DR server 單一權威，前端只讀不寫）。
             lr_dialog_snapshot=body.get('lr_dialog_snapshot'),
         )
         fire_and_forget(log_action('session.create', user_id=user_info['id'], org_id=org_id, target_type='session', target_id=session['id']))
@@ -131,6 +131,10 @@ async def update_session_handler(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({'error': 'Invalid JSON'}, status=400)
+
+    # [R2] B4：server 端一律無視 client 傳來的 research_report（DR 為 server 單一權威，
+    # 前端只讀不寫；client session save 不得覆蓋 server 寫的權威值）。
+    body.pop('research_report', None)
 
     try:
         updated = await _get_service().update_session(session_id, user_info['id'], org_id, body)

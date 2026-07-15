@@ -124,7 +124,7 @@ class _FakeHandler:
     query_params = {}
     message_sender = None
     connection_alive_event = None
-    request_handler = None
+    http_handler = None
 
 
 class _FakeAssociator:

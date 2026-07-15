@@ -475,3 +475,17 @@ def test_consistency_review_monitor_degraded_can_set_true():
         monitor_degraded=True,
     )
     assert cr.monitor_degraded is True
+
+
+def test_generated_report_title_schema_roundtrip():
+    from reasoning.schemas_live import GeneratedReportTitle
+    obj = GeneratedReportTitle(title="臺灣離岸風電與漁業的用地拉鋸")
+    data = obj.model_dump_json()
+    import json
+    assert json.loads(data)["title"] == "臺灣離岸風電與漁業的用地拉鋸"
+
+
+def test_generated_report_title_schema_has_title_field():
+    from reasoning.schemas_live import GeneratedReportTitle
+    schema = GeneratedReportTitle.model_json_schema()
+    assert "title" in schema["properties"]

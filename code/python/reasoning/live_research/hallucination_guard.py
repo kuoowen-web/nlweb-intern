@@ -77,8 +77,12 @@ def _deterministic_grounded_filter(
 
 # 中文 / 英文句尾標點切句（標點隨前句）
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?\n])")
-# citation 標記：[3] / [3,12] / [3、12]（半形括號，與 render 端一致）
-_CITATION_RE = re.compile(r"\[\d+(?:\s*[,、]\s*\d+)*\]")
+# citation 標記：render 後 [3]/[3,12]/[3、12]，以及 render 前的 {cite:3} placeholder。
+# G3 fix: apply_hallucination_guard 各呼叫點都在 _render_section_citations 之前跑，
+# 此時 content 仍是 {cite:N}；若只認 [N]，安全閥會把「已引用」的句子誤判成「無引用」
+# 而硬刪（false-positive 刪除 grounded 句）。兩種格式都要認。{cite:N} 一定是單一數字
+# （render 端 re.sub(r"\{cite:(\d+)\}") 只吃單組），與第 29 行要偵測的字面 [N]（大寫 N）不衝突。
+_CITATION_RE = re.compile(r"\[\d+(?:\s*[,、]\s*\d+)*\]|\{cite:\d+\}")
 # 句首/句中上下文依賴連接詞（刪去會留殘骸 / 指代不明）
 _CONJUNCTION_MARKERS = (
     "但是", "然而", "因此", "所以", "因而", "於是", "不過", "因此", "故",

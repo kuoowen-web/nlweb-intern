@@ -215,7 +215,19 @@ class DeepResearchHandler(NLWebHandler):
                     results = await self._research_task
                 except asyncio.CancelledError:
                     logger.info("[DEEP RESEARCH] Research task cancelled")
-                    results = []
+                    # W1: 中斷 ≠ 完成。原本落到下方 results=[] 會 fabricate 一份空的
+                    # 「成功」報告送給前端（silent fail）。改為明確標記 interrupted +
+                    # 主動 SSE 告知，並提前 return，不往下送假報告。
+                    self.return_value.update({
+                        'status': 'interrupted',
+                        'answer': '',
+                        'confidence_level': 'Low',
+                        'methodology_note': 'Deep Research 已中斷（未完成，無報告）',
+                        'sources_used': [],
+                        'items': [],
+                    })
+                    await self._send_research_interrupted()
+                    return
                 finally:
                     self._research_task = None
             else:
@@ -296,6 +308,24 @@ class DeepResearchHandler(NLWebHandler):
             # SSE send itself failed -- connection probably dead, just log
             logger.warning(
                 f"[DEEP RESEARCH] Failed to send error to frontend: {send_err}"
+            )
+
+    async def _send_research_interrupted(self):
+        """Push a research-interrupted notice to the user via SSE (best-effort).
+
+        W1: 中斷 ≠ 完成。不可送出空的 final_result 假裝成功（silent fail）。此處主動
+        通知前端研究被中斷、未完成，前端據此顯示中斷狀態而非空報告。
+        """
+        try:
+            if hasattr(self, 'message_sender') and self.message_sender:
+                await self.message_sender.send_message({
+                    "message_type": "research_interrupted",
+                    "message": "Deep Research 已中斷，未產生完整報告。",
+                })
+                logger.info("[DEEP RESEARCH] Interrupted notice sent to frontend via SSE")
+        except Exception as send_err:
+            logger.warning(
+                f"[DEEP RESEARCH] Failed to send interrupted notice: {send_err}"
             )
 
     def _get_temporal_context(self) -> Dict[str, Any]:

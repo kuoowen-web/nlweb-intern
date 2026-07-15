@@ -786,7 +786,10 @@ async def deep_research_handler(request: web.Request) -> web.Response:
         result = await handler.runQuery()
 
         # Send final result message (skip if clarification is pending)
-        if result and result.get('status') != 'clarification_pending':
+        # W1: 中斷時 handler 會把 status 設為 'interrupted' 並已透過 SSE 送出
+        # research_interrupted 通知；此處必須一併跳過，否則仍會送出空的 final_result
+        # 讓前端誤render成一份空的「成功」報告（silent fail）。
+        if result and result.get('status') not in ('clarification_pending', 'interrupted'):
             final_message = {
                 "message_type": "final_result",
                 "final_report": result.get('answer', ''),

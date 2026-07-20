@@ -7666,9 +7666,17 @@ def _op_add_topic(cm, op, delta, warnings):
     if not op.new_topic_name:
         warnings.append("add_topic: new_topic_name 為空")
         return
+    # D5a: op schema 無 new_topic_domain，原本硬寫 "(待補)" 會 render 給 user 看
+    # （t.domain 出現在 topic 列表輸出：_render 851 / 2263 / 2273）。同一研究 session
+    # 的 topic 同屬一個領域，改為繼承既有 topic 的 domain（與 _op_split_topic 的
+    # domain=src.domain 一致）；跳過任何殘留的 "(待補)"/空值，皆無時退到誠實的「未分類」。
+    inherited_domain = next(
+        (t.domain for t in cm.topics if t.domain and t.domain != "(待補)"),
+        "未分類",
+    )
     cm.topics.append(ContextMapTopic(
         name=op.new_topic_name,
-        domain="(待補)",
+        domain=inherited_domain,
         description=op.new_topic_description,
         relevance=op.new_topic_relevance,
         evidence_ids=op.new_topic_evidence_ids,

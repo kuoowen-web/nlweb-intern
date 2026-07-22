@@ -138,7 +138,12 @@ def get_prompt_variable_value(variable, handler):
             value = site
     elif variable == "site.itemType":
         item_type = handler.item_type
-        value = item_type.split("}")[1]
+        # CORE-4 (full-scan 批7)：item_type 無 '}' 時 split("}")[1] 會 IndexError。
+        # 對齊 analyze_query.py 的 `if '}' in` 防禦：無 brace 就用原字串。
+        if isinstance(item_type, str) and "}" in item_type:
+            value = item_type.split("}")[1]
+        else:
+            value = item_type
     elif variable == "request.query":
         if (handler.state.is_decontextualization_done()):
             value = handler.decontextualized_query

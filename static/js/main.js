@@ -38,7 +38,7 @@ import { matchSessionId } from './utils/dom.js';
 // Phase 3 Path B imports (2026-05-21)
 import { authManager, injectStateSync, AuthManager } from './core/auth-manager.js';
 import { UserStateSync, UserStateSyncError, assertUserIdentity } from './core/state-sync.js';
-import { bootstrapPage } from './core/page-bootstrap.js';
+import { bootstrapPage } from './core/page-bootstrap.js?v=20260716c';
 
 // Phase 4a Path B imports (2026-05-21)
 import { renderLeftSidebarSessions, renderSharedSessions, initSessionsList } from './features/sessions-list.js';
@@ -53,7 +53,7 @@ import { initSessionManager } from './features/session-manager.js';
 import './features/mode.js';
 
 // v4.0 Commit 2 imports (2026-05-24) — search trio owner module.
-import './features/search.js?v=20260714a';
+import './features/search.js?v=20260717a';
 
 // v4.0 Commit 3 imports (2026-05-24) — chat owner module.
 import './features/chat.js?v=20260714a';
@@ -72,7 +72,7 @@ import './features/sharing.js';
 // injectStateSyncBackref({...}) at module init to register backref bundle into
 // state-sync.js. state-sync.js MUST be imported (above) before live-research.js so
 // its module-local _backrefs binding is initialized when the inject call fires.
-import './features/live-research.js?v=20260714a';
+import './features/live-research.js?v=20260717a';
 
 // v4.0 Commit 8 imports (2026-05-24) — folders owner module (folders quad + folder mode flag).
 import './features/folders.js';

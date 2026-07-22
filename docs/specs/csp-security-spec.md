@@ -4,6 +4,8 @@
 
 NLWeb 使用 nonce-based Content Security Policy（CSP）作為全站安全基礎，搭配 CDN 本地化策略，防止 XSS 與 data injection 攻擊。
 
+> **XSS 防禦分兩層（本 spec 只涵蓋 CSP header 層）**：(1) **CSP header 層**（本 spec 主體）；(2) **前端 render escape 層**——LLM/使用者生成內容進 innerHTML 前的 text-node/屬性 escape + url 協議白名單（`isSafeUrl`/`escapeHtmlAttr`/DOMPurify），主要在 `static/js/features/{deep-research,auth-ui,file-kb,search}.js`。full-scan P1 批6（FE-2/3/4）修補了 citation href javascript: 降級、屬性 breakout、evidence_ids 注入等縫，E2E 回歸見 `code/python/tests/e2e/test_xss_render.py`。**⚠ 第二層機制細節待補全進本 spec body**（2026-07-21 標記，批6 修復當時漏補 spec）。
+
 **主要檔案**：
 - `code/python/webserver/middleware/csp.py` — CSP middleware
 - `code/python/webserver/middleware/auth.py` — Auth middleware（含 PUBLIC_ENDPOINTS）

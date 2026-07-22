@@ -1,0 +1,25 @@
+{
+  "message_type": "live_research_checkpoint",
+  "stage": "bab_phase1",
+  "proposal": {
+    "title": "章節提案"
+  },
+  "context_map_summary": "背景摘要",
+  "auto_continue_option": true,
+  "evidence_list": [
+    {
+      "id": 1,
+      "title": "證據一"
+    }
+  ],
+  "evidence_total": 42,
+  "show_new_sample_button": true,
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

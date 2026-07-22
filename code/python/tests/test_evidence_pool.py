@@ -250,6 +250,88 @@ async def test_bab_engine_seed_evidence_pool(monkeypatch):
     assert engine.evidence_pool[8].url == "https://new.com/x"
 
 
+# ============================================================================
+# F-1 (full-scan 批7): deserialize_evidence_pool corrupt-state 防護
+# ── 壞 JSON / 壞 entry / 非數字 key 不該炸 pipeline，應 per-entry skip + log
+#    warning，讓 caller 判空回退（與 DR 側 fail-closed 對齊）。
+# ============================================================================
+
+# R1 補修：本專案 deserialize_evidence_pool 用 get_configured_logger（LazyLogger,
+# propagate=False + 背景 thread queue emit），pytest caplog 掛 root handler 結構上
+# 抓不到 → 原三條 caplog 斷言在乾淨環境恆紅（lessons-testing-review.md:180-184 已記
+# 第 2 次重犯）。改用 patch.object(schemas_live, "logger") 驗 mock.warning.called，
+# 對齊 test_llm_score_coercion.py:114-119 正解——行為斷言（回空/skip）逐字不動，只
+# 換 log 捕捉機制。
+from unittest.mock import patch
+
+from reasoning import schemas_live
+
+
+def test_deserialize_corrupt_json_returns_empty():
+    """整份 JSON 損壞（半寫入 checkpoint / DB 壞）→ 回空 dict + log warning，不上炸。"""
+    corrupt = '{"1": {"evidence_id": 1, "title": "A"'  # 截斷的 JSON（JSONDecodeError）
+    with patch.object(schemas_live, "logger") as mock_logger:
+        result = deserialize_evidence_pool(corrupt)
+    assert result == {}, "壞 JSON 應 fail-closed 回空 dict，讓 caller 走 blocked/checkpoint 回退"
+    assert mock_logger.warning.called, "整份壞 JSON 應留 warning 不 silent"
+
+
+def test_deserialize_bad_entry_skipped_others_survive():
+    """單筆 entry 型別變形（evidence_id 非數字）→ 該筆 skip，其餘 entry 正常還原。"""
+    # entry "2" 的 evidence_id 是不可轉數字的字串 → ValidationError；"1"/"3" 正常
+    payload = json.dumps({
+        "1": {"evidence_id": 1, "title": "Good1", "url": "https://a.com"},
+        "2": {"evidence_id": "not_an_int", "title": "Bad"},
+        "3": {"evidence_id": 3, "title": "Good3", "url": "https://c.com"},
+    })
+    with patch.object(schemas_live, "logger") as mock_logger:
+        result = deserialize_evidence_pool(payload)
+    assert set(result.keys()) == {1, 3}, "壞 entry 應被 skip，好 entry 存活"
+    assert result[1].title == "Good1"
+    assert result[3].title == "Good3"
+    assert mock_logger.warning.called, "被跳過的壞 entry 應留 warning"
+    # 訊息含被跳過的壞 key，供診斷（mutation 咬得住）
+    warn_text = " ".join(str(c) for c in mock_logger.warning.call_args_list)
+    assert "2" in warn_text, "warning 應標出被跳過的 entry key"
+
+
+def test_deserialize_non_numeric_key_skipped():
+    """非數字 key（int(k) ValueError）→ 該筆 skip 不炸，其餘還原。"""
+    payload = json.dumps({
+        "1": {"evidence_id": 1, "title": "Good1"},
+        "abc": {"evidence_id": 9, "title": "BadKey"},  # int("abc") → ValueError
+    })
+    with patch.object(schemas_live, "logger") as mock_logger:
+        result = deserialize_evidence_pool(payload)
+    assert set(result.keys()) == {1}, "非數字 key entry 應 skip"
+    assert mock_logger.warning.called
+    warn_text = " ".join(str(c) for c in mock_logger.warning.call_args_list)
+    assert "abc" in warn_text, "warning 應標出被跳過的非數字 key"
+
+
+def test_deserialize_all_bad_entries_returns_empty():
+    """全部 entry 都壞 → 回空 dict（caller 判空回退，非拋例外）。"""
+    payload = json.dumps({
+        "x": {"evidence_id": 1},
+        "y": {"evidence_id": 2},
+    })
+    result = deserialize_evidence_pool(payload)
+    assert result == {}, "全壞應回空 dict 讓 caller fail-closed"
+
+
+def test_deserialize_good_data_unchanged():
+    """回歸：好資料 round-trip 行為不變（防護不改變正常路徑）。"""
+    pool = {
+        1: EvidencePoolEntry(evidence_id=1, title="A", url="https://a.com"),
+        2: EvidencePoolEntry(evidence_id=2, title="B", url="https://b.com"),
+    }
+    s = serialize_evidence_pool(pool)
+    restored = deserialize_evidence_pool(s)
+    assert set(restored.keys()) == {1, 2}
+    assert restored[1].title == "A"
+    assert restored[2].url == "https://b.com"
+
+
 def test_state_from_dict_legacy_row():
     """舊 DB row 沒 evidence_pool_json key → from_dict 不 crash，預設空字串。"""
     from reasoning.live_research.stage_state import LiveResearchStageState

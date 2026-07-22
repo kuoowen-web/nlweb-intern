@@ -1,0 +1,8 @@
+{
+  "message_type": "begin-nlweb-response",
+  "conversation_id": "conv-abc",
+  "query": "台灣綠能發展衝突",
+  "query_id": "q-123",
+  "timestamp": 1721000000000,
+  "user_id": "user-uuid-x"
+}

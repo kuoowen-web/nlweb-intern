@@ -10,7 +10,6 @@ Backwards compatibility is not guaranteed at this time.
 """
 
 from core.prompts import PromptRunner
-import asyncio
 from misc.logger.logging_config_helper import get_configured_logger
 
 logger = get_configured_logger("query_rewrite")
@@ -69,15 +68,7 @@ class QueryRewrite(PromptRunner):
                     self.handler.rewritten_queries = valid_queries[:4]
                     logger.info(f"Generated {len(self.handler.rewritten_queries)} expansion queries: {self.handler.rewritten_queries}")
 
-            # Notify the client about expansion queries
-            if self.handler.rewritten_queries:
-                message = {
-                    "message_type": "query_rewrite",
-                    "original_query": self.handler.decontextualized_query,
-                    "rewritten_queries": self.handler.rewritten_queries,
-                    "needs_expansion": needs_expansion,
-                }
-                asyncio.create_task(self.handler.send_message(message))
+            # dead-emit removed (query_rewrite: frontend 0 handler) — SSE typed pipeline Task 2
 
         except Exception as e:
             logger.error(f"Error during query expansion: {e}")

@@ -48,7 +48,7 @@
       <returnStruc>
         {
           "verdict": "safe / suspicious / malicious",
-          "confidence": "0.0-1.0",
+          "confidence": "0.0-1.0 浮點數",
           "reason": "判定理由（繁體中文）"
         }
       </returnStruc>
@@ -185,7 +185,7 @@
         {
           "needs_expansion": "true or false，查詢是否需要擴展",
           "rewritten_queries": ["query1", "query2", "query3"],
-          "query_count": "產生的查詢數量（0-4）"
+          "query_count": "產生的查詢數量（0-4 整數）"
         }
       </returnStruc>
     </Prompt>
@@ -599,7 +599,7 @@
             "detected": "true or false",
             "start_date": "YYYY-MM-DD or null",
             "end_date": "YYYY-MM-DD or null",
-            "confidence": "0.0-1.0"
+            "confidence": "0.0-1.0 浮點數"
           },
           "domain": {
             "detected": "true or false",

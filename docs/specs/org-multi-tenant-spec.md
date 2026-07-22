@@ -405,7 +405,7 @@ API endpoint：`PATCH /api/admin/user/{user_id}/role`（`webserver/routes/auth.p
 | `set_user_active(false)` | `users.is_active = false`，撤銷 tokens | `PATCH /api/admin/user/{user_id}/active` | 暫時停權 |
 | `delete_user` | Hard delete + session user_id NULL | `DELETE /api/admin/user/{user_id}` | 永久移除 |
 
-`remove_member` 在 schema 上保留，但 B2B 場景下基本上應使用 `delete_user`（保證 user 完全離開系統，符合 D-2026-03-17）。
+`remove_member` 在 schema 上保留，但 B2B 場景下應使用 `delete_user`（保證 user 完全離開系統，符合 D-2026-03-17）。
 
 ---
 

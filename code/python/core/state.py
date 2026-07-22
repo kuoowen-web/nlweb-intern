@@ -24,10 +24,24 @@ class NLWebHandlerState:
             # Check if all steps are done
             if all(state == self.__class__.DONE for state in self.precheck_step_state.values()):
                 self.handler.pre_checks_done_event.set()
-    
+
+    def is_precheck_step_done(self, step_name):
+        """CORE-5 (full-scan 批7)：查 step 是否已標 DONE（供 do() 的 finally 判斷是否
+        還需補呼叫 precheck_step_done，避免正常路徑重複呼叫）。"""
+        return self.precheck_step_state.get(step_name) == self.__class__.DONE
+
     def set_pre_checks_done(self):
-        """Synchronous version for compatibility"""
+        """Synchronous version for compatibility.
+
+        CORE-5 (full-scan 批7) 死鎖防線（belt）：prepare 尾端 finally 呼叫此方法時，
+        除了 pre_checks_done_event，也一併 set _decon_event。這樣即使 Decon do() 在
+        precheck_step_done("Decon") 前拋出未攔例外（被 prepare 的 gather
+        return_exceptions=True 吞掉），wait_for_decontextualization() 的 waiter 也不會
+        永久阻塞——它會醒來後由 is_decontextualization_done() 回報 False（fail-open：
+        decontextualized_query 仍是原 query，見各 do() 的 finally fallback）。
+        """
         self.handler.pre_checks_done_event.set()
+        self._decon_event.set()
 
     async def pre_check_approval(self):
         """Wait for all pre-checks to complete"""

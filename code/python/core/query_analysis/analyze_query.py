@@ -47,7 +47,15 @@ class DetectItemType(PromptRunner):
         response = await self.run_prompt(self.ITEM_TYPE_PROMPT_NAME, level="low")
         if (response):
             logger.debug(f"DetectItemType response: {response}")
-            self.handler.item_type = response['item_type']
+            # CORE-4 (full-scan 批7)：不裸取 response['item_type']。缺 key →
+            # 保留既有 item_type（不覆寫），並 log。
+            _item_type = response.get('item_type')
+            if _item_type is not None:
+                self.handler.item_type = _item_type
+            else:
+                logger.warning(
+                    "DetectItemTypePrompt response missing 'item_type'; keeping existing item_type"
+                )
         else:
             logger.warning("No response from DetectItemTypePrompt, item_type will not be set")
         await self.handler.state.precheck_step_done(self.STEP_NAME)

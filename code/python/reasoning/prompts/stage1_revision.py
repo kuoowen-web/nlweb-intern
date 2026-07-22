@@ -56,6 +56,9 @@ class Stage1RevisionPromptBuilder:
 
 - action: "confirm"（使用者明確且只表達接受、沒有提出任何修改，例如：
               「OK」/ 「沒問題」/ 「你決定」/ 「直接用」/「就這樣」/ 「都好」/ 「結構很好，繼續」）
+          ⚠️ 只有**整句只有接受、零修改內容**才是 confirm。若接受語之後還接了
+          任何結構訴求（「……。請用這個架構：…」「……，改成三章…」「……。另外幫我合併…」），
+          那是複合句 → 一律 "adjust"（見下方「複合句紀律」few-shot）。
           / "adjust"（使用者要求修改結構，例如：
               「合併第 1 個和第 3 個 topic」/ 「把 X 拆成兩個」/ 「刪掉 X」/
               「改名為 Y」/ 「新增一個 X 議題」/ 「X 應該是 core」/ 「合併 1+3」/
@@ -157,6 +160,40 @@ class Stage1RevisionPromptBuilder:
     │ - 拆成多個 remove + 多個 add 會失去 user 心智上的「整體重組」意圖
     └────────────────────────────────────────────────────────────
 
+    ┌─ Few-shot 複合句紀律（讚美前綴 + mutation 訴求；Cayenne B1 2026-07-15）──
+    │ user 常用「先讚美、再提訴求」的複合句。**句中只要含任何結構訴求，
+    │ 一律 action="adjust"** —— 開頭的讚美/接受語（「結構很好」「方向就這樣」
+    │ 「不錯」）只是禮貌前綴，不構成 confirm。
+    │
+    │ Input user_message（真實誤判案例）:
+    │   「結構很好，方向就這樣。請用這個架構：三章——前言、國際案例分析、結論。」
+    │ ❌ 錯誤 output：{{"action": "confirm"}} ← 被前綴「結構很好，方向就這樣」誤導，
+    │    後半「請用這個架構：三章…」的重組訴求被整個丟棄（絕對禁止）
+    │ ✅ 正確 output（頓號列舉 3 章 + 「請用這個架構」＝ D-5 訊號 4b → reframe_structure）:
+    │ {{
+    │   "action": "adjust",
+    │   "operations": [{{
+    │     "op_type": "reframe_structure",
+    │     "new_chapters": [
+    │       {{"name": "前言", "description": "研究背景與問題意識", "relevance": "core"}},
+    │       {{"name": "國際案例分析", "description": "國際代表案例的衝突來源與治理策略分析", "relevance": "core"}},
+    │       {{"name": "結論", "description": "研究發現總結與對台灣的啟示", "relevance": "core"}}
+    │     ],
+    │     "new_research_question": "",
+    │     "proposal_markdown": "（依 D-6 spec 完整生成）"
+    │   }}],
+    │   "summary": "確認方向，並整體重組為三章"
+    │ }}
+    │
+    │ 同型變體（都是 adjust，不是 confirm）：
+    │   「不錯，就照這方向。把這些主題重組成三章：A、B、C」→ reframe_structure
+    │   「很好。另外幫我把第 1 個和第 3 個 topic 合併」→ merge_topics（讚美 + incremental）
+    │
+    │ 對照（讚美-only、句尾無任何訴求 → 才是 confirm，不可矯枉過正）：
+    │   「結構很好，繼續」→ {{"action": "confirm", "operations": []}}
+    │   「結構很好，方向就這樣。」→ {{"action": "confirm", "operations": []}}
+    └──────────────────────────────────────────────────────────────
+
   ┌─ Reframe vs Incremental 判斷 heuristic（D-5）─────────────────
   │ 當 user reply 含**以下任一**訊號時，選 reframe_structure：
   │ 1. user 列出 ≥ 3 個明確 chapter 名稱，且 ≥ 50% 不在現有 topic 清單中
@@ -232,6 +269,9 @@ class Stage1RevisionPromptBuilder:
   │ 或有**具體章節名稱 / outline 列舉句型**（命中 D-5 任一訊號）
   │ → action="adjust" + operations=[具體 op] + clarifying_question=""
   │ 即使語氣溫和、看似只是「建議」也不能 classify 為 confirm
+  │ **讚美/接受前綴不豁免**：「結構很好，……」「不錯，……」「方向就這樣。請……」
+  │ 開頭的複合句，只要後半含 mutation 訴求 → 仍是分支 A（adjust），
+  │ 禁止因前綴判 confirm（見上方複合句紀律 few-shot）
   │ topic_id 必須是上方清單中存在的 ID，不要編造
   │ 同一輪可以包含多個 operation（user 一次給多項建議時）
   │ reframe_structure 與 incremental ops 不可混用（見 D-5 heuristic）

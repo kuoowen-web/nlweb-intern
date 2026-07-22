@@ -561,27 +561,4 @@ class ToolSelector:
             # Tool evaluation error
             logger.error(f"Tool evaluation error for {tool.name}: {str(e)}")
             return {"tool": tool, "score": 0, "result": {"score": 0, "justification": f"Error: {str(e)}"}}
-    
-    async def _send_message(self, tool_scores, query, schema_type):
-        """Send tool selection results as message."""
-        tools_info = []
-        for i, tool_score in enumerate(tool_scores):
-            tool_info = {
-                'rank': i + 1,
-                'name': tool_score.tool.name,
-                'score': tool_score.score,
-                'justification': tool_score.explanation or '',
-                'schema_type': tool_score.tool.schema_type
-            }
-            if tool_score.extracted_params:
-                tool_info['extracted_params'] = tool_score.extracted_params
-            tools_info.append(tool_info)
-        
-        message = {
-            "message_type": "tool_routing",
-            "tools": tools_info,
-            "query": query,
-            "schema_type": schema_type
-        }
-        
-        asyncio.create_task(self.handler.send_message(message))
+    # unreachable _send_message (tool_routing: 0 live caller) removed — SSE typed pipeline Task 2

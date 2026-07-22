@@ -310,6 +310,21 @@ state.review = review
 
 E2E 實證（高端訓 0 筆）：β-path → Google 補源 → 防線二引導精準補搜撈 24 源 → Convergence PASS → 7307 字報告、117 citation、零同名污染。
 
+### 2.7 KG 編輯 Rerun 的 rerunState 持久化 + DB fallback（2026-07-15 land）
+
+`_research_state_cache`（orchestrator.py module-level dict，TTL 3600s / LRU 50）保留為**快取層**；rerun 的輸入中間狀態（rerunState）併入 `search_sessions.research_report` JSONB **內層**持久化，server 重啟/TTL/LRU 淘汰後 rerun 不再 400。
+
+- **write path**：`_run_research_composable` phase 1 快照點後 `build_rerun_state_subset(state)` 抽精簡子集 → `_build_research_report_obj` 塞 `rerunState` 內層 → 隨既有 persist 落 DB（零 DDL，三處白名單已涵蓋）。
+- **R5 剝欄位**：`source_map` 的 item 經 `_slim_item` 剝成 5 欄 dict（`_RERUN_ITEM_FIELDS = url/title/description/site/datePublished`——rerun path 對 item 讀的全部欄位，三方 AR 逐消費點核對無第 6 欄）。真實 6-element list-row 的 description/datePublished 藏在 `item[1]` schema_json 內，先 parse 再抽；剝後 restore 統一 dict。payload 實測 238KB → 98.8KB（93 筆）。不存全量 `items`（只存 `items_count`，restore 成 `[None]*n` placeholder；phase 2-4 只用 len）；不單存 `current_context`（restore 從 source_map 依 cid 排序重建）。
+- **read path**：cache miss → 前端帶的 `session_id`（PG session UUID）讀 research_report → `restore_rerun_state_from_report` 重建（source_map str→int key、corrupt 資料回 None 走 400 不 500）→ 餵 `run_research_rerun(restored_state=...)`。**三道 query_id 對齊防線**（api.py pre-check / execute_rerun DB fallback / run_research_rerun 最內層 guard）判準一致：`rerunState.query_id != 請求 query_id`（含舊資料缺 query_id）→ 判無效不放行，防同 session 多次 DR 張冠李戴。
+- **rerun 產出本身不 persist**（既有行為，非 regression）：`execute_rerun` 不呼叫 `_persist_research_report`——rerun 版報告只活在當前畫面，reload 回原版；原 rerunState 天然保留（rerun 不覆蓋 research_report）。
+
+### 2.8 Actor-Critic Graph Fallback——最終輪空殼補回前輪（2026-07-15 land）
+
+gap-enrichment / revise 輪的 LLM 可能非決定性省略 optional graph 欄位（`knowledge_graph` / `argument_graph` / `reasoning_chain_analysis`），而 pipeline 拿**最終輪** analyst output serialize → 前輪已產好的 graph 被空值覆蓋蒸發（E2E 實證：research 輪 KG 10+10 → enriched 輪 0+0）。陷阱：`KnowledgeGraph()` 空物件 truthy，`if output.knowledge_graph:` 擋不住空殼。
+
+修法（`track_nonempty_graphs` / `apply_graph_fallback` / `_graph_field_has_content`，主 run 與 rerun 同受益）：loop 內每輪 analyst 產出後追蹤「最新非空」graph（空殼不覆蓋已記錄版本；KG 的非空判準 = entities/relationships 有內容非 truthy）；post-loop `state.response` 寫回前，最終輪欄位空殼且 tracker 有 → `model_copy(update)` 補回 + `[GRAPH-FALLBACK]` info log（可觀測）。fallback 來源限**同一 run 內前輪**（rerun 情境 = 已含使用者 KG 編輯前提那輪），不跨 run、不張冠李戴。已知殘留：整 run 全輪皆空時 serialize 仍輸出 0+0 空殼 KG 給前端（backlog 2026-07-16-a）。
+
 ---
 
 ## 3. Agent System Prompts (Soft Logic)
@@ -792,6 +807,9 @@ orchestrator = DeepResearchOrchestrator(logger=logger)
 ---
 
 ## 13. Changelog
+
+### 2026-07-15 — rerunState 持久化 + DB fallback + Graph Fallback（§2.7/§2.8 新增）
+KG 編輯 rerun 的輸入中間狀態併入 research_report JSONB 內層（R5 剝欄位 5 欄 dict）；cache miss 走 session UUID DB fallback + 三道 query_id 對齊防線；actor-critic 最終輪 graph 空殼補回前輪非空版本。三方 AR R1 收斂（0 blocker）。worktree 八 commit merge `3705f50b`。
 
 ### 2026-03-19 — RSN-11 Guard Fix + Verification Status SSE
 

@@ -63,13 +63,17 @@ class TestLiveResearchOrchestrator:
 
     @pytest.mark.asyncio
     async def test_generate_report_title_llm_fail_degrades(
-        self, orchestrator, monkeypatch, capfd
+        self, orchestrator, monkeypatch
     ):
         """LLM 拋例外 → 回 (research_question, False) + logger.warning（不 silent fail）。
-        NOTE: orchestrator 用自訂 LazyLogger（propagate=False，背景 thread 寫 JSON），
-        caplog 抓不到 → 依專案慣例（test_deep_research_ambiguity.py）用 capfd + flush。
+
+        ordering 免疫（full-scan-2026-07 收尾）：orchestrator 用自訂 LazyLogger（背景
+        worker thread + StreamHandler 綁 build 時 sys.stdout），原用 capfd + sleep(0.2)
+        賭 fd flush → 全套 ordering 下 fd-capture race（sibling 重綁 stdout）+ timing
+        flaky。改 patch module logger.warning 直攔呼叫，繞過背景 worker + fd（lessons-
+        testing-review §184 輕解）。行為斷言逐字不變（warning 訊息含 "report title"）。
         """
-        import time
+        import reasoning.live_research.orchestrator as orch_mod
         from reasoning.schemas_live import ContextMap, ContextMapTopic
         cm = ContextMap(research_question="台灣綠能衝突", topics=[
             ContextMapTopic(topic_id="t1", name="土地", domain="能源", relevance="core"),
@@ -78,21 +82,29 @@ class TestLiveResearchOrchestrator:
             "reasoning.live_research.orchestrator.ask_llm",
             AsyncMock(side_effect=RuntimeError("boom")),
         )
+        warn_calls = []
+        orig_warning = orch_mod.logger.warning
+        monkeypatch.setattr(
+            orch_mod.logger, "warning",
+            lambda msg, *a, **k: (warn_calls.append(str(msg)), orig_warning(msg, *a, **k))[1],
+        )
         title, was_generated = await orchestrator._generate_report_title(cm, [])
         assert title == "台灣綠能衝突"
         assert was_generated is False
-        time.sleep(0.2)  # 讓背景 JSON logger worker flush
-        out, err = capfd.readouterr()
-        assert "report title" in (out + err).lower()  # 不 silent fail
+        assert any("report title" in m.lower() for m in warn_calls), (  # 不 silent fail
+            f"expected a warning naming 'report title', got: {warn_calls}"
+        )
 
     @pytest.mark.asyncio
     async def test_generate_report_title_empty_response_degrades(
-        self, orchestrator, monkeypatch, capfd
+        self, orchestrator, monkeypatch
     ):
         """LLM 回空/純空白標題 → 回 (research_question, False) + warning。
-        NOTE: 同上，自訂 LazyLogger 用 capfd 抓（caplog 抓不到）。
+
+        ordering 免疫（同 test_generate_report_title_llm_fail_degrades）：patch module
+        logger.warning 直攔，繞過 LazyLogger 背景 worker + capfd fd race。行為斷言不變。
         """
-        import time
+        import reasoning.live_research.orchestrator as orch_mod
         from reasoning.schemas_live import ContextMap, ContextMapTopic
         cm = ContextMap(research_question="台灣綠能衝突", topics=[
             ContextMapTopic(topic_id="t1", name="土地", domain="能源", relevance="core"),
@@ -101,12 +113,18 @@ class TestLiveResearchOrchestrator:
             "reasoning.live_research.orchestrator.ask_llm",
             AsyncMock(return_value={"title": "   "}),
         )
+        warn_calls = []
+        orig_warning = orch_mod.logger.warning
+        monkeypatch.setattr(
+            orch_mod.logger, "warning",
+            lambda msg, *a, **k: (warn_calls.append(str(msg)), orig_warning(msg, *a, **k))[1],
+        )
         title, was_generated = await orchestrator._generate_report_title(cm, [])
         assert title == "台灣綠能衝突"
         assert was_generated is False
-        time.sleep(0.2)
-        out, err = capfd.readouterr()
-        assert "report title" in (out + err).lower()
+        assert any("report title" in m.lower() for m in warn_calls), (
+            f"expected a warning naming 'report title', got: {warn_calls}"
+        )
 
     @pytest.mark.asyncio
     async def test_generate_report_title_sanitizes_multiline_and_truncates(
@@ -432,17 +450,15 @@ class TestLiveResearchOrchestrator:
     ):
         """P1-3 端到端：不 mock helper，patch ask_llm raise → 真跑降級全鏈路。
         驗 H1=query + 無副標 + logger.warning（不 silent fail）+ state=""。
-        NOTE: 自訂 LazyLogger 走「背景 worker thread + async queue」dispatch，warning 最終
-        會由 worker thread 走底層 logging.getLogger("live_research.orchestrator")（其 StreamHandler
-        綁 sys.stdout）非同步 emit。原 plan 用 capfd 抓 fd 級輸出，但該 StreamHandler 的 stream
-        參照會被前一個真跑 _run_stage_6 的 sibling test 汙染成舊 capture 物件，fd 級抓不到
-        （sibling ordering 決定成敗，非 silent-fail 本身）。改用「掛 handler 到底層 logger +
-        poll 等 worker flush」抓 LogRecord — 觀測點在 log source，不受 stdout 重綁影響，穩定。
-        另注意 LoggerUtility.__init__ 首次建構會「clear 既有 handlers」，故必須先 pre-warm
-        （逼 worker 端 real_logger 快取建好）後再掛我的 handler，否則會被 lazy 建構清掉。"""
-        import logging as _logging
-        import time
-        from misc.logger.logging_config_helper import _get_async_processor
+
+        ordering 免疫（full-scan-2026-07 收尾）：title 降級的 warning 由 module-level
+        LazyLogger 發，走背景 worker thread → 底層 logging.getLogger("live_research.
+        orchestrator") 非同步 emit。原用「pre-warm real_logger + 掛 CaptureHandler +
+        poll 3s 等 flush」仍 flaky（pre-warm 快取被別 test 先建 / LoggerUtility.__init__
+        clear handlers 時序 / worker flush 沒趕上 poll）。改 patch module logger.warning
+        直攔呼叫，繞過背景 worker + 底層 handler 完全消除時序賭注（lessons §184 輕解）。
+        其餘端到端斷言（export_md 內容 / state）逐字保留。"""
+        import reasoning.live_research.orchestrator as orch_mod
         orchestrator._emit_stage_change = AsyncMock()
         orchestrator._emit_narration = AsyncMock()
         orchestrator._persist_checkpoint_boundary = AsyncMock()
@@ -457,49 +473,95 @@ class TestLiveResearchOrchestrator:
             "reasoning.live_research.orchestrator.emit_sse",
             AsyncMock(side_effect=lambda handler, payload: captured.append(payload)),
         )
-        # pre-warm：逼 worker 端 real_logger 建好（其 __init__ 會 clear handlers），之後我掛的
-        # handler 才不會被 lazy 建構清掉。直接呼叫 worker 的 _get_real_logger 確保快取存在。
-        _proc = _get_async_processor()
-        _proc._get_real_logger("live_research.orchestrator")
-        # 掛捕捉 handler 到底層 non-propagating logger（worker thread emit 於此，見 docstring）。
-        # handler 全程掛著（含 assert 期間），等 worker flush 而非提前移除。
-        log_records = []
+        # ordering 免疫：patch module logger.warning 直攔（見 docstring），非同步 worker
+        # + fd/handler 時序完全繞過。
+        warn_calls = []
+        orig_warning = orch_mod.logger.warning
+        monkeypatch.setattr(
+            orch_mod.logger, "warning",
+            lambda msg, *a, **k: (warn_calls.append(str(msg)), orig_warning(msg, *a, **k))[1],
+        )
+        state = LiveResearchStageState(
+            current_stage=5,
+            context_map_json=_make_context_map().model_dump_json(),
+            written_sections=[
+                {"section_index": 0, "title": "前言", "content": "x", "status": "drafted"},
+            ],
+        )
+        await orchestrator._run_stage_6(state)
+        export_md = [p for p in captured
+                     if p.get("message_type") == "live_research_export"][0]["content"]
+        assert "# 台灣綠能衝突" in export_md
+        assert "> 原始查詢：" not in export_md
+        assert state.generated_report_title == ""
+        assert any("report title" in m.lower() for m in warn_calls), (  # 不 silent fail
+            f"expected a warning naming 'report title', got: {warn_calls}"
+        )
 
-        class _CaptureHandler(_logging.Handler):
-            def emit(self, record):
-                log_records.append(record.getMessage())
+    @pytest.mark.asyncio
+    async def test_stage6_export_excludes_kg_json_section(
+        self, orchestrator, monkeypatch
+    ):
+        """行為鎖（2026-07-21 KG JSON 暫移除）：即使 state 含**非空 KG**，Stage 6
+        匯出的純文字報告也**不得**含「## 知識圖譜」標題或 KG 的 ```json fence。
 
-        _capture = _CaptureHandler()
-        _capture.setLevel(_logging.WARNING)
-        _underlying = _logging.getLogger("live_research.orchestrator")
-        _prev_level = _underlying.level
-        _underlying.addHandler(_capture)
-        if _underlying.level > _logging.WARNING:
-            _underlying.setLevel(_logging.WARNING)
-        try:
-            state = LiveResearchStageState(
-                current_stage=5,
-                context_map_json=_make_context_map().model_dump_json(),
-                written_sections=[
-                    {"section_index": 0, "title": "前言", "content": "x", "status": "drafted"},
-                ],
-            )
-            await orchestrator._run_stage_6(state)
-            export_md = [p for p in captured
-                         if p.get("message_type") == "live_research_export"][0]["content"]
-            assert "# 台灣綠能衝突" in export_md
-            assert "> 原始查詢：" not in export_md
-            assert state.generated_report_title == ""
-            # poll 等背景 worker thread 把 warning dispatch 到底層 logger（非同步 queue）
-            _deadline = time.time() + 3.0
-            while time.time() < _deadline and not any(
-                "report title" in m.lower() for m in log_records
-            ):
-                time.sleep(0.05)
-            assert any("report title" in m.lower() for m in log_records)  # 不 silent fail
-        finally:
-            _underlying.removeHandler(_capture)
-            _underlying.setLevel(_prev_level)
+        CEO 拍板：匯出只支援純文字，KG 的 raw JSON 使檔案體積雙倍且不可讀，
+        暫移除末段 KG section，待 KG overhaul 後恢復。SSE knowledge_graph payload
+        （餵前端 D3 視覺化）保留不變——本測試斷言 SSE 仍帶非 None KG，證明只移除
+        報告拼接、未誤傷視覺化資料流。
+
+        red→green：移除前（拼接還在）此測試 FAIL（export_md 含 KG section）；
+        移除後 PASS。防止未來無意把 KG JSON 拼接加回匯出檔。
+        """
+        from reasoning.schemas_enhanced import Entity, EntityType, KnowledgeGraph
+        orchestrator._emit_stage_change = AsyncMock()
+        orchestrator._emit_narration = AsyncMock()
+        orchestrator._persist_checkpoint_boundary = AsyncMock()
+        orchestrator._build_references_block = lambda *a, **k: ""
+        orchestrator._generate_report_title = AsyncMock(return_value=("測試標題", True))
+        captured = []
+        monkeypatch.setattr(
+            "reasoning.live_research.orchestrator.emit_sse",
+            AsyncMock(side_effect=lambda handler, payload: captured.append(payload)),
+        )
+        state = LiveResearchStageState(
+            current_stage=5,
+            context_map_json=_make_context_map().model_dump_json(),
+            written_sections=[
+                {"section_index": 0, "title": "前言", "content": "本章內容。",
+                 "status": "drafted"},
+            ],
+        )
+        # 非空 KG → _build_kg_export_payload 回非 None（有 entities 即成立）
+        state.knowledge_graph = KnowledgeGraph(
+            entities=[
+                Entity(name="台電", entity_type=EntityType.ORGANIZATION,
+                       evidence_ids=[1]),
+            ],
+            relationships=[],
+        )
+        await orchestrator._run_stage_6(state)
+        export_payloads = [
+            p for p in captured
+            if p.get("message_type") == "live_research_export"
+        ]
+        assert export_payloads, f"未捕捉到 export payload；captured={captured!r}"
+        export_md = export_payloads[0]["content"]
+        # 匯出純文字報告不得含 KG section 標題或 KG JSON fence
+        assert "## 知識圖譜" not in export_md, (
+            "KG JSON section 不應再出現在匯出報告（2026-07-21 暫移除）"
+        )
+        assert "```json" not in export_md, (
+            "匯出報告不應含 KG 的 ```json fence"
+        )
+        # state.final_report_markdown 是回顧主路徑讀的字串，同樣不得含 KG section
+        assert "## 知識圖譜" not in (state.final_report_markdown or "")
+        # SSE knowledge_graph payload 保留（餵前端視覺化）——證明只移除報告拼接、
+        # 未誤傷 kg_payload 變數與視覺化資料流
+        assert export_payloads[0]["knowledge_graph"] is not None, (
+            "SSE knowledge_graph payload 必須保留（前端 D3 視覺化依賴）"
+        )
+        assert export_payloads[0]["knowledge_graph"]["entities"][0]["name"] == "台電"
 
     @pytest.mark.asyncio
     async def test_emit_checkpoint_called_in_stage_1(self, orchestrator, mock_handler):
@@ -5284,8 +5346,8 @@ async def test_mock_bab_initial_format_uses_fixture_not_extraction():
     state = LiveResearchStageState()
     state = await orch._run_stage_1(state, query="任意 query")
 
-    # fixture book_outline 章節（5 章）仍在
-    assert len(state.format_specs["chapters"]) == 5
+    # fixture book_outline 章節（Cayenne 3 章）仍在
+    assert len(state.format_specs["chapters"]) == 3
 
 
 class TestParseRevisionIntentPromptContract:

@@ -1,0 +1,12 @@
+{
+  "message_type": "low_keyword_match_warning",
+  "content": "關鍵字比對度較低。",
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

@@ -179,8 +179,8 @@ export function renderOrgMembers(members, orgId, currentUser) {
 
         return `<div class="org-member-row">
             <div class="org-member-info">
-                <span class="org-member-name">${m.name || ''}${selfTag}</span>
-                <span class="org-member-email">${m.email}</span>
+                <span class="org-member-name">${escapeAttr(m.name || '')}${selfTag}</span>
+                <span class="org-member-email">${escapeAttr(m.email || '')}</span>
             </div>
             <div class="org-member-meta">
                 ${isAdmin && !isSelf ? '' : `<span class="org-role-badge org-role-${m.role}">${roleLabel}</span>`}

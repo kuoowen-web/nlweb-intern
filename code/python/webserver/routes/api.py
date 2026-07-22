@@ -13,6 +13,7 @@ from webserver.aiohttp_streaming_wrapper import AioHttpStreamingWrapper
 from core.retriever import get_vector_db_client
 from core.utils.utils import get_param
 from core.utils.message_senders import inject_user_id
+from core.sse.send import send_sse  # Task 11: raw_api SSE points (webserver->core, no cycle)
 from core.config import CONFIG
 from webserver.middleware.ip_utils import get_client_ip as _get_client_ip
 from core.query_analysis.query_sanitizer import MAX_QUERY_LENGTH
@@ -62,6 +63,68 @@ def _lr_mark_client_disconnected(handler) -> None:
         f"(lr_session={getattr(handler, 'lr_session_id', None)})"
     )
     # 不再呼叫 handler._lr_research_task.cancel()
+
+
+async def _send_raw_api_error(handler, wrapper, error_data: Dict[str, Any]) -> None:
+    """統一 deep_research / rerun 三個 raw_api error 點的 error-envelope 送出 + 收尾。
+
+    IMPL-R1-BLK-A 根解。這三點的 ``handler`` 在 try **內部**才賦值（wrapper 先建）。
+    若 error 發生在「wrapper 已建、handler 未賦值」窗口，舊碼 ``send_sse(locals().get('handler'),
+    ..., raw_api)`` 拿到 ``handler=None`` → raw_api 分支 ``None.http_handler`` AttributeError
+    被 route 內層 ``except: pass`` 吞 → error envelope **不送、finish_response 被跳過、零 log**
+    （silent-fail regression，違「不可 silent fail」）。舊 pre-migration 碼用已建的
+    ``wrapper.write_stream`` 能送——本 helper 復刻該可送性並補齊三鐵律：
+
+      1. **error envelope 必送達**：handler 綁定 → 走 ``send_sse(handler, raw_api)``（含
+         inject_user_id，現行語義一字不動）；handler 未綁定但 wrapper 已建 → **降級**直接
+         ``wrapper.write_stream``（``handler.http_handler`` **就是** wrapper，baseHandler.py
+         ``self.http_handler = http_handler``；wrapper 無 http_handler 屬性故不能再走
+         send_sse）。降級 wire 與舊行為 byte-identical：無 handler = 無身份 = 不 inject user_id
+         （與舊碼 ``wrapper.write_stream(error_data)`` 逐字等價）。
+      2. **finish_response 必呼叫**：send 成敗都在此 helper 內收尾（wrapper 存在時）。
+      3. **降級/失敗必有 log**（不 silent）：降級走 wrapper → ``logger.warning``；連 wrapper 都
+         未建（極早 error，stream 尚未 prepare、本就送不出）→ ``logger.error`` loud 記錄。
+
+    絕不 re-raise：本 helper 是 route error 路徑的最後收尾，吞掉自身送出/收尾例外只留 log
+    （與舊 route 內層 ``except: pass`` 的「盡力送、送不出也不再炸」語義一致，但改為 loud）。
+    """
+    # ── 送 error envelope ──
+    if handler is not None:
+        # 正常窗口：handler 已綁定，走現行 raw_api 語義（send_sse 內部 inject + write）。
+        try:
+            await send_sse(handler, error_data, path="raw_api")
+        except Exception as e:
+            logger.warning(
+                f"[raw_api-error] send_sse(handler) failed for "
+                f"{error_data.get('message_type')!r}: {e}")
+    elif wrapper is not None:
+        # 降級窗口：handler 未賦值（error 早於 handler 建立）。handler.http_handler 就是
+        # wrapper → 直接經 wrapper 送。無 handler = anonymous = 不 inject user_id
+        # （inject_user_id(payload, None) 本就跳過），wire 與舊 pre-migration 碼 byte-identical。
+        logger.warning(
+            f"[raw_api-error] handler unbound at error point — degrading to "
+            f"wrapper.write_stream for {error_data.get('message_type')!r} "
+            f"(byte-identical legacy error envelope; not silent-failing)")
+        try:
+            inject_user_id(error_data, None)  # None-safe：跳過注入，語義同舊碼直送
+            await wrapper.write_stream(error_data)
+        except Exception as e:
+            logger.warning(
+                f"[raw_api-error] degraded wrapper.write_stream failed for "
+                f"{error_data.get('message_type')!r}: {e}")
+    else:
+        # 極早 error：wrapper 亦未建（stream 未 prepare），無管道可送。不 silent——loud 記錄。
+        logger.error(
+            f"[raw_api-error] cannot deliver error envelope "
+            f"{error_data.get('message_type')!r}: neither handler nor wrapper is "
+            f"bound (error fired before stream was prepared)")
+
+    # ── 收尾 finish_response（必呼叫；wrapper 存在才有可收） ──
+    if wrapper is not None:
+        try:
+            await wrapper.finish_response()
+        except Exception as e:
+            logger.warning(f"[raw_api-error] finish_response failed: {e}")
 
 
 def setup_api_routes(app: web.Application):
@@ -800,9 +863,8 @@ async def deep_research_handler(request: web.Request) -> web.Response:
             "conversation_id": handler.conversation_id,
             "query_id": handler.query_id
         }
-        # Phase 4b.5 Fix 1: stamp user_id so frontend Trigger G can do envelope-level identity check.
-        inject_user_id(begin_message, handler)
-        await wrapper.write_stream(begin_message)
+        # Task 11: raw_api replicates manual inject_user_id + raw write_stream.
+        await send_sse(handler, begin_message, path="raw_api")
         logger.info(f"[Deep Research] Sent begin-nlweb-response with conversation_id={handler.conversation_id}, query_id={handler.query_id}")
 
         # Run Deep Research query (will stream progress via SSE)
@@ -852,17 +914,15 @@ async def deep_research_handler(request: web.Request) -> web.Response:
                 final_message["dr_session_id"] = dr_sid
 
             logger.info(f"[Deep Research] final_message keys: {list(final_message.keys())}")
-            # Phase 4b.5 Fix 1: stamp user_id on final_message (ad-hoc envelope).
-            inject_user_id(final_message, handler)
-            await wrapper.write_stream(final_message)
+            # Task 11: raw_api replicates manual inject_user_id + raw write_stream.
+            await send_sse(handler, final_message, path="raw_api")
 
             # Note: Research report is now passed directly from frontend to backend
             # via query_params in free conversation mode, no DB storage needed
 
-        # Close the stream (Phase 4b.5 Fix 1: stamp user_id)
+        # Close the stream (Task 11: raw_api inject + raw write_stream)
         complete_msg = {"message_type": "complete"}
-        inject_user_id(complete_msg, handler)
-        await wrapper.write_stream(complete_msg)
+        await send_sse(handler, complete_msg, path="raw_api")
         await wrapper.finish_response()
 
         return response
@@ -881,11 +941,12 @@ async def deep_research_handler(request: web.Request) -> web.Response:
             "message_type": "error",
             "error": str(e)
         }
-        try:
-            await wrapper.write_stream(error_data)
-            await wrapper.finish_response()
-        except Exception:
-            pass
+        # IMPL-R1-BLK-A 根解：`handler`/`wrapper` 都在 try 內賦值（handler :768、wrapper :759），
+        # error 可能落在「wrapper 已建、handler 未賦值」窗口。_send_raw_api_error 保證三鐵律：
+        # error envelope 必送（handler 未綁定則降級走 wrapper 直送 byte-identical）+ finish_response
+        # 必呼叫 + 降級/失敗必 loud log（不 silent）。locals().get 對 try 內變數做未賦值防呆。
+        await _send_raw_api_error(
+            locals().get('handler'), locals().get('wrapper'), error_data)
         return response
 
     finally:
@@ -907,6 +968,8 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
         query_id: str — query_id of the original deep research run
         kg_edits: str — serialized JSON of KG edits (schema_version 1.0)
         query: str — original query text (for building modified query)
+        session_id: str — (optional) PG session UUID；記憶體 cache miss 時用它讀
+            research_report 內層 rerunState 做 DB fallback（Bug 1）
     """
     # Feature flag gate
     enable_composable = CONFIG.reasoning_params.get("features", {}).get(
@@ -927,6 +990,8 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
     original_query_id = data.get('query_id')
     kg_edits = data.get('kg_edits')
     query = data.get('query', '')
+    # Bug 1：前端帶的 PG session UUID（cache miss 時 DB fallback 定位 research_report 用；可為空）
+    session_id = data.get('session_id', '')
 
     if not original_query_id or not kg_edits:
         return web.json_response(
@@ -940,11 +1005,32 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
             status=400,
         )
 
-    # Validate cached state exists before starting SSE stream
-    from reasoning.orchestrator import get_cached_research_state
-    if get_cached_research_state(original_query_id) is None:
+    # Validate: 記憶體 cache 有 → OK；miss → 嘗試 DB fallback（session UUID 讀 research_report）——
+    # Bug 1：server 重啟/TTL/LRU 淘汰後，rerunState 已持久化在 research_report 內層，不再直接 400
+    from reasoning.orchestrator import get_cached_research_state, restore_rerun_state_from_report
+    _has_state = get_cached_research_state(original_query_id) is not None
+    if not _has_state and session_id:
+        _user = request.get('user')
+        _uid = _user.get('id') if _user and _user.get('authenticated') else None
+        _oid = _user.get('org_id') if _user and _user.get('authenticated') else None
+        if _uid and _oid:
+            from core.session_service import SessionService
+            _row = await SessionService().get_session(session_id, _uid, _oid)
+            if _row:
+                _cand = restore_rerun_state_from_report(_row.get("research_report"))
+                # [R3 修訂 S2-new] session↔query_id 對齊：只有 rerunState 的 query_id 對得上請求的
+                # original_query_id 才算「有 state」——不匹配（含舊資料缺 query_id → None）不放行，
+                # 與 execute_rerun 的 DB fallback 分支同一判準（避免 pre-check 放行、execute_rerun
+                # 卻拿不到 → 走空 cache raise/500 的裂縫）。
+                if _cand and _cand.get("query_id") == original_query_id:
+                    _has_state = True
+                elif _cand:
+                    logger.warning(
+                        f"[RERUN] pre-check: session={session_id} 對應的 rerunState query_id="
+                        f"{_cand.get('query_id')!r} 與請求 original_query_id={original_query_id!r} 不符 → 回落 400")
+    if not _has_state:
         return web.json_response(
-            {'error': 'cache_miss', 'message': '找不到原始研究紀錄（可能已過期或伺服器重啟）。請重新執行深度研究。'},
+            {'error': 'cache_miss', 'message': '找不到原始研究紀錄（可能已過期或伺服器重啟，或此對話已跑過新的研究）。請重新執行深度研究。'},
             status=400,
         )
 
@@ -1061,6 +1147,7 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
         await handler.execute_rerun(
             original_query_id=original_query_id,
             kg_edits_json=kg_edits_json,
+            session_id=session_id,
         )
 
         # Send final result
@@ -1105,11 +1192,10 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
         # Cache miss or invalid state — should not happen since we checked above
         logger.error(f"[RERUN] ValueError: {e}")
         error_data = {"message_type": "error", "error": str(e)}
-        try:
-            await wrapper.write_stream(error_data)
-            await wrapper.finish_response()
-        except Exception:
-            pass
+        # IMPL-R1-BLK-A 根解（見 deep_research_handler 同段）：handler :1053、wrapper :1048
+        # 皆在 try 內；_send_raw_api_error 保證 envelope 送達 + finish_response + loud log。
+        await _send_raw_api_error(
+            locals().get('handler'), locals().get('wrapper'), error_data)
         return response
 
     except ConnectionResetError as e:
@@ -1123,11 +1209,10 @@ async def research_rerun_handler(request: web.Request) -> web.Response:
     except Exception as e:
         logger.error(f"[RERUN] Research rerun error: {e}", exc_info=True)
         error_data = {"message_type": "error", "error": str(e)}
-        try:
-            await wrapper.write_stream(error_data)
-            await wrapper.finish_response()
-        except Exception:
-            pass
+        # IMPL-R1-BLK-A 根解（見 deep_research_handler 同段）：handler :1053、wrapper :1048
+        # 皆在 try 內；_send_raw_api_error 保證 envelope 送達 + finish_response + loud log。
+        await _send_raw_api_error(
+            locals().get('handler'), locals().get('wrapper'), error_data)
         return response
 
     finally:
@@ -1357,7 +1442,9 @@ async def live_research_start_handler(request: web.Request) -> web.Response:
     except Exception as e:
         logger.error(f"Live Research start error: {e}", exc_info=True)
         try:
-            await wrapper.write_stream({"message_type": "error", "error": str(e)})
+            # Task 11 / G4(i): raw_api adds inject. handler assigned before this try
+            # (:1337) so no NameError guard needed (plan §Task 11).
+            await send_sse(handler, {"message_type": "error", "error": str(e)}, path="raw_api")
         except Exception:
             pass
         try:
@@ -1601,7 +1688,9 @@ async def live_research_continue_handler(request: web.Request) -> web.Response:
     except Exception as e:
         logger.error(f"Live Research continue error: {e}", exc_info=True)
         try:
-            await wrapper.write_stream({"message_type": "error", "error": str(e)})
+            # Task 11 / G4(i): raw_api adds inject. handler assigned before this try
+            # (:1574) so no NameError guard needed (plan §Task 11).
+            await send_sse(handler, {"message_type": "error", "error": str(e)}, path="raw_api")
         except Exception:
             pass
         try:

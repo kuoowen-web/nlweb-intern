@@ -1,0 +1,12 @@
+{
+  "message_type": "intermediate_result",
+  "stage": "critic_reviewing",
+  "senderInfo": {
+    "id": "system",
+    "name": "NLWeb"
+  },
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#8",
+  "conversation_id": "conv-abc",
+  "user_id": "user-uuid-x"
+}

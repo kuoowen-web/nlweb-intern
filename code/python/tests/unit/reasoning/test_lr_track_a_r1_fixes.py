@@ -13,7 +13,6 @@ Review: code-reviewer R1 ⚠️ APPROVED WITH CONDITIONS — 4 Important fix。
        (schema_validator 應 catch, 此處到達 = model_construct() bypass)。
 """
 
-import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -236,7 +235,7 @@ async def test_i1_contrast_legacy_book_outline_none_idx0_still_invokes_writer():
 # I-3: schema_version 偵測 — XOR 雙重檢查
 # ============================================================================
 
-def test_i3_from_dict_schema_version_missing_but_evidence_usage_nonempty_logs_error_and_treats_v2(caplog):
+def test_i3_from_dict_schema_version_missing_but_evidence_usage_nonempty_logs_error_and_treats_v2(monkeypatch):
     """I-3 fix: from_dict 偵測「schema_version missing + evidence_usage 非空」異常 case
     → log ERROR + 視為 v2（不當 v1 silently，避免 future test author 構造 v1 shape
     state with v2-specific evidence_usage 誤導 legacy gate test）。
@@ -245,8 +244,28 @@ def test_i3_from_dict_schema_version_missing_but_evidence_usage_nonempty_logs_er
     後續 legacy gate / validator 不會察覺 client/payload 異常。
 
     Fix 後：偵測異常 + log ERROR + schema_version=2 + state load 成功。
+
+    ordering 免疫（full-scan-2026-07 收尾）：stage_state 的 logger 是
+    logging.getLogger(__name__)，全套 ordering 下祖先 logger propagate 被前面測試
+    設 False → caplog（掛 root）records 空、假紅（實測 `caplog records: []`）。
+    改用同檔 I-4 測試的正解 pattern：monkeypatch spy stage_state.logger.error 直攔
+    呼叫，繞過全域 propagation。行為斷言逐字不變（ERROR 含 schema_version）。
     """
+    from reasoning.live_research import stage_state as ss_mod
     from reasoning.live_research.stage_state import LiveResearchStageState
+
+    error_calls = []
+    original_error = ss_mod.logger.error
+
+    def spy_error(msg, *args, **kw):
+        try:
+            full = msg % args if args else msg
+        except (TypeError, ValueError):
+            full = str(msg)
+        error_calls.append(str(full))
+        return original_error(msg, *args, **kw)
+
+    monkeypatch.setattr(ss_mod.logger, "error", spy_error)
 
     # 異常 payload: schema_version missing, evidence_usage 非空 (v2-specific data)
     anomalous_payload = {
@@ -259,8 +278,7 @@ def test_i3_from_dict_schema_version_missing_but_evidence_usage_nonempty_logs_er
         },
     }
 
-    with caplog.at_level(logging.ERROR, logger="reasoning.live_research.stage_state"):
-        s = LiveResearchStageState.from_dict(anomalous_payload)
+    s = LiveResearchStageState.from_dict(anomalous_payload)
 
     # Fix 後：視為 v2
     assert s.schema_version == 2, (
@@ -269,32 +287,27 @@ def test_i3_from_dict_schema_version_missing_but_evidence_usage_nonempty_logs_er
     )
 
     # Fix 後：log ERROR 提示 anomaly
-    error_records = [
-        r for r in caplog.records
-        if r.levelno >= logging.ERROR and "schema_version" in r.getMessage()
-    ]
+    error_records = [m for m in error_calls if "schema_version" in m]
     assert error_records, (
         "I-3 FAIL: anomalous payload should log ERROR mentioning schema_version "
-        f"(for SRE / oncall trace). caplog records: "
-        f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        f"(for SRE / oncall trace). error calls: {error_calls}"
     )
 
     # 對照 1: 正常 v1 payload (evidence_usage 空) → 仍 v1, 不 log ERROR
-    caplog.clear()
+    error_calls.clear()
     legacy_v1_payload = {
         "current_stage": 5,
         "stage_status": "completed",
         # 省略 schema_version, 也省略 evidence_usage
     }
-    with caplog.at_level(logging.ERROR, logger="reasoning.live_research.stage_state"):
-        s2 = LiveResearchStageState.from_dict(legacy_v1_payload)
+    s2 = LiveResearchStageState.from_dict(legacy_v1_payload)
     assert s2.schema_version == 1, (
         f"I-3 contrast: legacy v1 (no schema_version, no evidence_usage) "
         f"should remain v1, got {s2.schema_version}"
     )
 
     # 對照 2: 顯式 v2 (有 schema_version=2) → v2, 不 log ERROR
-    caplog.clear()
+    error_calls.clear()
     explicit_v2_payload = {
         "current_stage": 5,
         "stage_status": "completed",

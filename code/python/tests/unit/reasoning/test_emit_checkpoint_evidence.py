@@ -93,7 +93,8 @@ async def test_emit_checkpoint_no_sender_does_not_raise(caplog):
     但語意誤導。故顯式設 http_handler = None 走「兩路皆無」分支 + assert WARN 含
     message_type，防未來有人以「測試綠」認定 silent no-op 可接受。
     """
-    import logging
+    from unittest.mock import patch
+    import reasoning.live_research.sse_emit as sse_mod
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
 
     h = MagicMock()
@@ -101,13 +102,17 @@ async def test_emit_checkpoint_no_sender_does_not_raise(caplog):
     h.http_handler = None
     orch = LiveResearchOrchestrator(handler=h, dry_run=False)
 
-    with caplog.at_level(logging.WARNING):
+    # ordering 免疫（full-scan-2026-07 收尾）：兩路皆無時 WARN 由 sse_emit.logger
+    # （logging.getLogger(__name__)）發，全套下祖先 logger propagate 被前面測試設
+    # False → caplog（掛 root）records 空、假紅。改 patch.object 直攔 sse_emit.logger.warning
+    # 捕捉訊息。行為斷言逐字不變（WARN 含 message_type=live_research_checkpoint）。
+    with patch.object(sse_mod, "logger") as mock_logger:
         # Should not raise
         await orch._emit_checkpoint(stage=1, proposal="x", evidence_list=[{"id": 1}])
 
-    assert any("live_research_checkpoint" in r.message for r in caplog.records), (
-        f"expected WARN naming dropped message_type, got: "
-        f"{[r.message for r in caplog.records]}"
+    warn_msgs = [str(c.args[0]) for c in mock_logger.warning.call_args_list if c.args]
+    assert any("live_research_checkpoint" in m for m in warn_msgs), (
+        f"expected WARN naming dropped message_type, got: {warn_msgs}"
     )
 
 

@@ -11,7 +11,6 @@ releases. Backwards compatibility is not guaranteed at this time.
 
 import os
 import json
-import re
 import logging
 import asyncio
 from typing import Dict, Any, Optional
@@ -105,13 +104,11 @@ class GeminiProvider(LLMProvider):
         json_str = response_text[start_idx:end_idx]
                 
         try:
-            result = json.loads(json_str)
-
-            # check if the value is a integer number, convert it to int
-            for key, value in result.items():
-                if isinstance(value, str) and re.match(r'^\d+$', value):
-                    result[key] = int(value)
-            return result
+            # 數值欄位 coerce 已上移到 core/llm.ask_llm 的單一收斂點（依 schema 宣告，
+            # int/float 皆治、轉不動保留原值 + warning）。此處原本的 ad-hoc coerce
+            # （只治純數字字串、對所有 key 不看 schema 一律套）已冗餘並移除，三家 provider
+            # clean_response 對「解析出的 JSON」型別歸一——不再各自漂移。full-scan CORE-2。
+            return json.loads(json_str)
         except json.JSONDecodeError as e:
             error_msg = f"Failed to parse response as JSON: {e}"
             logger.error(f"{error_msg}, content: {json_str}")

@@ -357,9 +357,15 @@ class NLWebHandler:
                 try:
                     from core.results_cache import get_results_cache
                     cache = get_results_cache()
-                    # Use query+site as fallback key if conversation_id is empty
-                    cache_key = self.conversation_id if self.conversation_id else f"{self.query}_{self.site}"
-                    cache.store(cache_key, self.final_ranked_answers, self.query)
+                    # CORE-1: cache 按 trusted user_id 隔離。空 conversation_id 或
+                    # 無 user_id 時 cache 層自動不 cache（弱 fallback key 不用可
+                    # 碰撞的 query+site，避免跨 user 私有文件洩漏）。
+                    cache.store(
+                        self.conversation_id,
+                        self.final_ranked_answers,
+                        self.query,
+                        user_id=self.user_id,
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to cache results: {e}")
 

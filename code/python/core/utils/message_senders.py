@@ -120,8 +120,9 @@ class MessageSender:
     
     async def send_begin_response(self):
         """Send begin-nlweb-response message at the start of query processing."""
-        if not (self.handler.streaming and self.handler.http_handler is not None):
-            return
+        # 🔧R5F local import：破 message_senders⇄send 載入環（send.py 頂端已
+        # from core.utils.message_senders import inject_user_id）。禁放 module 頂端。
+        from core.sse.send import send_sse
 
         begin_message = {
             "message_type": "begin-nlweb-response",
@@ -130,14 +131,10 @@ class MessageSender:
             "query_id": getattr(self.handler, 'query_id', None),  # Include query_id for analytics
             "timestamp": int(time.time() * 1000)
         }
-        # Phase 4b.5 Fix 1: stamp user_id so frontend Trigger G can do
-        # envelope-level identity check (this emitter bypasses add_message_metadata).
-        inject_user_id(begin_message, self.handler)
-
-        try:
-            await self.handler.http_handler.write_stream(begin_message)
-        except Exception as e:
-            logger.warning(f"Failed to send begin-response: {e}")
+        # send_sse(path="ad_hoc") replicates the streaming+http_handler guard,
+        # inject_user_id (Trigger G), raw write_stream, and swallow-on-exception
+        # semantics of this ad-hoc emitter (plan §0.1 path 2 / Task 10).
+        await send_sse(self.handler, begin_message, path="ad_hoc")
     
     async def send_end_response(self, error=False):
         """
@@ -146,8 +143,7 @@ class MessageSender:
         Args:
             error: If True, indicates the query ended with an error
         """
-        if not (self.handler.streaming and self.handler.http_handler is not None):
-            return
+        from core.sse.send import send_sse  # 🔧R5F local import：破載入環
 
         end_message = {
             "message_type": "end-nlweb-response",
@@ -158,13 +154,9 @@ class MessageSender:
         if error:
             end_message["error"] = True
 
-        # Phase 4b.5 Fix 1: stamp user_id (bypasses add_message_metadata).
-        inject_user_id(end_message, self.handler)
-
-        try:
-            await self.handler.http_handler.write_stream(end_message)
-        except Exception as e:
-            logger.warning(f"Failed to send end-response: {e}")
+        # send_sse(path="ad_hoc"): guard + inject_user_id + raw write_stream +
+        # swallow-on-exception (plan §0.1 path 2 / Task 10).
+        await send_sse(self.handler, end_message, path="ad_hoc")
 
     async def send_progress(self, stage: str, message: str, percent: int = None):
         """
@@ -175,8 +167,7 @@ class MessageSender:
             message: User-friendly message in Chinese
             percent: Optional progress percentage (0-100)
         """
-        if not (self.handler.streaming and self.handler.http_handler is not None):
-            return
+        from core.sse.send import send_sse  # 🔧R5F local import：破載入環
 
         progress_message = {
             "message_type": "progress",
@@ -188,13 +179,11 @@ class MessageSender:
         if percent is not None:
             progress_message["percent"] = percent
 
-        # Phase 4b.5 Fix 1: stamp user_id (bypasses add_message_metadata).
-        inject_user_id(progress_message, self.handler)
-
-        try:
-            await self.handler.http_handler.write_stream(progress_message)
-        except Exception as e:
-            logger.warning(f"Failed to send progress (stage={stage}): {e}")
+        # send_sse(path="ad_hoc"): guard + inject_user_id + raw write_stream +
+        # swallow-on-exception (plan §0.1 path 2 / Task 10). NOTE: this is the
+        # MessageSender.send_progress ad-hoc emitter, distinct from the reasoning
+        # orchestrator_base._send_progress (path=progress) handled in Task 12.
+        await send_sse(self.handler, progress_message, path="ad_hoc")
 
     async def send_config_headers(self):
         """Send headers from configuration as messages."""
@@ -340,6 +329,13 @@ class MessageSender:
         message = await filter_message_pii(
             message, user_id=getattr(self.handler, 'user_id', None)
         )
+
+        # 🔧R3 (R2-BLK-2): flag ON validates the **completed wire dict** here (shape
+        # check only — returns payload unchanged, byte-identical to OFF). Local import
+        # breaks the message_senders <-> core.sse.send load-time cycle. OFF (default) is
+        # a no-op -> zero behavior change. See plan §Task 5 Step 2b.
+        from core.sse.send import _typed_validate
+        message = _typed_validate(message)
 
         # Always store the message (for both streaming and non-streaming)
         self.store_message(message)

@@ -1,0 +1,26 @@
+{
+  "message_type": "live_research_section",
+  "section_index": 0,
+  "title": "第一章",
+  "content": "章節內容…",
+  "sources": [
+    {
+      "url": "https://example.com/s1"
+    }
+  ],
+  "citation_sources": [
+    {
+      "id": 1
+    }
+  ],
+  "citation_format": "numeric",
+  "methodology_note": "本章方法論說明",
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

@@ -1,0 +1,12 @@
+{
+  "message_type": "deep_research_session_created",
+  "session_id": "dr-sess-abc",
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

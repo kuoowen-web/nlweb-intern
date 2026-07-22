@@ -1963,6 +1963,14 @@
             gap: 10px;
             padding: 8px 0 16px;
             min-height: 60px;
+            /* U2（plan: lr-ux-u1u2u3）：長 session 效能債根解 — chat 自成 scroll
+               container。頁高不再隨 entry 數線性成長（Zoe 實測 462 entries 曾把頁面
+               撐到 42,383px；body 6.3MB 背景圖 repeat-y 的 raster 成本 ∝ 頁高）；
+               同時讓 live-research.js 既有三處 chat.scrollTop = chat.scrollHeight
+               （:607 / :767 / :827）從 no-op 變正確。 */
+            max-height: 70vh;
+            overflow-y: auto;
+            overscroll-behavior: contain;
         }
 
         .lr-chat-message {
@@ -1970,11 +1978,23 @@
             gap: 10px;
             align-items: flex-start;
             animation: lrMsgFadeIn 0.25s ease;
+            /* U2：off-screen bubble 免 layout/raster（lazy render 等效）。
+               contain-intrinsic-size 提供未 render 時的估高，滾動條穩定不跳。
+               舊瀏覽器不支援時忽略此二屬性 = 漸進增強，行為不變。 */
+            content-visibility: auto;
+            contain-intrinsic-size: auto 80px;
         }
 
         @keyframes lrMsgFadeIn {
             from { opacity: 0; transform: translateY(6px); }
             to   { opacity: 1; transform: translateY(0); }
+        }
+
+        /* U2：replay / 回顧重建的歷史訊息不跑進場動畫 —— 歷史訊息本不該有
+           「新訊息進場」動畫；462 條同 tick 起跑曾有 layer promotion 風暴疑慮（H2）。
+           掛載點：_appendReplayedBubbles（mid-flight replay）+ renderLRStageDialog（stage 回顧）。 */
+        .lr-chat-message.lr-replayed {
+            animation: none;
         }
 
         .lr-chat-message.narration .lr-msg-bubble {
@@ -2433,6 +2453,11 @@
             line-height: 1.7;
             color: #636e72;
             margin-bottom: 20px;
+        }
+
+        .lr-modal-list {
+            margin: 6px 0 10px;
+            padding-left: 20px;
         }
 
         .lr-modal-actions {
@@ -3131,6 +3156,29 @@
             text-anchor: middle;
             font-weight: 500;
         }
+
+        /* 🔧 R4 SF-R4-1：用 `.kg-node .kg-hidden-badge`（0,2,0）壓過 `.kg-node text`（0,1,1），
+           否則螢幕 badge 字級/字重被 label 規則覆蓋。與 kg-svg-export.js EXPORT_CSS
+           的移除 `.kg-node text`（SF-R3-5）為螢幕/匯出兩側對稱修復。 */
+        .kg-node .kg-hidden-badge {
+            font-size: 10px;
+            font-weight: 700;
+            fill: #2D3436;
+            pointer-events: none;
+            text-anchor: middle;
+        }
+        .kg-nav-btn {
+            background: rgba(255,255,255,0.5);
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            color: var(--color-text-tertiary);
+            transition: all 0.2s;
+        }
+        .kg-nav-btn:hover:not(:disabled) { background: #FFEAA7; color: var(--color-text); }
+        .kg-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
         /* --- Edges (arc paths) --- */
         .kg-link {
@@ -6678,7 +6726,19 @@
 /* ============================================================
  * LR per-stage 回顧 UI（路 3：completed v2 session resume 回顧模式）
  * ============================================================ */
-.lr-stage-review { margin-top: 16px; }
+/* U1（plan: lr-ux-u1u2u3）：回顧容器自成 scroll container — Zoe 實測單 stage 回顧
+   render 370 條撐頁 20,451px；容器在 #lrChat 上方，不 bound 會把進行中對話與
+   reply bar 推出視窗外。與 .lr-chat（U2）同手法。 */
+.lr-stage-review { margin-top: 16px; max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; }
+.lr-review-banner {
+    font-size: 12.5px;
+    color: #7a6f57;
+    background: #faf6ec;
+    border: 1px solid var(--color-border, #eee);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+}
 .lr-review-empty { padding: 16px; color: #888; font-style: italic; border: 1px dashed #ccc; border-radius: 6px; }
 .lr-review-error { padding: 16px; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; }
 

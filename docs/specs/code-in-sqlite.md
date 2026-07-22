@@ -6,11 +6,11 @@
 
 ## 系統概述
 
-### 為什麼需要這套系統？
+### 設計動機
 
 > "I just put all my code data into SQLite. Unsurprisingly it can query, filter, aggregate way better than flat files. Agents love databases and a filesystem is just the worst kind of database."
 
-傳統檔案系統搜尋（grep/ripgrep）需要每次掃描所有檔案，而 SQLite + FTS5 索引：
+傳統檔案系統搜尋（grep/ripgrep）每次都要掃描所有檔案。SQLite + FTS5 索引則不同：
 
 | 比較項目 | Grep/Ripgrep | SQLite + FTS5 |
 | ---- | ------------ | ------------- |
@@ -181,7 +181,7 @@ WHERE files_fts MATCH 'process*'
 
 ### 人類需要做的維護
 
-**基本上不需要手動維護**。以下是各情況的處理方式：
+多數情況不需要手動維護。各情況的處理方式：
 
 | 情況       | 處理方式                    | 人類動作  |
 | -------- | ----------------------- | ----- |

@@ -310,6 +310,12 @@ def _count_chapter_words(content: str) -> int:
     return len(re.sub(r"\{cite:\d+\}", "", content or ""))
 
 
+# mock_bab fixture 目錄（單點切換；rollback = 換回 "lr_mock_bab_real"，舊目錄保留）。
+# 現行：Cayenne 綠能命題（prod session 8e1db658-3bac-4071-a4f3-cdcb53e8c162，2026-07-15，
+# 567 筆 evidence / 20 topics / 3 章：前言・國際案例分析・結論 / 40 id・172 claims）。
+_MOCK_BAB_FIXTURE_DIRNAME = "lr_mock_bab_cayenne_2026_07"
+
+
 def _resolve_target_chapter_layer1(target: str, chapter_names):
     """R2 第一層 code 短路（不另起 LLM call、復用既有 classifier 結果）：只處理「明擺著的」——
     exact / 唯一 substring / 空。
@@ -1242,19 +1248,19 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 f"{len(deserialize_evidence_pool(state.evidence_pool_json))} entries"
             )
             # 載入 fixture 內的 evidence_usage（chapter-override writer 必需）
-            # chapter-override（5 章）路徑 writer 硬依賴 state.evidence_usage；
-            # 缺此 → body 章「[本章資料不足]」空轉，over-block 測不到。
+            # chapter-override（fixture 章數，現行 Cayenne 3 章）路徑 writer 硬依賴
+            # state.evidence_usage；缺此 → body 章「[本章資料不足]」空轉，over-block 測不到。
             state.evidence_usage = self._load_mock_evidence_usage_fixture()
             total_claims = sum(len(v) for v in state.evidence_usage.values())
             logger.info(
                 f"[LIVE RESEARCH] mock_bab evidence_usage loaded: "
                 f"{len(state.evidence_usage)} evidence ids, {total_claims} grounded claims"
             )
-            # 載入 fixture 內的 book_outline（5 章）：
+            # 載入 fixture 內的 book_outline（fixture 章數，現行 Cayenne 3 章）：
             # (a) 序列化進 state.book_outline_json → Stage 5 idempotent guard 看到已存在
             #     → skip 重 plan（省 LLM cost）；
             # (b) 同步寫進 format_specs["chapters"] → _resolve_chapter_source 走
-            #     chapter-override 路徑（5 章），不 fallback core_topics（10 topics）。
+            #     chapter-override 路徑（fixture 章數），不 fallback core_topics。
             mock_book_outline = self._load_mock_book_outline_fixture()
             state.book_outline_json = mock_book_outline.model_dump_json()
             if not state.format_specs:
@@ -2140,6 +2146,40 @@ class LiveResearchOrchestrator(OrchestratorBase):
             if topic.topic_id in state.completed_sections:
                 continue
 
+            # plan: lr-disconnect-midstage-persist — topic 開始前檢查 offline cap
+            # （對齊 Stage 5 _run_stage_5 每段前檢查 :4562-4573）。這是給「topic 都還
+            # 沒開始跑、但已經離線」的情境用（例如 resume 後重新進入某 topic 前 client
+            # 仍未重連）；「topic 執行中被打斷」改由下方 engine.stopped_early 判斷
+            # （D-7），兩者是互補、不重疊的兩個檢查點。達上限 → 標 capped + persist
+            # 當下累積 + return（bounded burn，不無人看管燒錢）。未達 → 跑這個 topic。
+            # 不呼叫 _check_connection（不靠 raise，D-6）。
+            #
+            # ⚠ SHOULD-FIX 4（R1 AR，誠實聲明不修）：這個 cap 檢查只**讀**
+            # _offline_cap_reached(state)，不像 _persist_checkpoint_boundary
+            # （:4850-4854）那樣做「increment → 判 capped」的計數動作。這代表如果
+            # topic 一路都是「開始前檢查」這條路徑觸發 cap（而非跑完到
+            # _persist_checkpoint_boundary 那個 durable boundary），
+            # offline_checkpoint_advances 不會被 increment——Stage 2 的
+            # offline-cap-early-return 只有 wall-clock 上限（state.offline_since
+            # 累積時間）這條路徑實質生效，checkpoint-advance 上限不會被這裡觸及。
+            # 這是已知限制，不在本次修復範圍內修正（需要更動 _persist_checkpoint_boundary
+            # 的計數語意，影響面超出 Stage 2 斷線修復）。
+            alive = getattr(self.handler, 'connection_alive_event', None)
+            offline = alive is not None and not alive.is_set()
+            if offline:
+                self._mark_offline_since(state)
+                if self._offline_cap_reached(state):
+                    logger.warning(
+                        f"[LIVE RESEARCH] Offline cap reached at Stage 2 topic "
+                        f"'{topic.topic_id}'; stopping (reason={state.offline_cap_reason})"
+                    )
+                    state.offline_capped = True
+                    # 落盤當下已累積（下方 topic 完成路徑同款 flush，這裡提早 return 前補一次）
+                    state.context_map_json = context_map.model_dump_json()
+                    state.evidence_pool_json = serialize_evidence_pool(existing_pool)
+                    await self._persist_progress(state)
+                    return state
+
             await self._emit_narration(f"開始蒐集「{topic.name}」相關的資料...")
 
             engine = BABLoopEngine(
@@ -2170,7 +2210,6 @@ class LiveResearchOrchestrator(OrchestratorBase):
             )
 
             context_map = updated_map
-            state.completed_sections.append(topic.topic_id)
             # Fix (2026-05-27): engine 以 prior_executed_searches=state.executed_searches
             # seed（loop_engine.py:154 複製全部 prior），跑完 engine.executed_searches
             # 已是「prior + 本 topic 新增」的累積 superset。此處必須 **assign**（覆蓋）而非
@@ -2178,9 +2217,59 @@ class LiveResearchOrchestrator(OrchestratorBase):
             # （5 topics 後 ~2^5 倍：prod 觀察 911 筆，實際 unique evidence 僅 23）。
             # 對齊 _run_stage_1 line 387 既有的 assignment pattern。
             state.executed_searches = list(engine.executed_searches)
-            # Merge：engine.evidence_pool 已 dedup 過，直接覆蓋 existing_pool
+            # engine.evidence_pool 已含本 topic 累積（正常收斂完整、或 stopped_early
+            # 時的部分累積）；merge 後即為跨 engine 累積 superset（engine 已 dedup，
+            # 直接覆蓋）。不論 stopped_early 與否都要 merge——即使只跑到一半，已經
+            # 蒐集到的 evidence 也不該浪費（下一輪 resume 用這個當 seed 續跑）。
             existing_pool = engine.evidence_pool
             counter = engine._evidence_counter
+
+            # plan: lr-disconnect-midstage-persist（D-7，R1 AR blocker 消化）——
+            # 每個 topic 完成即落盤 + persist（root cause 修復核心）。舊 code 只在
+            # loop 外 :2202-2203 更新一次 → 中途斷線全蒸發。改成每 topic 邊界把
+            # context_map + evidence_pool 落進 state 並 _persist_progress（save fail
+            # log+raise，不 silent）。
+            #
+            # 關鍵分流（D-7）：completed_sections 只在「正常收斂完成」時 append。
+            # engine.stopped_early == True 代表這個 topic 是被 offline cooperative
+            # break 打斷（Task 1），並非真正跑完——如果無條件 append，resume 時
+            # `if topic.topic_id in state.completed_sections: continue` 會永久跳過
+            # 這個實際沒跑完的 topic（BLOCKER B-1）。
+            state.context_map_json = context_map.model_dump_json()
+            state.evidence_pool_json = serialize_evidence_pool(existing_pool)
+
+            if engine.stopped_early:
+                logger.warning(
+                    f"[LIVE RESEARCH] Stage 2 topic '{topic.topic_id}' interrupted "
+                    f"mid-execution by offline cooperative stop; persisting "
+                    f"accumulated evidence WITHOUT marking completed (resume will "
+                    f"re-enter this topic using accumulated evidence as seed)"
+                )
+                # plan: lr-disconnect-midstage-persist（R2 AR SHOULD-FIX 1，SF-1）——
+                # topic 執行到一半才第一次偵測到離線時（state.offline_since 此前為
+                # None），這裡也要記 wall-clock cap 的起點，跟上方「topic 開始前」
+                # 那個檢查點（本函式迴圈頂端 `if offline: self._mark_offline_since(state)`
+                # 那段）一致，否則要等下一次 resume 重新進入這個 topic、走到「topic
+                # 開始前」檢查點時才會補寫，offline_since 起點會被推遲（若使用者在
+                # 兩次呼叫之間有過短暫重連又斷線，wall-clock cap 的計時基準會因此
+                # 失真）。_mark_offline_since 內部已有「已有值不覆寫」保護（既有件
+                # A），這裡多呼叫一次是安全的 no-op（若已設過）。
+                # 注意：這裡**只**補 wall-clock 起點記錄，不做
+                # _persist_checkpoint_boundary 那套 checkpoint-advance increment 邏輯
+                # ——那是 SHOULD-FIX 4（R1）誠實聲明範圍內的另一個限制，兩者相關但不同：
+                # SF-1 修的是「offline_since 起點沒被寫」，SHOULD-FIX 4 講的是
+                # 「checkpoint-advance 計數不會被這條路徑 increment」。修 SF-1 不等於
+                # 修掉 SHOULD-FIX 4，SHOULD-FIX 4 的限制在這個分支依然成立。
+                self._mark_offline_since(state)
+                await self._persist_progress(state)
+                # 提早收場：不繼續跑後續 topic（已離線，等同觸發了 D-3 的 cap 情境；
+                # 不需要再另外判一次 _offline_cap_reached 才停——這個 topic 已經被
+                # 打斷就代表當下已離線，該收場，語意上與 D-3 的「開始前 cap」互補
+                # 而非重複）。
+                return state
+
+            state.completed_sections.append(topic.topic_id)
+            await self._persist_progress(state)
 
             await self._emit_narration(f"「{topic.name}」的資料蒐集完成。")
 
@@ -3530,12 +3619,15 @@ class LiveResearchOrchestrator(OrchestratorBase):
         """R7：LLM 判 user 對 special_element 澄清問句的回答意圖（不用 substring/regex）。
         比照 _classify_confirmation_intent 的 LLM classifier pattern（level="low"，LLM fail → 安全 default）。
 
-        Returns dict: {"intent": one of confirm|change_chapter|cancel|unclear,
+        Returns dict: {"intent": one of confirm|change_chapter|cancel|reframe|unclear,
                        "target_chapter": <LLM 判 user 想改到的章名原文，僅 change_chapter 有>}
         - confirm：user 接受 pending 提案（「對/是的/好/就放那章」）→ caller 用 pending 的 resolved_title 定位
         - change_chapter：user 改章（「不是，我要國外案例」「放結論那章」「第二個」「最後一章」）
             → LLM 順帶把新 target 語意對應到 chapter_names 裡的某章名（比照 R2 主流程語意判斷）；判不出留空
         - cancel：user 放棄（「算了/不用了/不要表格了」）→ caller 清 pending 不注入
+        - reframe：user 沒在回答「放哪一章」，而是提出整體章節結構重組訴求
+            （「把 11 個主題重組成三章」「整個架構重新整理」）→ caller 走 B2 逃生口：
+            清 pending + 交 Stage 4 typed dispatcher 解結構 payload（2026-07-15 Cayenne 死迴圈修法）
         - unclear：判不準 → caller 重問
         """
         msg = (user_message or "").strip()
@@ -3565,12 +3657,16 @@ class LiveResearchOrchestrator(OrchestratorBase):
             "（如「結論」「政策建議那章」「最後一章」），就 target_chapter 填 **user 的原話 raw target**"
             "（照抄「結論」「政策建議那章」，不要留空）；系統之後會用定案章名去對。\n"
             "  * 只有 user 仍**沒給任何具體 target**（純模糊「隨便」「你決定」）才留空字串。\n"
+            "- intent=\"reframe\"：user 沒在回答「放哪一章」，而是提出**整體章節結構重組**訴求\n"
+            "  （「把這 11 個主題重組成三章」「改成三章：前言、國際案例分析、結論」「整個架構重來」）。\n"
+            "  這不是 change_chapter（change_chapter 是幫這個表格換一章；reframe 是要改掉整份章節結構）。\n"
+            "  reframe 時 target_chapter 留空字串。\n"
             "- intent=\"cancel\"：放棄放這個特殊格式（「算了」「不用了」「不要表格了」）。\n"
             "- intent=\"unclear\"：判不準 / 模糊 / user 沒給具體 target。\n\n"
             "只回 JSON。"
         )
         schema = {"type": "object", "properties": {
-            "intent": {"type": "string", "enum": ["confirm", "change_chapter", "cancel", "unclear"]},
+            "intent": {"type": "string", "enum": ["confirm", "change_chapter", "cancel", "reframe", "unclear"]},
             "target_chapter": {"type": "string"},
         }, "required": ["intent"]}
         try:
@@ -3588,7 +3684,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         if "intent" not in resp and "properties" in resp and isinstance(resp["properties"], dict):
             resp = resp["properties"]
         intent = resp.get("intent", "unclear")
-        if intent not in ("confirm", "change_chapter", "cancel", "unclear"):
+        if intent not in ("confirm", "change_chapter", "cancel", "reframe", "unclear"):
             logger.warning(f"[LIVE RESEARCH] pending reply unknown intent {intent!r} → unclear")
             intent = "unclear"   # SF1：unknown intent guard → 安全 default
         return {"intent": intent,
@@ -3598,7 +3694,8 @@ class LiveResearchOrchestrator(OrchestratorBase):
         """R7：處理 special_element 澄清 round 的 user reply。意圖分流**全交 LLM**
         （_classify_pending_special_element_reply），不用 substring/regex。
         confirm → 用 pending 的 resolved_title 定位；change_chapter → 用 LLM 判的新 target
-        定位；cancel → 清 pending 不注入；unclear → 重問。
+        定位；cancel → 清 pending 不注入；reframe → B2 逃生口（清 pending + 交 Stage 4
+        typed dispatcher 走既有 reframe entry，2026-07-15 Cayenne 死迴圈修法）；unclear → 重問。
         blank/auto_continue（B-order）→ re-emit clarification，不 finalize、不清 pending。
         """
         import json
@@ -3704,6 +3801,73 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
                 return state
             return await _emit_clarify_again()   # 有章名但 LLM 給的 target 對不到 → 重問
+
+        if intent == "reframe":
+            # B2 逃生口（2026-07-15 Cayenne 死迴圈，findings B2 / lessons 2026-07-15 條）：
+            # user 在澄清 round 提出整體章節結構重組 → 不可重播澄清問句
+            # （重播同句 = 實質吞掉訴求 = silent fail，違 CLAUDE.md）。
+            # Port Stage 5 pending_recollect_confirmation 段4 substantive fall-through 設計：
+            # 訴求交回 Stage 4 正規 typed dispatch（_classify_stage_4_response）解出
+            # typed payload，再走既有 _try_stage_4_reframe_entry_typed（不重造 reframe 輪）。
+            from reasoning.schemas_live import Stage4ResponseAction
+            response = await self._classify_stage_4_response(state, user_message)
+            # 分流紀律（lessons「intent parser 回 None ≠ 回 dict 無 action」）：
+            # _classify_stage_4_response 在 LLM API 失敗/空回應/validation fail 時回
+            # unclear + LLM_UNAVAILABLE_NARRATION sentinel —— 系統端故障 fail-loud 用
+            # 系統文案 + pending 原樣保留等重試；不可誤說「沒看懂」、不可丟 pending、
+            # 不可進 reframe entry。此判定必在下方結構 payload 路由之前。
+            if (response.action == Stage4ResponseAction.unclear
+                    and response.clarifying_question == lr_copy.LLM_UNAVAILABLE_NARRATION):
+                logger.warning(
+                    "[LIVE RESEARCH] pending special_element reframe escape: stage-4 "
+                    "classifier LLM fail — keep pending, emit system narration"
+                )
+                await self._emit_narration(lr_copy.LLM_UNAVAILABLE_NARRATION)
+                return await self._reemit_pending_special_clarification(state)
+            if (response.action in (Stage4ResponseAction.adjust_chapters,
+                                    Stage4ResponseAction.new_structure_request)
+                    and response.structural_content is not None):
+                # R7 互斥 invariant：_try_stage_4_reframe_entry_typed 內的
+                # _emit_reframe_proposal 會設 pending_reframe_json —— special pending
+                # 必須在此**先清**（沿用 _enforce_pending_exclusivity 既定策略：
+                # reframe 優先、special 清 + 誠實告知，不 silent 丟需求）。
+                state.pending_special_element_json = ""
+                await self._persist_checkpoint_boundary(state)
+                await self._emit_narration(
+                    "好，先處理你的結構調整；原本的表格／圖表位置設定我先暫停，"
+                    "等新結構確認後，請再告訴我一次要放哪一章。"
+                )
+                logger.info(
+                    "[LIVE RESEARCH] pending special_element reframe escape → "
+                    "stage-4 reframe entry (chapters=%d)",
+                    len(response.structural_content.new_chapters),
+                )
+                try:
+                    return await self._try_stage_4_reframe_entry_typed(
+                        state, user_message,
+                        structural=response.structural_content,
+                        format_content=response.format_content,
+                    )
+                except Exception:
+                    # SF-A（AR R1 Codex）：此時 pending 已清、persist 已落，proposal 可能
+                    # 未發出 —— 不可 silent。誠實告知 user 重述（pending 已空，重述會走
+                    # 正規 Stage 4 dispatch 仍可達 reframe，嚴格優於死迴圈現狀）。
+                    logger.exception(
+                        "[LIVE RESEARCH] pending reframe escape: reframe entry failed "
+                        "after pending cleared — fail-loud, ask user to restate"
+                    )
+                    await self._emit_narration(
+                        "抱歉，結構調整處理失敗。請重新告訴我一次你想要的章節結構；"
+                        "原本的表格／圖表位置設定已先暫停，結構確認後請再說一次。"
+                    )
+                    return state
+            # 低階分類器判 reframe、typed classifier 沒解出結構 payload（真模糊）→
+            # 不硬猜、不丟 pending，重問（user 可換更明確措辭；安全方向）。
+            logger.info(
+                "[LIVE RESEARCH] pending special_element reframe escape: no structural "
+                f"payload (action={response.action}) — re-clarify, pending kept"
+            )
+            return await _emit_clarify_again()
 
         # unclear
         return await _emit_clarify_again()
@@ -7014,29 +7178,18 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
         full_report = "\n".join(parts)
 
-        # Track D D1 (sprint 2026-05-28): KG markdown section + SSE event metadata
-        # D-AMB-3 LOCKED Option (d) 雙路：報告 .md 含 + SSE event metadata 也含
-        # N-8: KG section 必須在 references 之後 (references 是 user 主要 cross-reference
-        # 工具, KG 是輔助; user 下載 .md 後 KG JSON 才不會永遠失去)
-        # fix-up round 1 S-5 / N-12: kg_payload 抽 helper 構築 (markdown + SSE 共用)
-        import json as _json
+        # Track D D1 (sprint 2026-05-28): KG SSE event metadata（餵前端 D3 視覺化）。
+        # kg_payload 仍需構築供下方 SSE "knowledge_graph" 欄位使用。
+        # ⚠️ 報告末段 KG JSON section 已於 2026-07-21 暫移除（匯出只支援純文字、
+        # KG 的 raw JSON 使檔案體積雙倍且不可讀），待 KG overhaul 後恢復。
+        # 原本此處把 kg_payload 以 ```json fence 拼進 full_report 的 markdown section
+        # 已刪除；SSE knowledge_graph payload（下方 :emit）保留不變。
         kg_payload = self._build_kg_export_payload(state.knowledge_graph)
-        if kg_payload is not None:
-            kg_section_md = (
-                "\n\n---\n\n## 知識圖譜 (Knowledge Graph)\n\n"
-                "研究過程萃取的實體與關係（含 evidence_ids 對應上方 references 編號）：\n\n"
-                "```json\n"
-                + _json.dumps(kg_payload, ensure_ascii=False, indent=2)
-                + "\n```\n"
-            )
-            full_report += kg_section_md
 
-        # 路 3 (P-回顧): 把組好的完整報告（含 H1 + sections + references + KG section）
+        # 路 3 (P-回顧): 把組好的完整報告（含 H1 + sections + references）
         # 存進 state，隨下方 _persist_checkpoint_boundary 落 live_research_state JSONB。
-        # 前端回顧主路徑直接讀此字串丟 showLRExport，與本次 export 逐字一致
-        # （含 KG metadata.generated_at — 因存的就是當下組好的字串，時戳已凍結）。
+        # 前端回顧主路徑直接讀此字串丟 showLRExport，與本次 export 逐字一致。
         # 雙重組裝根源消除：前端不再自己重組報告（fallback 僅供欄位上線前舊 session）。
-        # NOTE: assign 必須在 full_report 完全組好之後（含 += kg_section_md），否則缺 KG section。
         state.final_report_markdown = full_report
 
         # 推送完整報告（O5+O5b: 走 emit_sse，sender None/例外時 fallback + log，
@@ -7260,19 +7413,19 @@ class LiveResearchOrchestrator(OrchestratorBase):
     def _load_mock_bab_fixture(self) -> ContextMap:
         """載入真實 LLM 產出的 ContextMap fixture（mock_bab 模式用）。
 
-        載入來源：tests/fixtures/lr_mock_bab_real/context_map.json
-        （prod session 5767ae4a，台灣農漁村綠能衝突，36 筆真語料 + 18 topics v8）。
+        載入來源：tests/fixtures/{_MOCK_BAB_FIXTURE_DIRNAME}/context_map.json
+        （現行：Cayenne 綠能命題 prod session 8e1db658，567 筆真語料 + 20 topics v25）。
         """
         import json
         from pathlib import Path
 
         # 從 repo root 解析 fixture 路徑（相對 orchestrator.py 往上 4 層到 repo root）
         repo_root = Path(__file__).parents[4]
-        fixture_path = repo_root / "code" / "python" / "tests" / "fixtures" / "lr_mock_bab_real" / "context_map.json"
+        fixture_path = repo_root / "code" / "python" / "tests" / "fixtures" / _MOCK_BAB_FIXTURE_DIRNAME / "context_map.json"
         if not fixture_path.exists():
             raise FileNotFoundError(
                 f"[LIVE RESEARCH] mock_bab context_map fixture not found: {fixture_path}. "
-                "Run: copy _tmp_contextmap_5767.json to code/python/tests/fixtures/lr_mock_bab_real/context_map.json"
+                f"Expected fixture dir: tests/fixtures/{_MOCK_BAB_FIXTURE_DIRNAME}/（撈法見 docs/specs/mock-bab-playbook.md）"
             )
 
         with open(fixture_path, "r", encoding="utf-8") as f:
@@ -7289,8 +7442,8 @@ class LiveResearchOrchestrator(OrchestratorBase):
     def _load_mock_evidence_pool_fixture(self) -> str:
         """載入 mock_bab fixture 的 evidence_pool，回傳 serialized JSON 字串。
 
-        載入來源：tests/fixtures/lr_mock_bab_real/evidence_pool.json
-        （prod session 5767ae4a，36 筆真實 evidence）。
+        載入來源：tests/fixtures/{_MOCK_BAB_FIXTURE_DIRNAME}/evidence_pool.json
+        （現行：Cayenne prod session 8e1db658，567 筆真實 evidence）。
 
         fixture 內 evidence_pool 是 dict[str(id), entry_dict]，本方法直接序列化成
         state.evidence_pool_json 所需的字串格式（與 serialize_evidence_pool 相容）。
@@ -7302,7 +7455,7 @@ class LiveResearchOrchestrator(OrchestratorBase):
         from pathlib import Path
 
         repo_root = Path(__file__).parents[4]
-        fixture_path = repo_root / "code" / "python" / "tests" / "fixtures" / "lr_mock_bab_real" / "evidence_pool.json"
+        fixture_path = repo_root / "code" / "python" / "tests" / "fixtures" / _MOCK_BAB_FIXTURE_DIRNAME / "evidence_pool.json"
         if not fixture_path.exists():
             logger.warning(
                 f"[LIVE RESEARCH] mock_bab evidence_pool fixture not found: {fixture_path} — "
@@ -7331,8 +7484,8 @@ class LiveResearchOrchestrator(OrchestratorBase):
     def _load_mock_evidence_usage_fixture(self) -> "Dict[int, List[Dict]]":
         """載入 mock_bab fixture 的 evidence_usage，回傳 Dict[int, List[Dict]]。
 
-        載入來源：tests/fixtures/lr_mock_bab_real/evidence_usage.json
-        （prod session 5767ae4a，35 evidence ids / 147 grounded claims，全 PASS）。
+        載入來源：tests/fixtures/{_MOCK_BAB_FIXTURE_DIRNAME}/evidence_usage.json
+        （現行：Cayenne prod session 8e1db658，40 evidence ids / 172 grounded claims）。
 
         JSON key 一律是 str，載入時轉回 int（state.evidence_usage 型別契約 Dict[int, ...]）。
         value 保持 List[Dict]（不還原成 GroundedClaim model），與 loop_engine
@@ -7348,13 +7501,13 @@ class LiveResearchOrchestrator(OrchestratorBase):
         repo_root = Path(__file__).parents[4]
         fixture_path = (
             repo_root / "code" / "python" / "tests" / "fixtures"
-            / "lr_mock_bab_real" / "evidence_usage.json"
+            / _MOCK_BAB_FIXTURE_DIRNAME / "evidence_usage.json"
         )
         if not fixture_path.exists():
             raise FileNotFoundError(
                 f"[LIVE RESEARCH] mock_bab evidence_usage fixture not found: {fixture_path}. "
-                "Run: copy evidence_usage from prod session 5767ae4a to "
-                "code/python/tests/fixtures/lr_mock_bab_real/evidence_usage.json"
+                f"Expected fixture dir: tests/fixtures/{_MOCK_BAB_FIXTURE_DIRNAME}/"
+                "（撈法見 docs/specs/mock-bab-playbook.md）"
             )
 
         with open(fixture_path, "r", encoding="utf-8") as f:
@@ -7405,8 +7558,8 @@ class LiveResearchOrchestrator(OrchestratorBase):
     def _load_mock_book_outline_fixture(self) -> "BookOutline":
         """載入 mock_bab fixture 的 BookOutline，回傳 BookOutline model。
 
-        載入來源：tests/fixtures/lr_mock_bab_real/book_outline.json
-        （prod session 5767ae4a，5 章：前言/國內案例文獻/國外案例文獻/結果與討論/結論）。
+        載入來源：tests/fixtures/{_MOCK_BAB_FIXTURE_DIRNAME}/book_outline.json
+        （現行：Cayenne prod session 8e1db658，3 章：前言/國際案例分析/結論）。
 
         fixture JSON 結構與 BookOutline schema 對齊（chapter_index / title / brief /
         target_word_count / planned_evidence_ids / transition_hint / role）。
@@ -7419,13 +7572,13 @@ class LiveResearchOrchestrator(OrchestratorBase):
         repo_root = Path(__file__).parents[4]
         fixture_path = (
             repo_root / "code" / "python" / "tests" / "fixtures"
-            / "lr_mock_bab_real" / "book_outline.json"
+            / _MOCK_BAB_FIXTURE_DIRNAME / "book_outline.json"
         )
         if not fixture_path.exists():
             raise FileNotFoundError(
                 f"[LIVE RESEARCH] mock_bab book_outline fixture not found: {fixture_path}. "
-                "Run: copy book_outline from prod session 5767ae4a to "
-                "code/python/tests/fixtures/lr_mock_bab_real/book_outline.json"
+                f"Expected fixture dir: tests/fixtures/{_MOCK_BAB_FIXTURE_DIRNAME}/"
+                "（撈法見 docs/specs/mock-bab-playbook.md）"
             )
 
         with open(fixture_path, "r", encoding="utf-8") as f:

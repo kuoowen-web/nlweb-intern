@@ -25,6 +25,7 @@ def _make_handler():
     h.message_sender = None
     h.connection_alive_event = None
     h.http_handler = None
+    h._save_state = AsyncMock()  # _persist_progress durable boundary awaits this
     return h
 
 
@@ -94,9 +95,10 @@ async def test_stage_1_writes_evidence_pool():
 
 @pytest.mark.asyncio
 async def test_mock_bab_loads_fixture_evidence_pool():
-    """mock_bab=True → state.evidence_pool_json 含 fixture 內 36 條 evidence (prod session 5767ae4a)。
+    """mock_bab=True → state.evidence_pool_json 含 fixture 內 567 條 evidence (Cayenne session 8e1db658)。
 
-    2026-06-09: fixture 換為 prod session 5767ae4a 真語料 (36 筆)，舊 21 筆 fake 已棄用。
+    2026-07: fixture 換為 Cayenne 綠能命題 prod session 8e1db658 真語料（567 筆），
+    舊 36 筆（5767ae4a）目錄保留供 rollback。
     """
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
 
@@ -112,18 +114,17 @@ async def test_mock_bab_loads_fixture_evidence_pool():
 
     assert state.evidence_pool_json != ""
     restored = deserialize_evidence_pool(state.evidence_pool_json)
-    assert len(restored) == 36
-    assert set(restored.keys()) == set(range(1, 37))
+    assert len(restored) == 567
+    assert set(restored.keys()) == set(range(1, 568))
 
 
 @pytest.mark.asyncio
 async def test_mock_bab_evidence_ids_cover_fixture_topic_evidence_ids():
-    """Fixture topic.evidence_ids 引用範圍 1-36 的 IDs 全部對應到 pool entries。
+    """Fixture topic.evidence_ids 引用範圍 1-567 的 IDs 全部對應到 pool entries。
 
-    2026-06-09: 真實 fixture (session 5767ae4a) context_map topics 引用了
-    evidence IDs 1-56（BAB v8 迭代規劃），但 evidence_pool 只有 1-36（實際蒐集到的）。
-    IDs 37-56 是 planned（context_map 搜尋計畫）但未實際入池的 future evidence。
-    本測試只驗證 pool 範圍內的 IDs（1-36）都存在。
+    2026-07: 真實 fixture (Cayenne session 8e1db658) evidence_pool 有 1-567
+    （實際蒐集到的）。context_map topics 可能引用 planned-but-not-fetched 的
+    future evidence IDs（BAB 迭代規劃），本測試只驗證 pool 範圍內的 IDs（1-567）都存在。
     """
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
 
@@ -145,11 +146,11 @@ async def test_mock_bab_evidence_ids_cover_fixture_topic_evidence_ids():
     restored = deserialize_evidence_pool(state.evidence_pool_json)
     pool_keys = set(restored.keys())
 
-    # 只驗證 pool 範圍內（1-36）的 topic reference IDs 全部存在
-    # IDs > 36 是 BAB planned-but-not-fetched future evidence（context_map search_seeds 計畫）
-    in_pool_range = {eid for eid in used_eids if eid <= 36}
+    # 只驗證 pool 範圍內（1-567）的 topic reference IDs 全部存在
+    # IDs > 567 是 BAB planned-but-not-fetched future evidence（context_map search_seeds 計畫）
+    in_pool_range = {eid for eid in used_eids if eid <= 567}
     missing = in_pool_range - pool_keys
-    assert not missing, f"Topic evidence_ids (1-36 range) 引用了 pool 沒有的 ID: {missing}"
+    assert not missing, f"Topic evidence_ids (1-567 range) 引用了 pool 沒有的 ID: {missing}"
 
 
 # ============================================================================
@@ -158,7 +159,8 @@ async def test_mock_bab_evidence_ids_cover_fixture_topic_evidence_ids():
 
 @pytest.mark.asyncio
 async def test_write_section_passes_evidence_lookup_to_writer():
-    """_write_section 從 evidence_pool 抽出 topic.evidence_ids 對應子集，傳 compose_section。"""
+    """_write_section 傳全 pool evidence_lookup 給 compose_section（W3 起有意全 pool，
+    topic.evidence_ids 只是優先 tier 提示；見 orchestrator.py「evidence_lookup 已改全 pool」註解）。"""
     from reasoning.live_research.orchestrator import LiveResearchOrchestrator
 
     handler = _make_handler()
@@ -210,9 +212,9 @@ async def test_write_section_passes_evidence_lookup_to_writer():
 
     assert "evidence_lookup" in captured
     lookup = captured["evidence_lookup"]
-    # 只應包含 topic.evidence_ids 對應的 entries
-    assert set(lookup.keys()) == {1, 3}
-    assert 2 not in lookup
+    # W3 起 evidence_lookup = 全 pool（writer 能看到所有 [N] 對應；priority 由
+    # analyst_citations tier 提示，非靠子集過濾）
+    assert set(lookup.keys()) == {1, 2, 3}
 
 
 @pytest.mark.asyncio

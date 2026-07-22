@@ -206,7 +206,7 @@ CREATE INDEX idx_sessions_deleted ON search_sessions(deleted_at)
 > | `session_history` | 每筆 query + 結果的完整快照（含 `data.content` articles array、`researchReport`、`argumentGraph`、`chainAnalysis`、`knowledgeGraph`），詳細結構見 §2.3 | `sessionHistory` |
 > | `chat_history` | Free conversation mode 的訊息列表（role/content） | `chatHistory` |
 > | `accumulated_articles` | 跨 query 累積的文章（含 annotation） | `accumulatedArticles` |
-> | `research_report` | DR / LR 完整報告物件（最新一份） | `currentResearchReport` |
+> | `research_report` | DR / LR 完整報告物件（最新一份）。**內層含 `rerunState`（2026-07-15）**：KG 編輯 rerun 的輸入中間狀態精簡子集（formatted_context / 剝成 5 欄的 source_map / items_count / mode 等，**含 `query_id` 綁定產生它的那次 DR**——DB fallback 驗 session↔query_id 對齊，防同 session 多次 DR 張冠李戴；詳見 reasoning-spec §2.7） | `currentResearchReport` |
 >
 > 這 5 個欄位 + `pinned_messages` / `pinned_news_cards` / `team_comments` / `live_research_state` 共 9 個 JSONB content 欄位，皆受 §3.1 `update_session` allowed_fields 與 §10 sanitize defense-in-depth 管控。
 

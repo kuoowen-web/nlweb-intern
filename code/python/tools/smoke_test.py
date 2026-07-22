@@ -46,9 +46,11 @@ CORE_MODULES = [
     "core.session_service",
     # Streaming
     "core.utils.message_senders",
-    # Indexing
-    "indexing.pipeline",
-    "indexing.chunking_engine",
+    "core.sse",
+    # Indexing（路徑 A 已刪除 D-2026-07-16；只驗 prod 活鏈與 dashboard）
+    "indexing.cloud_embed",
+    "indexing.bulk_load",
+    "indexing.dashboard_api",
     # Crawler
     "crawler.core.engine",
 ]

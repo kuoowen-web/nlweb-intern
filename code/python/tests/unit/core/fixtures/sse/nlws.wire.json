@@ -1,0 +1,14 @@
+{
+  "message_type": "nlws",
+  "@type": "GeneratedAnswer",
+  "answer": "這是生成回答。",
+  "items": [],
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

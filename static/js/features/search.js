@@ -153,6 +153,7 @@ import { markSessionDirty } from './session-manager.js';
 import { UserStateSync } from '../core/state-sync.js';
 import { buildCitationHref, escapeHtmlAttr } from './text-fragment.js';
 import { isCurrentGeneration } from './search-generation.js';
+import { parseSseLine } from './sse-dispatch.js';
 
 // ----------------------------------------------------------------------------
 // UI flag — AI summary expanded state
@@ -214,6 +215,19 @@ export function escapeHTML(str) {
     return div.innerHTML;
 }
 
+// FE-4（full-scan-2026-07 P1 批6）：href 協議白名單。
+// 只允許 http(s) / 相對路徑（/、./、../）/ 純錨點（#）；擋 javascript:/data:/vbscript:
+// 等可執行協議（XSS via markdown link）。null/空 → 不安全（caller 退回純文字）。
+export function isSafeUrl(url) {
+    if (!url) return false;
+    // 先去掉所有 ASCII 控制字元與空白（U+0000..U+0020 及 U+007F），防含 tab 的協議繞過。
+    const s = String(url).replace(/[ - ]/g, '');
+    // 相對路徑 / 錨點：無協議前綴，安全
+    if (/^(\/|\.\/|\.\.\/|#)/.test(s)) return true;
+    // 有協議：只放行 http/https；其餘（javascript:/data:/vbscript: 等）不安全
+    return /^https?:\/\//i.test(s);
+}
+
 // Convert markdown-style links to HTML and preserve HTML line breaks.
 // Converts [來源](url) to clickable <a> tags while keeping <br> tags intact.
 export function convertMarkdownToHtml(text) {
@@ -229,13 +243,22 @@ export function convertMarkdownToHtml(text) {
     safe = safe.replace(/&lt;br&gt;/g, "<br>");
 
     // Convert markdown links [text](url) to HTML <a> tags
+    // FE-4（full-scan-2026-07 P1 批6）：
+    //   - text 已於上方整體 escape（&/</>），此處保持。
+    //   - url 加協議白名單，擋 `javascript:`/`data:` 等可執行協議注入 href；
+    //     並用 escapeHtmlAttr 跳脫引號避免屬性 breakout。
     safe = safe.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(match, text, url) {
         const decodedUrl = url
             .replace(/&amp;/g, "&")
             .replace(/&lt;/g, "<")
             .replace(/&gt;/g, ">");
 
-        return `<a href="${decodedUrl}" class="source-link" target="_blank" rel="noopener noreferrer">${text}</a>`;
+        // 協議白名單：只允許 http/https/相對路徑/錨點；其餘（javascript:/data:/vbscript: 等）
+        // 視為不安全 → 不生成 <a>，退回純文字（text 已 escape）。
+        if (!isSafeUrl(decodedUrl)) {
+            return text;
+        }
+        return `<a href="${escapeHtmlAttr(decodedUrl)}" class="source-link" target="_blank" rel="noopener noreferrer">${text}</a>`;
     });
 
     return safe;
@@ -1098,7 +1121,6 @@ export async function handleStreamingRequest(url, query) {
                     case 'decontextualization':
                     case 'pre_check_results':
                     case 'site_querying':
-                    case 'tool_routing':
                     case 'research_phase':
                     case 'progress':
                     case 'end-nlweb-response':
@@ -1196,7 +1218,8 @@ export async function handlePostStreamingRequest(url, body, query, abortSignal =
             for (const line of lines) {
                 if (line.startsWith('data: ')) {
                     try {
-                        const data = JSON.parse(line.slice(6));
+                        const data = parseSseLine(line);
+                        if (!data) continue;
                         console.log('POST SSE message received:', data);
 
                         const currentUid = window.authManager?._user?.id || null;
@@ -1314,7 +1337,6 @@ export async function handlePostStreamingRequest(url, body, query, abortSignal =
                             case 'decontextualization':
                             case 'pre_check_results':
                             case 'site_querying':
-                            case 'tool_routing':
                             case 'research_phase':
                             case 'intermediate_result':
                             case 'clarification_required':
@@ -1345,7 +1367,8 @@ export async function handlePostStreamingRequest(url, body, query, abortSignal =
         for (const line of lines) {
             if (line.startsWith('data: ')) {
                 try {
-                    const data = JSON.parse(line.slice(6));
+                    const data = parseSseLine(line);
+                    if (!data) continue;
                     console.log('POST SSE final buffer message:', data);
                     if (data.message_type === 'begin-nlweb-response' && data.query_id) {
                         setAnalyticsQueryId(data.query_id);

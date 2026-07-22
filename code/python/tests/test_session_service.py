@@ -589,3 +589,24 @@ class TestLRDialogSnapshot:
         snap2 = row2['lr_dialog_snapshot']
         assert isinstance(snap2, list)                 # 同上，強斷言不容錯
         assert snap2 == snap                           # snapshot 仍在（C1 根治證明）
+
+    @pytest.mark.asyncio
+    async def test_live_research_state_deserialized_to_dict_not_str(self, svc):
+        """收尾（full-scan-2026-07 批5 Codex）：live_research_state 也必須進
+        _deserialize_session jsonb_fields 白名單——與姊妹欄 lr_dialog_snapshot 對稱。
+
+        缺口：update_session allowed_fields 有 live_research_state（寫入走 _dumps_safe
+        序列化成 JSON 字串），但 _deserialize_session 的 jsonb_fields 只列 lr_dialog_snapshot、
+        漏 live_research_state → SQLite GET 回 JSON 字串而非 dict（API 消費端拿到字串）。
+
+        【禁容錯掩蓋】此處強斷言 dict、絕不寫 `if isinstance(str): json.loads` ——
+        那會在白名單漏加時假綠。修法＝jsonb_fields 補 live_research_state（root fix）。
+        """
+        sid = (await svc.create_session(USER_ID, ORG_ID, title="LRS"))['id']
+        state = {'current_stage': 4, 'context_map_json': '{"topic":"x"}', 'sections': [1, 2]}
+        await svc.update_session(sid, USER_ID, ORG_ID, {'live_research_state': state})
+        row = await svc.get_session(sid, USER_ID, ORG_ID)
+        lrs = row['live_research_state']
+        assert isinstance(lrs, dict), \
+            f"live_research_state 必回 dict 非字串（jsonb_fields 白名單漏加?）got {type(lrs)}"
+        assert lrs == state

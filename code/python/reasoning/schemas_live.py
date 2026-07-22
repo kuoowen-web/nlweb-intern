@@ -17,7 +17,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from misc.logger.logging_config_helper import get_configured_logger
 
@@ -1708,8 +1715,50 @@ def serialize_evidence_pool(pool: Dict[int, EvidencePoolEntry]) -> str:
 
 
 def deserialize_evidence_pool(s: str) -> Dict[int, EvidencePoolEntry]:
-    """從 JSON 字串還原 evidence_pool dict。空字串回傳空 dict（兼容舊 DB row）。"""
+    """從 JSON 字串還原 evidence_pool dict。空字串回傳空 dict（兼容舊 DB row）。
+
+    F-1 (full-scan 批7) fail-closed 防護：corrupt state（半寫入 checkpoint /
+    DB 損壞 / 舊 schema drift）不該炸整條 pipeline，而要與 DR 側「corrupt 資料
+    回退、非 500」的紀律對齊。
+
+    - 整份 JSON 損壞（JSONDecodeError / 非 dict）→ log warning + 回空 dict，
+      讓上游 caller（orchestrator Stage 5/6）走既有的判空回退（blocked /
+      checkpoint），而不是往上炸 _run_stage_5 / Stage 6。
+    - 單筆 entry 型別變形（ValidationError）或非數字 key（int() ValueError）→
+      per-entry skip 該筆 + log warning，其餘 entry 正常還原（單筆壞不炸全池）。
+
+    絕不 silent fail：每個被跳過的壞資料都留 warning，方便排查。
+    """
     if not s:
         return {}
-    raw = json.loads(s)
-    return {int(k): EvidencePoolEntry.model_validate(v) for k, v in raw.items()}
+
+    try:
+        raw = json.loads(s)
+    except (ValueError, TypeError) as e:
+        # json.loads 對壞 JSON 拋 JSONDecodeError（ValueError 子類）。
+        logger.warning(
+            f"[evidence_pool] deserialize failed: corrupt JSON, returning empty pool "
+            f"(fail-closed); error={type(e).__name__}: {e}"
+        )
+        return {}
+
+    if not isinstance(raw, dict):
+        logger.warning(
+            f"[evidence_pool] deserialize: top-level JSON is not a dict "
+            f"(got {type(raw).__name__}), returning empty pool (fail-closed)"
+        )
+        return {}
+
+    pool: Dict[int, EvidencePoolEntry] = {}
+    for k, v in raw.items():
+        try:
+            pool[int(k)] = EvidencePoolEntry.model_validate(v)
+        except (ValidationError, ValueError, TypeError) as e:
+            # int(k) 非數字 key → ValueError；model_validate 型別變形 →
+            # ValidationError。單筆壞跳過，不炸全池。
+            logger.warning(
+                f"[evidence_pool] skipping corrupt entry key={k!r}: "
+                f"{type(e).__name__}: {e}"
+            )
+            continue
+    return pool

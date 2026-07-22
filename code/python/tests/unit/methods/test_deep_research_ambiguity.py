@@ -32,8 +32,15 @@ def _bare_handler(query="弗萊堡風場現況"):
 
 
 @pytest.mark.asyncio
-async def test_detect_ambiguities_llmerror_degrades_with_explicit_error(monkeypatch, capfd):
-    """ask_llm 回 LLMError → 回 [] 降級 + error 級訊息出（不 silent 偽裝成無歧義）。"""
+async def test_detect_ambiguities_llmerror_degrades_with_explicit_error(monkeypatch):
+    """ask_llm 回 LLMError → 回 [] 降級 + error 級訊息出（不 silent 偽裝成無歧義）。
+
+    ordering 免疫（full-scan-2026-07 收尾）：degraded 訊息由 deep_research 的
+    module-level LazyLogger（get_configured_logger）走背景 worker thread emit，原用
+    capfd + sleep(0.2) 賭 fd flush → 全套 ordering 下 fd-capture race + timing flaky。
+    改 patch module logger.error 直攔呼叫捕捉訊息，繞過背景 worker + fd（lessons-
+    testing-review §184 輕解）。行為斷言逐字不變（訊息含 marker + error_kind）。"""
+    import methods.deep_research as dr_mod
     from core.llm import LLMError
 
     async def _fake_ask_llm(*a, **k):
@@ -41,15 +48,19 @@ async def test_detect_ambiguities_llmerror_degrades_with_explicit_error(monkeypa
 
     monkeypatch.setattr("core.llm.ask_llm", _fake_ask_llm)
 
+    err_calls = []
+    orig_error = dr_mod.logger.error
+    monkeypatch.setattr(
+        dr_mod.logger, "error",
+        lambda msg, *a, **k: (err_calls.append(str(msg)), orig_error(msg, *a, **k))[1],
+    )
+
     handler = _bare_handler()
     result = await handler._detect_all_ambiguities()
 
     assert result == [], "LLMError 故障降級：仍回 [] proceed without clarification"
 
-    # custom JSON logger 走背景 worker thread，給它 flush 時間後抓 fd 輸出
-    time.sleep(0.2)
-    out, err = capfd.readouterr()
-    combined = out + err
+    combined = " ".join(err_calls)
     assert "[AMBIGUITY] Detection degraded" in combined, \
         "故障必須留明確 error 訊息，不可 silent 偽裝成『無歧義』"
     assert "timeout" in combined, "訊息須帶 error_kind（哪種故障）"

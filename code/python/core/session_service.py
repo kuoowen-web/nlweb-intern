@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from auth.auth_db import AuthDB
+from core.sse.registry import SERVER_HISTORY_SANITIZE_TYPES
 from misc.logger.logging_config_helper import get_configured_logger
 
 logger = get_configured_logger("session_service")
@@ -47,6 +48,18 @@ class SessionService:
 
     def __init__(self):
         self.db = AuthDB.get_instance()
+
+    # ── Serialization exit (null-byte hygiene) ───────────────────
+    #
+    # W-2（D-2026-07-20 規則 4）：所有寫入 DB 的 JSONB/TEXT 前，先遞迴剝除
+    # 字串中的 U+0000 null byte（PG JSONB/TEXT 會拒絕含 null byte 的字串→500）。此為單點
+    # 序列化出口，取代所有裸 json.dumps(client 資料)。
+
+    @staticmethod
+    def _dumps_safe(value: Any) -> str:
+        """json.dumps(value) 但先遞迴剝除 null byte（W-2 單點出口）。"""
+        from core.sanitize import strip_null_bytes
+        return json.dumps(strip_null_bytes(value))
 
     # ── Timestamp helpers ─────────────────────────────────────────
 
@@ -105,6 +118,10 @@ class SessionService:
         session_id = str(uuid.uuid4())
         now = self._now()
 
+        # W-2: title 是 client TEXT，PG TEXT 拒絕 null byte → 剝除。
+        from core.sanitize import strip_null_bytes
+        title = strip_null_bytes(title)
+
         await self.db.execute(
             "INSERT INTO search_sessions "
             "(id, user_id, org_id, title, conversation_history, session_history, "
@@ -113,12 +130,12 @@ class SessionService:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id, user_id, org_id, title,
-                json.dumps(conversation_history or []),
-                json.dumps(self._sanitize_session_history(session_history or [])),
-                json.dumps(chat_history or []),
-                json.dumps(accumulated_articles or []),
-                json.dumps(research_report) if research_report else None,
-                json.dumps(lr_dialog_snapshot or []),
+                self._dumps_safe(conversation_history or []),
+                self._dumps_safe(self._sanitize_session_history(session_history or [])),
+                self._dumps_safe(chat_history or []),
+                self._dumps_safe(accumulated_articles or []),
+                self._dumps_safe(research_report) if research_report else None,
+                self._dumps_safe(lr_dialog_snapshot or []),
                 now, now
             )
         )
@@ -172,9 +189,14 @@ class SessionService:
             if key == 'session_history' and isinstance(value, list):
                 # Layer 2 defense: even if a client regression re-pollutes,
                 # PG will not accept SSE envelope entries.
-                params.append(json.dumps(self._sanitize_session_history(value)))
+                params.append(self._dumps_safe(self._sanitize_session_history(value)))
             elif isinstance(value, (dict, list)):
-                params.append(json.dumps(value))
+                params.append(self._dumps_safe(value))
+            elif isinstance(value, str):
+                # W-2: scalar TEXT 欄位（title / user_feedback / admin_note 等）
+                # 也可能含 null byte，PG TEXT 拒絕 → 剝除。
+                from core.sanitize import strip_null_bytes
+                params.append(strip_null_bytes(value))
             elif key == 'is_archived' and self.db.db_type == 'sqlite':
                 params.append(1 if value else 0)
             else:
@@ -235,7 +257,7 @@ class SessionService:
                              message: Dict) -> bool:
         """Append a message to conversation_history using JSONB append mode."""
         if self.db.db_type == 'postgres':
-            new_json = json.dumps([message])
+            new_json = self._dumps_safe([message])
             self._check_jsonb_size(session_id, 'conversation_history', new_json)
             await self.db.execute(
                 "UPDATE search_sessions "
@@ -255,7 +277,7 @@ class SessionService:
                 return False
             history = json.loads(row['conversation_history'] or '[]')
             history.append(message)
-            serialized = json.dumps(history)
+            serialized = self._dumps_safe(history)
             self._check_jsonb_size(session_id, 'conversation_history', serialized)
             await self.db.execute(
                 "UPDATE search_sessions SET conversation_history = ?, updated_at = ? WHERE id = ?",
@@ -267,7 +289,7 @@ class SessionService:
                               articles: List[Dict]) -> bool:
         """Append articles to accumulated_articles."""
         if self.db.db_type == 'postgres':
-            new_json = json.dumps(articles)
+            new_json = self._dumps_safe(articles)
             self._check_jsonb_size(session_id, 'accumulated_articles', new_json)
             await self.db.execute(
                 "UPDATE search_sessions "
@@ -286,7 +308,7 @@ class SessionService:
                 return False
             existing = json.loads(row['accumulated_articles'] or '[]')
             existing.extend(articles)
-            serialized = json.dumps(existing)
+            serialized = self._dumps_safe(existing)
             self._check_jsonb_size(session_id, 'accumulated_articles', serialized)
             await self.db.execute(
                 "UPDATE search_sessions SET accumulated_articles = ?, updated_at = ? WHERE id = ?",
@@ -319,7 +341,7 @@ class SessionService:
         await self.db.execute(
             "UPDATE search_sessions SET accumulated_articles = ?, updated_at = ? "
             "WHERE id = ? AND user_id = ? AND org_id = ?",
-            (json.dumps(articles), self._now(), session_id, user_id, org_id)
+            (self._dumps_safe(articles), self._now(), session_id, user_id, org_id)
         )
         return True
 
@@ -572,7 +594,11 @@ class SessionService:
         """Set a user preference (upsert)."""
         pref_id = str(uuid.uuid4())
         now = self._now()
-        serialized_value = json.dumps(value)
+        # W-2 review 補修：preference_key 是 client 可控字串（PUT
+        # /api/preferences/{key} path 直入），與 value 一樣要剝 null byte。
+        from core.sanitize import strip_null_bytes
+        key = strip_null_bytes(key)
+        serialized_value = self._dumps_safe(value)
 
         if self.db.db_type == 'postgres':
             await self.db.execute(
@@ -597,16 +623,9 @@ class SessionService:
     # envelope mistakenly persisted as a sessionHistory entry's `data`.
     # If a frontend regression ever Object.assigns these onto accumulatedData
     # again, this sanitize step prevents PG pollution.
-    _BAD_MESSAGE_TYPES = frozenset({
-        'asking_sites', 'tool_selection', 'decontextualization',
-        'pre_check_results', 'site_querying', 'tool_routing',
-        'research_phase', 'intermediate_result', 'progress',
-        'begin-nlweb-response', 'end-nlweb-response', 'complete',
-        'error', 'remember', 'time_filter_relaxed',
-        'author_search_no_results', 'clarification_required',
-        'low_relevance_warning', 'low_keyword_match_warning',
-        'empty_results',
-    })
+    # 🔧 Task 8：single source of truth 搬到 core/sse/registry.py（維度 1，持久化清洗黑名單）。
+    # 成員與搬家前逐字相同（不增不減）；test_server_sanitize_matches_bad_message_types 對帳。
+    _BAD_MESSAGE_TYPES = SERVER_HISTORY_SANITIZE_TYPES
 
     @classmethod
     def _sanitize_session_history(cls, history: Any) -> List[Dict]:
@@ -661,7 +680,8 @@ class SessionService:
         jsonb_fields = [
             'conversation_history', 'session_history', 'chat_history',
             'accumulated_articles', 'pinned_messages', 'pinned_news_cards',
-            'research_report', 'team_comments', 'lr_dialog_snapshot'
+            'research_report', 'team_comments', 'live_research_state',
+            'lr_dialog_snapshot'
         ]
         result = dict(row)
         for field in jsonb_fields:

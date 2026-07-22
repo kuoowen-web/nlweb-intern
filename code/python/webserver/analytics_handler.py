@@ -22,8 +22,20 @@ from pathlib import Path
 import time
 from misc.logger.logging_config_helper import get_configured_logger
 from core.analytics_db import AnalyticsDB
+from webserver.admin_gate import admin_only
 
 logger = get_configured_logger("analytics_handler")
+
+# ── 儀表板對外前 checklist（W-1 / D-2026-07-20 規則 2）─────────────────────
+# 這些讀取端點目前僅 CEO 自用，已加 role==admin gate（@admin_only）堵「任一
+# 登入者可匯出全平台資料」。真開放給租戶客戶前，必須補齊以下 org 邊界／洩漏
+# 面（現階段無多租戶可隔離，故 org_id SQL 邊界延後，做了是空工）：
+#   1. org_id SQL 邊界：所有 analytics SQL（queries/retrieved_documents/
+#      user_interactions）補 org_id 條件，或拆平台級 admin 與租戶 admin 兩層。
+#   2. W-6：admin session-count 跨 org count 洩漏（routes/admin.py）。
+#   3. W-7：本檔 error 回傳把 str(e) 原文外洩（:129/:190/:240/:335/... 等），
+#      對外前改泛用訊息 + 只 server 端 log 細節。
+# ─────────────────────────────────────────────────────────────────────────
 
 
 class AnalyticsHandler:
@@ -43,6 +55,7 @@ class AnalyticsHandler:
         self.db = AnalyticsDB.get_instance()
         logger.info(f"Analytics handler initialized with {self.db.db_type} database")
 
+    @admin_only  # W-1: 儀表板端點限 admin（org_id SQL 邊界對外前補，見檔頭 checklist）
     async def get_stats(self, request: web.Request) -> web.Response:
         """
         Get overall statistics.
@@ -128,6 +141,7 @@ class AnalyticsHandler:
             logger.error(f"Error getting stats: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    @admin_only  # W-1: 儀表板端點限 admin
     async def get_queries(self, request: web.Request) -> web.Response:
         """
         Get recent queries with metrics.
@@ -189,6 +203,7 @@ class AnalyticsHandler:
             logger.error(f"Error getting queries: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    @admin_only  # W-1: 儀表板端點限 admin
     async def get_top_clicks(self, request: web.Request) -> web.Response:
         """
         Get top clicked results.
@@ -239,6 +254,7 @@ class AnalyticsHandler:
             logger.error(f"Error getting top clicks: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    @admin_only  # W-1: 匯出全平台訓練資料，限 admin（最高風險端點）
     async def export_training_data(self, request: web.Request) -> web.Response:
         """
         Export training data as CSV from raw logs.

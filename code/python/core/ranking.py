@@ -11,7 +11,7 @@ Backwards compatibility is not guaranteed at this time.
 from core.utils.json_utils import trim_json
 from core.llm import ask_llm
 from core.prompts import find_prompt, fill_prompt
-from core.schemas import create_assistant_result, create_status_message, Message, SenderType, MessageType
+from core.schemas import create_assistant_result, Message, SenderType
 from core.config import CONFIG
 from misc.logger.logging_config_helper import get_configured_logger
 import asyncio
@@ -45,8 +45,9 @@ def dedup_by_title_and_source(results: list) -> list:
     seen: dict = {}
     for result in results:
         key = (result.get('name', ''), result.get('site', ''))
-        score = result.get('ranking', {}).get('score', 0)
-        if key not in seen or score > seen[key].get('ranking', {}).get('score', 0):
+        # R2：比較過 _safe_score——helper 是模組級公開面，輸入不保證已過 do() filter
+        # （殘值已濾）的順序不變式；殘值（'70分'）裸比較會 TypeError。降位 0 參與比較。
+        if key not in seen or _safe_score(result) > _safe_score(seen[key]):
             seen[key] = result
 
     deduplicated = list(seen.values())
@@ -54,6 +55,34 @@ def dedup_by_title_and_source(results: list) -> list:
     if removed > 0:
         logger.info(f"Title dedup: removed {removed} duplicates")
     return deduplicated
+
+
+def _safe_score(result: dict):
+    """安全提取 ranking score 為數值，供所有比較/排序/輸出點使用（defense-in-depth）。
+
+    根解在 core/llm.ask_llm 的 coerce 收斂點——字串分數在流入 ranking 前已 int/float 化，
+    正常情況此處恆拿到數值。但 coerce 對『真正轉不動』的字串（'70分'）會保留原值 + warning；
+    這些殘值一旦流到裸讀比較點會 TypeError：rankItem :195（try 內 → 單件丟 = AF-1 症狀）、
+    do() filter/sort（try 外 → **整批 query 的 ranking 全滅**）。此 helper 把非數值 score
+    視為 0（排到底/不 early-send）+ log，讓單件退位而非崩——不是替代根解，是最後一道網。
+
+    R1 一致化：rankItem/shouldSend/sendAnswers/do() 的所有 score 讀取點統一過此函式，
+    殘值語義全鏈一致（降位 0、item 保留、description 還在）。回傳**原樣數值**（int 保持
+    int，不強制 float）——sendAnswers 輸出 JSON 的 score 型別不因防線漂移。
+    full-scan CORE-2 + R1 #1。
+    """
+    score = result.get('ranking', {}).get('score', 0)
+    if isinstance(score, bool):  # bool 是 int 子類但非有效分數
+        return 0
+    if isinstance(score, (int, float)):
+        return score
+    # 走到這裡代表 coerce 收斂點已保留了非數值字串（罕見）——不讓它崩/丟件。
+    logger.warning(
+        "Non-numeric ranking score %r for '%s' survived coercion; "
+        "treating as 0 in compare/sort (single item demoted, batch protected).",
+        score, result.get('name', 'unknown'),
+    )
+    return 0
 
 
 class Ranking:
@@ -168,7 +197,9 @@ class Ranking:
                     logger.debug(f"Item type mismatch: expected {self.handler.required_item_type}, got {item_type} - setting score to 0")
                     ranking["score"] = 0
             
-            if (ranking.get("score", 0) > self.EARLY_SEND_THRESHOLD):
+            # R1 #1：比較過 _safe_score——coerce 殘值（'70分'）在此裸比較會 TypeError
+            # → 被 :225 except 吞 → 單件丟件（AF-1 症狀回歸）。降位 0 保留 item。
+            if (_safe_score(ansr) > self.EARLY_SEND_THRESHOLD):
                 # Skip early send in unified mode — articles sent as batch after ranking
                 if self.handler.generate_mode != 'unified':
                     logger.info(f"High score item: {name} (score: {ranking['score']}) - sending early {self.ranking_type_str}")
@@ -189,7 +220,7 @@ class Ranking:
                         query_id=self.handler.query_id,
                         doc_url=url,
                         ranking_position=-1,  # Placeholder; updated by update_ranking_positions()
-                        llm_final_score=float(ranking.get("score", 0)),
+                        llm_final_score=float(_safe_score(ansr)),  # 殘值記 0.0 而非拋 ValueError 進 log_err
                         llm_snippet=ranking.get("description", ""),
                         ranking_method='llm'
                     )
@@ -218,7 +249,7 @@ class Ranking:
         else:
             # Near the limit - only send if this result is better than something we already sent
             for r in self.rankedAnswers:
-                if r["sent"] == True and r["ranking"]["score"] < result["ranking"]["score"]:
+                if r["sent"] == True and _safe_score(r) < _safe_score(result):
                     should_send = True
                     break
         
@@ -253,7 +284,7 @@ class Ranking:
                     "name": result["name"],
                     "site": result["site"],
                     "siteUrl": result["site"],
-                    "score": result["ranking"]["score"],
+                    "score": _safe_score(result),  # 殘值輸出 0 而非字串；正常 int 原樣（不 float 化）
                     "description": result["ranking"]["description"],
                     "schema_object": result["schema_object"]
                 }
@@ -275,14 +306,17 @@ class Ranking:
                     json_results = json_results[:allowed_count]
                     logger.warning(f"Trimmed results to {len(json_results)} to stay within limit of {self.NUM_RESULTS_TO_SEND}")
 
-                # Use the new schema to create and auto-send the message
+                # Use the new schema to create and auto-send the message.
+                # generate_mode discriminator stays here (caller-side); the send
+                # goes through send_sse(path="full") -> message_sender.send_message.
                 if self.handler.generate_mode == 'unified':
                     # Unified mode: send as 'articles' with await for ordering guarantee
+                    from core.sse.send import send_sse  # local import: avoid load cycle
                     articles_message = {
                         "message_type": "articles",
                         "content": json_results
                     }
-                    await self.handler.send_message(articles_message)
+                    await send_sse(self.handler, articles_message, path="full")
                 else:
                     create_assistant_result(json_results, handler=self.handler)
                 self.num_results_sent += len(json_results)
@@ -382,8 +416,8 @@ class Ranking:
         # Wait for pre checks using event
         await self.handler.pre_checks_done_event.wait()
 
-        filtered = [r for r in self.rankedAnswers if r['ranking']['score'] > 51]
-        ranked = sorted(filtered, key=lambda x: x['ranking']["score"], reverse=True)
+        filtered = [r for r in self.rankedAnswers if _safe_score(r) > 51]
+        ranked = sorted(filtered, key=_safe_score, reverse=True)
 
         # Analytics: Batch-update ranking_position now that final order is known
         if hasattr(self.handler, 'query_id') and ranked:
@@ -489,7 +523,7 @@ class Ranking:
                 logger.info("MMR skipped: no vectors available")
 
         logger.info(f"Filtered to {len(filtered)} results with score > 51")
-        logger.debug(f"Top 3 results: {[(r['name'], r['ranking']['score']) for r in self.handler.final_ranked_answers[:3]]}")
+        logger.debug(f"Top 3 results: {[(r['name'], _safe_score(r)) for r in self.handler.final_ranked_answers[:3]]}")
 
         results = [r for r in self.rankedAnswers if r['sent'] == False]
         if (self.num_results_sent >= self.NUM_RESULTS_TO_SEND):
@@ -497,8 +531,8 @@ class Ranking:
             return
        
         # Sort by score in descending order
-        sorted_results = sorted(results, key=lambda x: x['ranking']["score"], reverse=True)
-        good_results = [x for x in sorted_results if x['ranking']["score"] > 51]
+        sorted_results = sorted(results, key=_safe_score, reverse=True)
+        good_results = [x for x in sorted_results if _safe_score(x) > 51]
 
         # Calculate how many more results we can send
         remaining_slots = self.NUM_RESULTS_TO_SEND - self.num_results_sent

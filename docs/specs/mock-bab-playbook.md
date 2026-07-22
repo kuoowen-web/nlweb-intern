@@ -23,7 +23,30 @@
 
 ---
 
-## Fixture 來源（prod session 5767ae4a）
+## Fixture 來源（現行：Cayenne 新命題 session 8e1db658，2026-07-15）
+
+> **2026-07-15 更新（Cayenne 專題方向調整）**：Cayenne 把她的專題真的寫出來了，方向調整為「國外案例出發、臺灣對應偏少」（原稿 `docs/2026年7月專題-能源轉型下再生能源設置之地方衝突與治理.docx`）。LR e2e 的 benchmark 命題隨之從舊版（候車亭/國內外對照五章）升級到此新專題。**benchmark = 接近 Cayenne 原文的「結構與品質水準」（案例可換臺灣），Cayenne 本人判滿意（human-judged）。** 完整體檢見 `docs/lr-e2e-2026-07-15-findings.md`。
+
+**現行 fixture** 來源 session：`8e1db658-3bac-4071-a4f3-cdcb53e8c162`（題「能源轉型下再生能源設置之地方衝突與治理」，2026-07-15 prod 真跑，三章結構：前言/國際案例分析/結論，567 筆 evidence）。
+
+| 產物 | 撈法（`live_research_state` 子欄位，除 dialog） | 落地 fixture（`code/python/tests/fixtures/lr_mock_bab_cayenne_2026_07/`） |
+| --- | --- | --- |
+| evidence_pool（**567 筆**） | `->>'evidence_pool_json'` | `evidence_pool.json`（400 KB） |
+| context_map（20 topics） | `->>'context_map_json'` | `context_map.json` |
+| book_outline（**3 章**：前言/國際案例分析/結論） | `->>'book_outline_json'` | `book_outline.json` |
+| evidence_usage（40 id / ~172 claims） | `->'evidence_usage'`（jsonb 非 _json） | `evidence_usage.json` |
+| written_sections（**3 章正文**，含 entities/confidence） | `->'written_sections'` | `written_sections.json` |
+| chat_history（462 turns，含 24 checkpoint 往返） | **`lr_dialog_snapshot`**（LR 專屬欄位，非 `chat_history_json`／非 top-level `chat_history`——後者空 `[]`） | `chat_history.json` |
+| style_reference（Cayenne 帝國風電漁業補償段逐字） | Cayenne 原稿 | `style_reference.md` |
+
+> **✅ 已接線（2026-07，lr-stage1-stage4-cayenne-fix plan）**：`mock_bab=true` loader 已指向本 Cayenne fixture（orchestrator.py `_MOCK_BAB_FIXTURE_DIRNAME` 單點常數）。守門測試 `tests/unit/reasoning/test_mock_bab_real_fixture.py` 斷言 3 章（前言/國際案例分析/結論，非舊 5 章）+ 567 筆（非舊 36 筆）+ 40 id/172 claims。舊 fixture 目錄 `lr_mock_bab_real/` 保留供 rollback（並被 `test_cov_lr_fixtures.py` 組 D 直讀，不可刪）。
+> **chat_history 來源修正教訓**：`chat_history_json` 子欄位不存在，LR 多輪對話（含 checkpoint 往返）實存 `search_sessions.lr_dialog_snapshot`（呼應 lessons-live-research「LR 對話持久化」）。撈 LR 對話一律查 `lr_dialog_snapshot`。
+
+---
+
+## Fixture 來源（舊命題 session 5767ae4a，2026-06，保留 rollback + 歷史）
+
+> 舊 fixture `lr_mock_bab_real/`（德/日/智利國際命題，36 筆）——目前 loader 仍指向它。新命題接線前為現役，接線後保留供 rollback。
 
 來源 session：`5767ae4a-cbf7-474d-974c-0021ddd5e634`（題「台灣綠能衝突借鏡國外」，2026-06-08 prod 真跑，含 F1 web search 撈到的德/日/智利國際 evidence）。
 
@@ -76,9 +99,9 @@ writer 依「章節來源」走兩條路，對 fixture 依賴不同：
 
 ---
 
-## 注入機制（✅ 已完成 2026-06-12 — 四檔全接線，宣稱經斷言測試釘死）
+## 注入機制（✅ 2026-07 換裝 Cayenne fixture — 四檔全接線，宣稱經斷言測試釘死）
 
-**現況**：`mock_bab=true` → `_run_stage_1` mock 分支載入 `tests/fixtures/lr_mock_bab_real/` **四檔真語料**：context_map（`_load_mock_bab_fixture`）+ evidence_pool（36 筆）+ evidence_usage（35 id/147 claims，`54d993ac`，chapter-override writer 必需）+ **book_outline（5 章，`0f02fd16` — 同步寫 `state.book_outline_json` 與 `format_specs["chapters"]`，writer 走 chapter-override 路徑）**。handler `_is_mock_bab` @ `live_research.py:71-74`；config flag @ `config_reasoning.yaml:32`。守門測試：`test_mock_bab_real_fixture.py`（8 tests，含 outline 5 章與 format_specs 斷言）。
+**現況**：`mock_bab=true` → `_run_stage_1` mock 分支載入 `tests/fixtures/lr_mock_bab_cayenne_2026_07/`（目錄名由 orchestrator.py module 常數 `_MOCK_BAB_FIXTURE_DIRNAME` 單點決定）**四檔真語料**：context_map（20 topics，`_load_mock_bab_fixture`）+ evidence_pool（567 筆）+ evidence_usage（40 id/172 claims，chapter-override writer 必需）+ **book_outline（3 章：前言/國際案例分析/結論 — 同步寫 `state.book_outline_json` 與 `format_specs["chapters"]`，writer 走 chapter-override 路徑）**。fixture 另有 written_sections / chat_history / style_reference.md 三檔，loader 不載入（撈存供人工比對）。handler `_is_mock_bab` @ `code/python/methods/live_research.py:87-90`；config flag @ `config/config_reasoning.yaml:47`（`live_research_mock_bab`）。守門測試：`tests/unit/reasoning/test_mock_bab_real_fixture.py`（8 tests，含 outline 3 章與 format_specs 斷言）。
 
 > **⚠️ 歷史教訓（2026-06-12）**：本段曾宣稱「原本就載 book_outline」— 該 loader 實際從未存在（假✅潛伏到首次完整真跑才現形，E2E 跑出 10 主題章）。**任何「已接線✅」宣稱必須有對應斷言測試或 30 秒 grep 驗證**，文件與 commit message 的自述都不算數。
 
@@ -89,7 +112,7 @@ writer 依「章節來源」走兩條路，對 fixture 依賴不同：
 ## 跑法
 
 1. 本地 server，HEAD 含 grounding + F1（`db7f8f60` 或之後），`mock_bab=true`（讀真語料 fixture）。
-2. **確認 mock_bab 真生效**（防假綠燈）：`tasklist | grep python` 驗 server PID 變 + log 出現 mock_bab branch + 載入 36 筆。
+2. **確認 mock_bab 真生效**（防假綠燈）：`tasklist | grep python` 驗 server PID 變 + log 出現 mock_bab branch + 載入 567 筆。
 3. 觸發 LR 跑 CEO 標準 prompt（瀏覽器登入 or 腳本）。**Stage 1+2 用 fixture（零 BAB $）、Stage 3-6 真 LLM**。
 4. 跑完撈 PG `live_research_state` 對照：`written_sections` / `critic_section_reviews` / `rejected_claims_log` / `hallucination_corrected`。
 
@@ -104,7 +127,7 @@ writer 依「章節來源」走兩條路，對 fixture 依賴不同：
 
 ## 驗收清單（6 模塊，每次跑都對照）
 
-1. **Grounding**：合法 entity（台鹽綠能 / 台泥 / 台南地方法院 / 泰國蝦 / 嘉義縣，36 筆 fixture 內可查）**不再被判 ungrounded**、章節不 over-block `[本章內容無法驗證]`
+1. **Grounding**：合法 entity **不再被判 ungrounded**、章節不 over-block `[本章內容無法驗證]`（entity 舉例隨 fixture 換裝更新：Cayenne fixture 內可查 彰化大城、雲林漁民、沃旭、國發會沙盒 等；舊 36 筆命題的 台鹽綠能/台泥 等已不在池內）
 2. **Writer**：無「不是，而是」slop；具名**不被模糊化**（台泥 ≠ 某水泥公司）；不退回抽象總結；字數接近各章規格
 3. **Critic**：WARN 輸出完整不截斷；Actor-Critic revise 結果**有回流**到 writer（非 fire-and-forget）
 4. **韌性**：LLM timeout/empty **不噴 raw `ValueError`**，優雅降級 + 可「重試本段」

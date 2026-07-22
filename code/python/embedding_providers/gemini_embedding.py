@@ -12,11 +12,11 @@ import os
 import asyncio
 import threading
 from typing import List, Optional
-import time
 
 from google import genai
 from google.genai import types
 from core.config import CONFIG
+from core.retry_util import retry_async
 
 from misc.logger.logging_config_helper import get_configured_logger, LogLevel
 logger = get_configured_logger("gemini_embedding")
@@ -24,6 +24,18 @@ logger = get_configured_logger("gemini_embedding")
 # Add lock for thread-safe client initialization
 _client_lock = threading.Lock()
 _client = None
+
+# MP-1 (full-scan 批7): Gemini 429 重試改為 bounded exponential backoff（對齊
+# openrouter/deepinfra 的 retry_async 慣例），取代原本的 `while True` + 同步
+# time.sleep(5)（無上限自旋 + 阻塞 event loop）。Gemini SDK 對 rate-limit 拋的
+# 例外訊息含 "429"，用訊息比對判定 retryable；耗盡後由 retry_async raise 最後一個
+# 例外（保留原訊息，no silent fail）。
+_GEMINI_EMBED_MAX_RETRIES = 3
+
+
+def _is_gemini_rate_limit(exc: BaseException) -> bool:
+    """判斷 Gemini embedding 例外是否為可重試的 429 rate-limit。"""
+    return "429" in str(exc)
 
 
 def get_api_key() -> str:
@@ -99,49 +111,51 @@ async def get_gemini_embeddings(
     
     # Get the GenAI client
     client = get_client()
-    
-    while True:
-        try:
-            # Create embedding config
-            config = types.EmbedContentConfig(task_type=task_type)
-            
-            # Use asyncio.to_thread to make the synchronous GenAI call
-            # non-blocking
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    lambda: client.models.embed_content(
-                        model=model,
-                        contents=text,
-                        config=config
-                    )
-                ),
-                timeout=timeout
-            )
-            
-            # Extract the embedding values from the response
-            embedding = result.embeddings[0].values
-            logger.debug(
-                f"Gemini embedding generated, dimension: {len(embedding)}"
-            )
-            return embedding
-        except Exception as e:
-            error_message = str(e)
-            if "429" in error_message:
-                error_message = "Rate limit exceeded. Please try again later."
-                time.sleep(5)  # Wait before retrying
-            else:
-                logger.exception("Error generating Gemini embedding")
-                logger.log_with_context(
-                    LogLevel.ERROR,
-                    "Gemini embedding generation failed",
-                    {
-                        "model": model,
-                        "text_length": len(text),
-                        "error_type": type(e).__name__,
-                        "error_message": error_message
-                    }
+
+    # Create embedding config
+    config = types.EmbedContentConfig(task_type=task_type)
+
+    async def _embed_once():
+        # Use asyncio.to_thread to make the synchronous GenAI call non-blocking
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: client.models.embed_content(
+                    model=model,
+                    contents=text,
+                    config=config
                 )
-                raise
+            ),
+            timeout=timeout
+        )
+        return result.embeddings[0].values
+
+    try:
+        # MP-1: bounded retry（exp backoff）+ async sleep（不阻塞 event loop）。
+        # 429 才重試；非 429（含 timeout / auth / schema）由 predicate 判 False →
+        # retry_async 立即 raise（fail loud）。429 耗盡也 raise（no silent fail）。
+        embedding = await retry_async(
+            _embed_once,
+            max_retries=_GEMINI_EMBED_MAX_RETRIES,
+            is_retryable=_is_gemini_rate_limit,
+            description="gemini_embedding",
+        )
+        logger.debug(
+            f"Gemini embedding generated, dimension: {len(embedding)}"
+        )
+        return embedding
+    except Exception as e:
+        logger.exception("Error generating Gemini embedding")
+        logger.log_with_context(
+            LogLevel.ERROR,
+            "Gemini embedding generation failed",
+            {
+                "model": model,
+                "text_length": len(text),
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+            }
+        )
+        raise
 
 
 async def get_gemini_batch_embeddings(
@@ -189,47 +203,45 @@ async def get_gemini_batch_embeddings(
     # Process each text individually
     for i, text in enumerate(texts):
         logger.debug(f"Processing text {i+1}/{len(texts)}")
-        
-        # Use asyncio.to_thread to make the synchronous GenAI call
-        # non-blocking
-        while True:
-            try:
-                # Attempt to get the embedding
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        lambda t=text: client.models.embed_content(
-                            model=model,
-                            contents=t,
-                            config=config
-                        )
-                    ),
-                    timeout=timeout
-                )
 
-                # Extract the embedding values from the response
-                embedding = result.embeddings[0].values
-                embeddings.append(embedding)
-                break
-            except Exception as e:
-                error_message = str(e)
-                if "429" in error_message:
-                    error_message = "Rate limit exceeded. Retrying..."
-                    time.sleep(5)
-                else:
-                    logger.exception("Error generating Gemini batch embedding in batch")
-                    logger.log_with_context(
-                        LogLevel.ERROR,
-                        "Gemini batch embedding generation failed",
-                        {
-                            "model": model,
-                            "batch_size": len(texts),
-                            "text_length": len(text),
-                            "error_type": type(e).__name__,
-                            "error_message": error_message
-                        }
+        async def _embed_once(t=text):
+            # Use asyncio.to_thread to make the synchronous GenAI call non-blocking
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda tt=t: client.models.embed_content(
+                        model=model,
+                        contents=tt,
+                        config=config
                     )
-                    raise
-        
+                ),
+                timeout=timeout
+            )
+            return result.embeddings[0].values
+
+        try:
+            # MP-1: bounded retry + async sleep（取代 while True + time.sleep）。
+            embedding = await retry_async(
+                _embed_once,
+                max_retries=_GEMINI_EMBED_MAX_RETRIES,
+                is_retryable=_is_gemini_rate_limit,
+                description=f"gemini_batch_embedding[{i}]",
+            )
+            embeddings.append(embedding)
+        except Exception as e:
+            logger.exception("Error generating Gemini batch embedding in batch")
+            logger.log_with_context(
+                LogLevel.ERROR,
+                "Gemini batch embedding generation failed",
+                {
+                    "model": model,
+                    "batch_size": len(texts),
+                    "text_length": len(text),
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                }
+            )
+            raise
+
     logger.debug(
         f"Gemini batch embeddings generated, count: {len(embeddings)}"
     )

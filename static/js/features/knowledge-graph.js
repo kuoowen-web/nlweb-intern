@@ -39,7 +39,7 @@
 //       deep-research.js currently reads KG via window bridges (no static import back
 //       from deep-research → knowledge-graph), so direction is one-way knowledge-graph
 //       → deep-research at module-import level. Bridges sweep commit 25.
-//     - features/sessions-list.js (getSessionHistory) for confirmKGEdit rerun completion.
+//     - features/sessions-list.js (getSessionHistory, getCurrentLoadedSessionId) for confirmKGEdit rerun completion + DB fallback 定位.
 //   Bridge calls remaining (sweep targets):
 //     - window.renderConversationHistory (defined in news-search.js — Phase 8 KEEP
 //       residual; sweep commit 25 if relocated)
@@ -70,16 +70,35 @@
 
 // v4.0 Commit 21 (2026-05-25, Phase 8 part C) — direct cross-module imports per D-V6 relax.
 import { getResearchReport, getArgumentGraph, getChainAnalysis } from './research.js';
-import { getConversationHistory } from './search.js?v=20260714a';
+import { getConversationHistory } from './search.js?v=20260717a';
 import {
     getCurrentResearchQueryId,
     displayDeepResearchResults,
     showDRError
-} from './deep-research.js?v=20260715b';
-import { setCurrentConversationId } from './search.js?v=20260714a';
-import { getSessionHistory } from './sessions-list.js';
+} from './deep-research.js?v=20260717a';
+import { setCurrentConversationId } from './search.js?v=20260717a';
+import { getSessionHistory, getCurrentLoadedSessionId } from './sessions-list.js';
 import { copyAndOpen } from './sharing.js';
 import { markSessionDirty } from './session-manager.js';
+import { shouldBlockRerun } from './kg-rerun-gate.js';
+import { classifyEnvelope } from './sse-dispatch.js';
+
+// ---- KG overhaul（互動下鑽 + 增量佈局）純函式模組 ----
+// 🔧 R6 NIT：只 import `initVisibleState`（不 import `selectSkeleton`）——主檔沒有裸用
+// `selectSkeleton`（它只在 kg-skeleton.js 內部被 initVisibleState 呼叫）。
+// 🔧 R7 NIT（cache-bust）：新模組 import 帶 `?v=` 版本 specifier（附錄 C），land 當日版號
+// `20260721a`（與 knowledge-graph.js 三個 importer 同步 bump 的版號一致）。
+import { initVisibleState } from './kg-skeleton.js?v=20260721a';
+import { expandNode, focusNode, decideNodeClickAction } from './kg-visible-set.js?v=20260721a';
+import { projectSubgraph } from './kg-subgraph.js?v=20260721a';
+import { layoutSkeleton, placeNewNodes } from './kg-layout.js?v=20260721a';
+import { serializeGraphSVG, downloadTextAsFile, buildExportFilename } from './kg-svg-export.js?v=20260721a';
+
+// 🔧 R7 SF-R7-1：delayed single-click 延遲。220ms 偏短、逼近部分系統/使用者的雙擊間隔上限，
+// 第一次 click 可能在 dblclick 的 clearTimeout 到達前就到期、補跑 expand，把 focus 打歪。
+// 提高到 320ms 留裕度（單擊感知延遲仍可接受，standard dblclick threshold 多 ≤ 300ms）。
+// Task 5 click handler 的 setTimeout 與 Task 9 timing regression 測試共用此常數（單一事實來源）。
+const DBLCLICK_DELAY_MS = 320;
 
 // ============================================================================
 // KG Constants — entity-type → color/shape/label, relation-type → label
@@ -207,6 +226,15 @@ function createKGInstance(prefix) {
     let _kgConnectSourceId = null; // entity_id of the first clicked node in connect mode
     let _kgEditStats = { nodesAdded: 0, nodesDeleted: 0, nodesModified: 0, edgesAdded: 0, edgesDeleted: 0, edgesModified: 0 };
 
+    // ---- 下鑽可見集 + 增量佈局 state（KG overhaul）----
+    let _kgFullData = null;        // 完整 KG（骨架/下鑽的來源真相；_currentKGData 保留為「當前顯示的完整資料」語意相容）
+    let _kgVisibleIds = new Set(); // 當前可見節點集合
+    let _kgSkeletonIds = new Set();// 初始骨架節點集合（reset 回骨架時還原）
+    let _kgNodePositions = {};     // D=增量佈局：跨展開凍結的座標 map（id -> {x,y,r,entity,isCenter}）
+    let _kgClickTimer = null;      // 🔧 R6：delayed single-click timer（供 Task 5 click/dblclick 衝突處理）。
+                                   // 放 instance closure（跨 render 存活）——每次 render 重建 node.on('click')
+                                   // handler，但 timer 變數須跨 handler 實例存活才能被 dblclick clearTimeout。
+
     // prefix 由 factory 參數固定，instance 生命週期內不可變（原 module-global
     // _kgPrefix 移除，line-242 寫入點刪除）。_kgId 在 closure 捕捉此固定 prefix，
     // 所有 callsite fire 時讀的都是 instance 自己的 prefix，無 timing 依賴。
@@ -277,6 +305,15 @@ function createKGInstance(prefix) {
         _kgEditData = null;
         _kgConnectMode = false;
         _kgConnectSourceId = null;
+        // 🔧 R3 SF-R3-1：清空下鑽/增量佈局 state（否則換 KG 時舊座標/可見集殘留洩漏）
+        _kgFullData = null;
+        _kgVisibleIds = new Set();
+        _kgSkeletonIds = new Set();
+        _kgNodePositions = {};
+        // 🔧 R6：清 pending single-click timer（否則 reset 換 KG 後 pending click 會在新圖上跑 stale
+        // 動作——expand 一個已不在新圖的舊 entity_id）。與 Task 5 的 _kgClickTimer 配套。
+        clearTimeout(_kgClickTimer);
+        _kgClickTimer = null;
         if (_kgSimulation) { _kgSimulation.stop(); _kgSimulation = null; }
         const kgContainerReset = document.getElementById(_kgId('DisplayContainer'));
         if (kgContainerReset) kgContainerReset.style.display = 'none';
@@ -343,6 +380,16 @@ function displayKnowledgeGraph(kg) {
     // Store KG data globally
     _currentKGData = kg;
 
+    // KG overhaul: 建立下鑽 state（完整資料 → 初始可見集 = 骨架）
+    _kgFullData = kg;
+    const vs = initVisibleState(kg);
+    _kgVisibleIds = vs.visibleIds;
+    _kgSkeletonIds = vs.skeletonIds;
+    // D=增量佈局：初始骨架用整體佈局（reset 也走此路）
+    const graphViewEl = document.getElementById(_kgId('GraphView'));
+    const dims = { width: graphViewEl?.clientWidth || 600, height: graphViewEl?.clientHeight || 400 };
+    _kgNodePositions = layoutSkeleton(projectSubgraph(_kgFullData, _kgVisibleIds), dims);
+
     // Respect user's KG hidden preference
     if (container.dataset.userHidden === 'true') {
         const restoreBar = document.getElementById(_kgId('RestoreBar'));
@@ -358,21 +405,25 @@ function displayKnowledgeGraph(kg) {
     const timestamp = kg.metadata?.generated_at ? new Date(kg.metadata.generated_at).toLocaleTimeString('zh-TW', {hour: '2-digit', minute: '2-digit'}) : '';
     metadata.textContent = `${entityCount} 個實體 • ${relCount} 個關係${timestamp ? ' • 生成於 ' + timestamp : ''}`;
 
-    // Render list view content
+    // Render list view content（不改 — 列表 view 仍顯示完整 KG，長尾 fallback）
     renderKGListView(kg, listContent);
 
-    // Render graph view with D3
-    renderKGGraphView(kg, graphView);
+    // Render graph view with D3（KG overhaul: 渲染當前可見子圖 + 凍結座標）
+    renderKGGraphView(projectSubgraph(_kgFullData, _kgVisibleIds), graphView, _kgNodePositions);
 
-    // Render legend
+    // Render legend（不改 — 用完整 kg）
     renderKGLegend(kg, legend);
 
     // Setup view toggle
     setupKGViewToggle();
+    // Setup 下鑽導覽控制（回骨架 / 顯示全部）
+    setupKGNavButtons();
     // Setup edit mode toggle
     setupKGEditMode();
     // Setup copy button（沿用 sharing.js copyAndOpen pattern）
     setupKGCopy();
+    // Setup 下載知識圖譜按鈕（lazy SVG 序列化，所見即所得）
+    setupKGDownload();
 
     // Disable edit button if KG is empty
     const editBtn = document.getElementById(_kgId('EditToggleBtn'));
@@ -439,7 +490,7 @@ function renderKGListView(kg, container) {
     container.innerHTML = html;
 }
 
-function renderKGGraphView(kg, container) {
+function renderKGGraphView(subgraph, container, precomputedPositions) {
     // Clear previous SVG
     d3.select(container).select('svg').remove();
     if (_kgSimulation) {
@@ -453,81 +504,62 @@ function renderKGGraphView(kg, container) {
     const centerX = width / 2;
     const centerY = height / 2;
 
-    // --- 1. Build adjacency and compute degrees ---
+    // --- 1. Build adjacency and compute degrees（保留：tooltip「N 個連結」依賴此 map；
+    //         🔧 R3 SF-R3-2：改讀 subgraph.* — 計算的是子圖內 degree，tooltip 語意正確）---
     const degree = {};
-    kg.entities.forEach(e => { degree[e.entity_id] = 0; });
-    (kg.relationships || []).forEach(r => {
+    subgraph.entities.forEach(e => { degree[e.entity_id] = 0; });
+    (subgraph.relationships || []).forEach(r => {
         if (degree.hasOwnProperty(r.source_entity_id)) degree[r.source_entity_id]++;
         if (degree.hasOwnProperty(r.target_entity_id)) degree[r.target_entity_id]++;
     });
 
-    // --- 2. Identify center node (highest degree) ---
-    let centerEntity = kg.entities[0];
-    let maxDeg = degree[centerEntity.entity_id] || 0;
-    kg.entities.forEach(e => {
-        const d = degree[e.entity_id] || 0;
-        if (d > maxDeg) { maxDeg = d; centerEntity = e; }
-    });
-
-    // --- 3. Group remaining nodes by type into sectors ---
-    const remaining = kg.entities.filter(e => e.entity_id !== centerEntity.entity_id);
-    const typeGroups = {};
-    remaining.forEach(e => {
-        const t = e.entity_type || 'unknown';
-        if (!typeGroups[t]) typeGroups[t] = [];
-        typeGroups[t].push(e);
-    });
-    const typeKeys = Object.keys(typeGroups);
-    const numTypes = typeKeys.length || 1;
-    const sectorAngle = (2 * Math.PI) / numTypes;
-
-    // --- 4. Compute ring radius ---
-    const maxGroupSize = Math.max(...Object.values(typeGroups).map(g => g.length), 1);
-    const useDoubleRing = maxGroupSize > 5;
-    const innerRingR = Math.min(width, height) * (useDoubleRing ? 0.22 : 0.32);
-    const outerRingR = Math.min(width, height) * 0.40;
-
-    // --- 5. Node sizing ---
-    const BASE_RADIUS = 14;
-    const SCALE_FACTOR = 4;
-    const MAX_RADIUS = 40;
-    function nodeRadius(entityId) {
-        const d = degree[entityId] || 0;
-        return Math.min(BASE_RADIUS + d * SCALE_FACTOR, MAX_RADIUS);
+    // --- 2. 座標由外部傳入（D=增量佈局，跨展開凍結）；佈局器只畫不自算 ---
+    // 🔧 R2 SF-1：中間 commit 韌性——Task 8 尚未改 edit callsites 時，舊 callsite
+    // 可能不傳 precomputedPositions。此時自算骨架佈局作 fallback，讓 Task 4 land 後
+    // 每個 commit 都可獨立驗（不依賴 Task 8 先落地）。
+    if (!precomputedPositions) {
+        const _dims = { width, height };
+        precomputedPositions = layoutSkeleton(subgraph, _dims);
     }
 
-    // --- 6. Position all nodes ---
-    const nodePositions = {}; // entity_id -> {x, y, r, entity}
+    // D=增量佈局：座標由外部傳入（跨展開凍結）。佈局器只負責畫，不自算位置。
+    const nodePositions = precomputedPositions;
 
-    // Center node
-    const centerR = Math.max(nodeRadius(centerEntity.entity_id), 24);
-    nodePositions[centerEntity.entity_id] = {
-        x: centerX, y: centerY, r: centerR, entity: centerEntity, isCenter: true
-    };
+    // 🔧 R4 SF-R4-4 + 🔧 R5 SF-R5-2：sanitize——在 center selection 之前補齊 subgraph 全 entity
+    // 座標（缺座標的 entity fail-loud + 用 layoutSkeleton 補位，避免節點消失/邊路徑空）。
+    // 必須在 center selection 之前：否則缺座標時 center 可能從不屬於當前 subgraph 的 stale
+    // position 選出。
+    {
+        const missing = subgraph.entities.filter(e => !nodePositions[e.entity_id]);
+        if (missing.length > 0) {
+            console.warn('[KG] precomputedPositions 缺', missing.length,
+                '個 entity 座標（', missing.map(e => e.entity_id).join(','),
+                '）——重算整體佈局補位，避免節點消失/邊路徑空');
+            const patch = layoutSkeleton(subgraph, { width, height });
+            missing.forEach(e => { if (patch[e.entity_id]) nodePositions[e.entity_id] = patch[e.entity_id]; });
+        }
+    }
 
-    // Radial nodes
-    typeKeys.forEach((type, typeIdx) => {
-        const group = typeGroups[type];
-        const startAngle = typeIdx * sectorAngle - Math.PI / 2; // start from top
-        const step = sectorAngle / (group.length + 1);
-
-        group.forEach((entity, j) => {
-            const angle = startAngle + (j + 1) * step;
-            // If double ring, alternate between inner and outer
-            const ringR = useDoubleRing ? (j % 2 === 0 ? innerRingR : outerRingR) : innerRingR;
-            nodePositions[entity.entity_id] = {
-                x: centerX + ringR * Math.cos(angle),
-                y: centerY + ringR * Math.sin(angle),
-                r: nodeRadius(entity.entity_id),
-                entity: entity,
-                isCenter: false
-            };
-        });
-    });
+    // 🔧 R2 SF-6 + 🔧 R5 SF-R5-2 — centerEntity / centerId 明確賦值：
+    // **只從 subgraph.entities 對應的位置集合選**（不掃 Object.values(nodePositions) 全量，
+    // 避免選到 stale key 的舊 position）。取當前子圖位置中 isCenter:true 者；無則退回 r 最大者。
+    const subgraphPositions = subgraph.entities
+        .map(e => nodePositions[e.entity_id])
+        .filter(Boolean);   // sanitize 後理論上不會有漏，防禦性保留
+    let centerEntity = null;
+    subgraphPositions.forEach(p => { if (p.isCenter) centerEntity = p.entity; });
+    if (!centerEntity) {
+        let best = null;
+        subgraphPositions.forEach(p => { if (!best || p.r > best.r) best = p; });
+        centerEntity = best ? best.entity : (subgraph.entities[0] || null);
+    }
+    if (!centerEntity) return; // 空子圖，不畫
 
     // --- 7. Prepare links (only those with both endpoints present) ---
-    const nodeIds = new Set(Object.keys(nodePositions));
-    const links = (kg.relationships || [])
+    // 🔧 R3 SF-R3-3：nodeIds 基於 subgraph.entities（非 Object.keys(nodePositions)——後者含
+    // 跨展開凍結的殘留 key，會讓子圖外的邊漏進 links、畫出連到不存在節點的線）。
+    const nodeIds = new Set(subgraph.entities.map(e => e.entity_id));
+    const links = (subgraph.relationships || [])
         .filter(r => nodeIds.has(r.source_entity_id) && nodeIds.has(r.target_entity_id))
         .map(r => ({
             source: r.source_entity_id,
@@ -563,6 +595,10 @@ function renderKGGraphView(kg, container) {
                     document.getElementById(_kgId('ConnectBtn')).textContent = '連線中（點節點 A）';
                 }
             } else {
+                // 🔧 R7 SF-R7-2 / R7-post-AR #1：清 pending single-click——點空白 = 明確取消
+                // 選取；不清則 pending 節點 click 到期還會 expand/highlight，與 deselect 意圖矛盾。
+                clearTimeout(_kgClickTimer);
+                _kgClickTimer = null;
                 deselectAll();
             }
         }
@@ -739,7 +775,11 @@ function renderKGGraphView(kg, container) {
         .text(d => KG_RELATION_LABELS[d.type] || d.type);
 
     // --- 11. Draw nodes ---
-    const nodeData = Object.values(nodePositions);
+    // 🔧 R3 SF-R3-3：nodeData 基於 subgraph.entities（非 Object.values(nodePositions)——後者含
+    // 殘留凍結 key，會畫出子圖外節點；與 nodeIds 同源才一致）。sanitize 後每 entity 有座標。
+    const nodeData = subgraph.entities
+        .map(e => nodePositions[e.entity_id])
+        .filter(Boolean);   // 濾掉尚無座標者（理論上已補齊，防禦性）
 
     const nodeGroup = g.append('g').attr('class', 'kg-nodes');
 
@@ -747,6 +787,7 @@ function renderKGGraphView(kg, container) {
         .data(nodeData)
         .enter().append('g')
         .attr('class', 'kg-node')
+        .attr('data-entity-id', d => d.entity.entity_id)   // 🔧 R2 SF-2：穩定 E2E 定位
         .attr('transform', d => `translate(${d.x},${d.y})`);
 
     // Draw shape per node
@@ -790,6 +831,14 @@ function renderKGGraphView(kg, container) {
             const name = d.entity.name;
             return name.length > 12 ? name.substring(0, 12) + '...' : name;
         });
+
+    // KG overhaul: 隱藏鄰居 badge（+N）— 提示此節點還有 N 個鄰居可展開。
+    node.filter(d => (d.entity.hiddenNeighborCount || 0) > 0)
+        .append('text')
+        .attr('class', 'kg-hidden-badge')
+        .attr('dx', d => d.r * 0.7)
+        .attr('dy', d => -d.r * 0.7)
+        .text(d => `+${d.entity.hiddenNeighborCount}`);
 
     // --- 12. Click-to-highlight interaction ---
     let selectedNodeId = null;
@@ -929,13 +978,11 @@ function renderKGGraphView(kg, container) {
     node.on('click', function(event, d) {
         event.stopPropagation();
 
-        // Issue #3: Skip click if it was actually a drag
-        if (wasDragged) {
-            wasDragged = false;
-            return;
-        }
+        // Issue #3: 拖曳不算 click（既有 guard，立即，不進 timer）
+        if (wasDragged) { wasDragged = false; return; }
 
-        // Edit mode: route to popover or connect logic
+        // Edit mode: popover/connect（既有邏輯，立即執行，不進 timer——edit 無 dblclick focus 語意，
+        // 雙擊在 edit mode 只是兩次開 popover，無害；且 dblclick handler 有 if(_kgEditMode)return）
         if (_kgEditMode) {
             if (_kgConnectMode) {
                 handleKGConnectClick(d.entity.entity_id, d.entity);
@@ -945,11 +992,47 @@ function renderKGGraphView(kg, container) {
             return;
         }
 
-        if (selectedNodeId === d.entity.entity_id) {
-            deselectAll();
-        } else {
-            highlightNode(d);
-        }
+        // 🔧 R6 BLOCKER：非 edit 下鑽動作延遲執行（單擊 timer 到期才跑；雙擊被 dblclick clearTimeout 取消）。
+        // 先清前一個 pending timer（連續單擊時只保留最後一次）。
+        clearTimeout(_kgClickTimer);
+        _kgClickTimer = setTimeout(() => {
+            _kgClickTimer = null;
+            // timer 到期執行的 = 原本單擊該做的「全部」下鑽分支判斷（expand / deselect / highlight）。
+            // d / selectedNodeId 由 closure 捕捉（單擊場景 timer 到期時狀態未被 dblclick 改動）。
+            const hiddenN = d.entity.hiddenNeighborCount || 0;
+            const action = decideNodeClickAction({
+                hiddenNeighborCount: hiddenN,
+                isSelected: selectedNodeId === d.entity.entity_id
+            });
+            if (action === 'expand') {
+                // 展開此節點的鄰居；D=增量佈局，以被點節點為錨放新節點、既有凍結。
+                _kgVisibleIds = expandNode(_kgFullData, _kgVisibleIds, d.entity.entity_id);
+                applyExpandAndRerender(d.entity.entity_id);
+            } else if (action === 'deselect') {
+                deselectAll();
+            } else {
+                highlightNode(d);
+            }
+        }, DBLCLICK_DELAY_MS);   // 🔧 R7 SF-R7-1：延遲 320ms 留裕度（見常數定義）。
+    });
+
+    // 雙擊 = focus↔骨架：第一次雙擊聚焦為該節點單鄰域；已聚焦於該節點時再雙擊回骨架。
+    // focus/reset 是刻意重排動作 → 走 applyLayoutFreshAndRerender（整體佈局）。
+    node.on('dblclick', function(event, d) {
+        event.stopPropagation();
+        // 🔧 R6 BLOCKER：先取消 pending single-click（否則雙擊的第一次 click timer 會在 focus 後
+        // 補跑 expand，把 focus 打歪）。放在 stopPropagation 後、edit 早退前——edit mode 下
+        // _kgClickTimer 本就是 null（edit click 不排 timer），clearTimeout(null) 無害。
+        clearTimeout(_kgClickTimer);
+        _kgClickTimer = null;
+        if (_kgEditMode) return;
+        const focused = focusNode(_kgFullData, d.entity.entity_id);
+        const isAlreadyFocused = focused.size === _kgVisibleIds.size &&
+            [...focused].every(id => _kgVisibleIds.has(id));
+        _kgVisibleIds = isAlreadyFocused
+            ? new Set(_kgSkeletonIds)   // 回骨架
+            : focused;                  // 聚焦
+        applyLayoutFreshAndRerender();
     });
 
     // Add interaction hint overlay (bottom-right, fades out after 3s)
@@ -957,12 +1040,149 @@ function renderKGGraphView(kg, container) {
     if (existingHint) existingHint.remove();
     const hint = document.createElement('div');
     hint.className = 'kg-interaction-hint';
-    hint.textContent = '拖曳移動・滾輪縮放・點擊節點查看';
+    hint.textContent = '點節點展開鄰居・雙擊聚焦・滾輪縮放・拖曳移動';
     container.appendChild(hint);
     setTimeout(() => { hint.classList.add('faded'); }, 3000);
 
     console.log(`[KG] Radial mind-map rendered: center="${centerEntity.name}", ${nodeData.length} nodes, ${links.length} edges`);
 }
+
+    // 增量展開：新可見的節點以 focusParentId 為錨找空位擺放，已放節點座標凍結。
+    // （D=增量佈局；expand 走此路，保留空間記憶。）
+    function applyExpandAndRerender(focusParentId) {
+        const graphView = document.getElementById(_kgId('GraphView'));
+        if (!graphView) return;
+        const sub = projectSubgraph(_kgFullData, _kgVisibleIds);
+        // 找出「這次新可見、但 _kgNodePositions 尚無座標」的節點
+        const newEntities = sub.entities.filter(e => !_kgNodePositions[e.entity_id]);
+        const dims = { width: graphView.clientWidth || 600, height: graphView.clientHeight || 400 };
+        _kgNodePositions = placeNewNodes(_kgNodePositions, newEntities, focusParentId, dims);
+        // 重要：既有節點座標凍結，但其 entity 的 hiddenNeighborCount 展開後會變小
+        //（隱藏鄰居變可見）→ 用最新子圖的 entity 刷新每個凍結節點的 entity 欄位（座標不動），
+        // 否則「+N」badge 停在舊值（silent stale）。
+        const subEntityMap = {};
+        sub.entities.forEach(e => { subEntityMap[e.entity_id] = e; });
+        Object.keys(_kgNodePositions).forEach(id => {
+            if (subEntityMap[id]) _kgNodePositions[id].entity = subEntityMap[id];
+        });
+        renderKGGraphView(sub, graphView, _kgNodePositions);
+        updateKGNavButtonState();
+    }
+
+    // 整體重排：focus / reset / show-all 走此路（回乾淨佈局，不凍結）。
+    // 只保留當前可見集的座標（丟棄不再可見者的凍結座標，避免殘留）。
+    function applyLayoutFreshAndRerender() {
+        const graphView = document.getElementById(_kgId('GraphView'));
+        if (!graphView) return;
+        const sub = projectSubgraph(_kgFullData, _kgVisibleIds);
+        const dims = { width: graphView.clientWidth || 600, height: graphView.clientHeight || 400 };
+        _kgNodePositions = layoutSkeleton(sub, dims);
+        renderKGGraphView(sub, graphView, _kgNodePositions);
+        updateKGNavButtonState();
+    }
+
+    function setupKGNavButtons() {
+        const resetBtn = document.getElementById(_kgId('ResetSkeletonBtn'));
+        const showAllBtn = document.getElementById(_kgId('ShowAllBtn'));
+        // clone-to-strip-stale-listener（沿用 setupKGCopy pattern）
+        if (resetBtn) {
+            const fresh = resetBtn.cloneNode(true);
+            resetBtn.parentNode.replaceChild(fresh, resetBtn);
+            document.getElementById(_kgId('ResetSkeletonBtn')).addEventListener('click', () => {
+                // 🔧 R7 SF-R7-2：清 pending single-click（reset rerender 後圖回骨架，pending 會 stale）
+                clearTimeout(_kgClickTimer);
+                _kgClickTimer = null;
+                // 回骨架 = 刻意 reset → 整體重排回乾淨佈局（D 拍板：reset 才允許整體重排）
+                _kgVisibleIds = new Set(_kgSkeletonIds);
+                applyLayoutFreshAndRerender();
+                updateKGNavButtonState();
+            });
+        }
+        if (showAllBtn) {
+            const fresh = showAllBtn.cloneNode(true);
+            showAllBtn.parentNode.replaceChild(fresh, showAllBtn);
+            document.getElementById(_kgId('ShowAllBtn')).addEventListener('click', () => {
+                // 🔧 R7 SF-R7-2：清 pending single-click（全展開 rerender 後 pending 會 stale）
+                clearTimeout(_kgClickTimer);
+                _kgClickTimer = null;
+                // 顯示全部 = 刻意展開全體 → 整體重排（非增量，避免逐個塞爆版面）
+                _kgVisibleIds = new Set((_kgFullData.entities || []).map(e => e.entity_id));
+                applyLayoutFreshAndRerender();
+                updateKGNavButtonState();
+            });
+        }
+        updateKGNavButtonState();
+    }
+
+    // 「回骨架」只在已偏離骨架時顯示；「顯示全部」只在還有隱藏節點時可用。
+    function updateKGNavButtonState() {
+        const resetBtn = document.getElementById(_kgId('ResetSkeletonBtn'));
+        const showAllBtn = document.getElementById(_kgId('ShowAllBtn'));
+        const total = (_kgFullData?.entities || []).length;
+        const isSkeleton = _kgVisibleIds.size === _kgSkeletonIds.size &&
+            [..._kgSkeletonIds].every(id => _kgVisibleIds.has(id));
+        if (resetBtn) resetBtn.style.display = isSkeleton ? 'none' : '';
+        if (showAllBtn) showAllBtn.disabled = _kgVisibleIds.size >= total;
+    }
+
+    // edit mode 專用重繪：完整編輯圖 + 整體極座標佈局（不走增量凍結）。
+    function renderEditGraph() {
+        const graphView = document.getElementById(_kgId('GraphView'));
+        if (!graphView || !_kgEditData) return;
+        const dims = { width: graphView.clientWidth || 600, height: graphView.clientHeight || 400 };
+        const editPositions = layoutSkeleton(_kgEditData, dims);
+        renderKGGraphView(_kgEditData, graphView, editPositions);
+    }
+
+    function setupKGDownload() {
+        const btn = document.getElementById(_kgId('DownloadBtn'));
+        if (!btn) return;
+        // clone-to-strip-stale-listener（沿用 setupKGCopy pattern）
+        const fresh = btn.cloneNode(true);
+        btn.parentNode.replaceChild(fresh, btn);
+        const wired = document.getElementById(_kgId('DownloadBtn'));
+        const hasEntities = _currentKGData && _currentKGData.entities && _currentKGData.entities.length > 0;
+        wired.disabled = !hasEntities;
+        wired.title = hasEntities ? '下載當前顯示的知識圖譜（SVG）' : '無資料可下載';
+        wired.addEventListener('click', function () {
+            // 🔧 R7 SF-R7-2：清 pending single-click——序列化當下若有 pending click 即將到期改變
+            // 畫面，會匯出「即將被改掉」的中間態；先清確保匯出畫面穩定。
+            clearTimeout(_kgClickTimer);
+            _kgClickTimer = null;
+            // lazy：點擊當下才序列化畫面上的 SVG（所見即所得，含當前 zoom/pan 與可見集）。
+            const graphView = document.getElementById(_kgId('GraphView'));
+            const svgEl = graphView ? graphView.querySelector('svg') : null;
+            if (!svgEl) {
+                const original = this.textContent;
+                this.textContent = '✗ 無圖形';
+                setTimeout(() => { this.textContent = original; }, 2000);
+                console.warn('[KG] 下載略過：graph view 無 SVG（可能在列表模式）');
+                return;
+            }
+            const svgStr = serializeGraphSVG(svgEl);
+            // 焦點名 = 當前可見集中最高 degree 者的 name（鏡像佈局器選中心邏輯）。
+            const focusName = pickFocusName();
+            downloadTextAsFile(svgStr, buildExportFilename(focusName), 'image/svg+xml;charset=utf-8');
+            console.log('[KG] SVG 已下載（所見即所得，可見節點數:', _kgVisibleIds.size, '）');
+        });
+    }
+
+    // 當前可見子圖的「焦點名」：可見集中最高 degree 節點名（供檔名）。
+    function pickFocusName() {
+        if (!_kgFullData || _kgVisibleIds.size === 0) return '';
+        const sub = projectSubgraph(_kgFullData, _kgVisibleIds);
+        if (sub.entities.length === 0) return '';
+        // 子圖內 degree 最高者
+        const deg = {};
+        sub.entities.forEach(e => { deg[e.entity_id] = 0; });
+        sub.relationships.forEach(r => {
+            if (deg[r.source_entity_id] !== undefined) deg[r.source_entity_id]++;
+            if (deg[r.target_entity_id] !== undefined) deg[r.target_entity_id]++;
+        });
+        let best = sub.entities[0];
+        sub.entities.forEach(e => { if ((deg[e.entity_id] || 0) > (deg[best.entity_id] || 0)) best = e; });
+        return best.name || '';
+    }
 
 function renderKGLegend(kg, container) {
     const types = [...new Set(kg.entities.map(e => e.entity_type))];
@@ -1013,10 +1233,20 @@ function setupKGViewToggle() {
             if (view === 'graph') {
                 graphView.style.display = 'block';
                 listView.style.display = 'none';
-                // Re-render graph if needed (handles resize) — use kgEditData if in edit mode
-                const kgDataToRender = _kgEditMode ? _kgEditData : _currentKGData;
-                if (kgDataToRender && graphView.clientWidth > 0) {
-                    renderKGGraphView(kgDataToRender, graphView);
+                // 🔧 R7 SF-R7-2：view 切換前清 pending single-click（切 list 拆圖 / 切回 graph 整體重繪，
+                // pending 會在舊 selection / 已拆的圖上跑 stale 動作）。
+                clearTimeout(_kgClickTimer);
+                _kgClickTimer = null;
+                // Re-render graph if needed (handles resize)。切 view = 刻意重繪，走整體佈局。
+                if (graphView.clientWidth > 0) {
+                    const toggleDims = { width: graphView.clientWidth, height: graphView.clientHeight || 400 };
+                    if (_kgEditMode) {
+                        renderEditGraph();
+                    } else {
+                        const sub = projectSubgraph(_kgFullData, _kgVisibleIds);
+                        _kgNodePositions = layoutSkeleton(sub, toggleDims);
+                        renderKGGraphView(sub, graphView, _kgNodePositions);
+                    }
                 }
             } else {
                 graphView.style.display = 'none';
@@ -1064,6 +1294,10 @@ function setupKGEditMode() {
 
 function enterKGEditMode() {
     if (!_currentKGData) return;
+    // 🔧 R7 SF-R7-2：進 edit 是模式切換，pending 的檢視模式 single-click 到期會在 edit 圖上
+    // 跑下鑽 expand（edit 不該下鑽），起頭清掉。
+    clearTimeout(_kgClickTimer);
+    _kgClickTimer = null;
     _kgEditMode = true;
     _kgConnectMode = false;
     _kgConnectSourceId = null;
@@ -1083,7 +1317,7 @@ function enterKGEditMode() {
 
     // Re-render with edit mode enabled
     const graphView = document.getElementById(_kgId('GraphView'));
-    renderKGGraphView(_kgEditData, graphView);
+    renderEditGraph();
 
     console.log('[KG Edit] Edit mode entered');
 }
@@ -1105,9 +1339,18 @@ function cancelKGEdit() {
     // Deactivate connect mode button
     document.getElementById(_kgId('ConnectBtn')).classList.remove('active');
 
-    // Re-render original data
+    // 🔧 R7 SF-R7-2：退出 edit 重建可見集回骨架，pending single-click 會 stale，先清。
+    clearTimeout(_kgClickTimer);
+    _kgClickTimer = null;
     const graphView = document.getElementById(_kgId('GraphView'));
-    renderKGGraphView(_currentKGData, graphView);
+    // 退出 edit 回檢視模式：重建可見集（confirm 可能改了節點）+ 骨架整體佈局
+    _kgFullData = _currentKGData;
+    const vs = initVisibleState(_currentKGData);
+    _kgVisibleIds = vs.visibleIds;
+    _kgSkeletonIds = vs.skeletonIds;
+    const cancelDims = { width: graphView.clientWidth || 600, height: graphView.clientHeight || 400 };
+    _kgNodePositions = layoutSkeleton(projectSubgraph(_kgFullData, _kgVisibleIds), cancelDims);
+    renderKGGraphView(projectSubgraph(_kgFullData, _kgVisibleIds), graphView, _kgNodePositions);
     closeAllKGPopovers();
     console.log('[KG Edit] Edit mode cancelled, original graph restored');
 }
@@ -1276,7 +1519,7 @@ function saveNodeEdit() {
 
     // Re-render with updated data
     const graphView = document.getElementById(_kgId('GraphView'));
-    renderKGGraphView(_kgEditData, graphView);
+    renderEditGraph();
 }
 
 function deleteCurrentNode() {
@@ -1301,7 +1544,7 @@ function deleteCurrentNode() {
     closeAllKGPopovers();
 
     const graphView = document.getElementById(_kgId('GraphView'));
-    renderKGGraphView(_kgEditData, graphView);
+    renderEditGraph();
 }
 
 function showAddNodePopover() {
@@ -1373,7 +1616,7 @@ function createNewNode() {
     closeAllKGPopovers();
 
     const graphView = document.getElementById(_kgId('GraphView'));
-    renderKGGraphView(_kgEditData, graphView);
+    renderEditGraph();
 
     console.log('[KG Edit] New node created:', newId, newName);
 }
@@ -1508,7 +1751,7 @@ function saveEdgeEdit() {
 
     closeAllKGPopovers();
     const graphView = document.getElementById(_kgId('GraphView'));
-    renderKGGraphView(_kgEditData, graphView);
+    renderEditGraph();
 }
 
 function deleteCurrentEdge() {
@@ -1527,7 +1770,7 @@ function deleteCurrentEdge() {
 
     closeAllKGPopovers();
     const graphView = document.getElementById(_kgId('GraphView'));
-    renderKGGraphView(_kgEditData, graphView);
+    renderEditGraph();
 }
 
 function toggleKGConnectMode() {
@@ -1604,7 +1847,7 @@ function handleKGConnectClick(entityId, entity) {
 
         // Re-render
         const graphView = document.getElementById(_kgId('GraphView'));
-        renderKGGraphView(_kgEditData, graphView);
+        renderEditGraph();
     }
 }
 
@@ -1708,9 +1951,13 @@ async function confirmKGEdit() {
         serialized.edit_summary.edges_deleted +
         serialized.edit_summary.edges_modified;
 
-    if (totalChanges === 0) {
-        // No changes — still allow confirm (user may want AI to re-analyze as-is)
-        console.log('[KG Edit] Confirm with 0 changes — sending current KG for re-analysis');
+    if (shouldBlockRerun(serialized.edit_summary)) {
+        // 純拖曳／無實質資料變更 → 不觸發 rerun（拖曳只改座標不進 _kgEditStats）。
+        // 編輯應是「重新輸入內容」才重跑；純移動位置不燒 LLM（CEO 決策）。
+        // 不退出 edit mode、不清 _kgEditData——讓使用者可繼續編輯或手動取消。
+        console.log('[KG Edit] 0 資料變更（可能純拖曳）— 不觸發 rerun');
+        alert('目前沒有偵測到節點或關係的內容變更（移動位置不算變更）。\n若要 AI 重新分析，請先新增／刪除／修改節點或關係，再按確認。');
+        return;
     }
 
     const editPayload = serialized;
@@ -1755,9 +2002,18 @@ async function confirmKGEdit() {
 
     closeAllKGPopovers();
 
-    // Re-render updated graph (now with confirmed edits as the live graph)
+    // 🔧 R7 SF-R7-2：退出 edit 重建可見集回骨架，pending single-click 會 stale，先清。
+    clearTimeout(_kgClickTimer);
+    _kgClickTimer = null;
     const graphView = document.getElementById(_kgId('GraphView'));
-    renderKGGraphView(_currentKGData, graphView);
+    // 退出 edit 回檢視模式：_currentKGData 已更新為編輯後資料 → 重建可見集 + 骨架整體佈局
+    _kgFullData = _currentKGData;
+    const vs = initVisibleState(_currentKGData);
+    _kgVisibleIds = vs.visibleIds;
+    _kgSkeletonIds = vs.skeletonIds;
+    const confirmDims = { width: graphView.clientWidth || 600, height: graphView.clientHeight || 400 };
+    _kgNodePositions = layoutSkeleton(projectSubgraph(_kgFullData, _kgVisibleIds), confirmDims);
+    renderKGGraphView(projectSubgraph(_kgFullData, _kgVisibleIds), graphView, _kgNodePositions);
 
     // Issue #4: Show loading indicator with spinner in research panel
     const researchViewEl = document.getElementById('researchView');
@@ -1792,7 +2048,8 @@ async function confirmKGEdit() {
             body: JSON.stringify({
                 query_id: queryId,
                 kg_edits: kgEditsJson,
-                query: originalQuery
+                query: originalQuery,
+                session_id: getCurrentLoadedSessionId() || ''  // Bug 1: server 重啟後 DB fallback 定位 session row
             })
         });
 
@@ -1940,6 +2197,14 @@ async function confirmKGEdit() {
                         if (loadingEl) loadingEl.remove();
                         showDRError(data.error || 'KG 重新分析發生錯誤');
                         return;
+                    } else {
+                        // 修正 §0.2 silent drop：unknown 型別不 render 也要被看見（no-silent-fail）。
+                        // 注意：KG 不累積 accumulatedData，故 unknown 不需 merge，只需 loud log。
+                        const c = classifyEnvelope(data);
+                        if (c.kind === 'unknown') {
+                            // 🔧 SF5：結構化欄位（classification/type）讓「某 event 沒到前端」可快速定位。
+                            console.warn('[KG Edit Rerun SSE] unhandled envelope', { classification: c.kind, message_type: data.message_type, data });
+                        } // kind==='skip' → 靜默略過（本就是中間 envelope）
                     }
                 }
             }

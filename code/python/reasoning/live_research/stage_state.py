@@ -543,6 +543,10 @@ class LiveResearchStageState:
         導航語意（不疊加 evidence、不動 recollect_count、target 可變）。兩者**不可合併**：
         recollect 走 _dispatch_recollect（count+1 + seed pool 重跑 BAB），backward nav
         只 reset + emit checkpoint（不重跑 BAB，由 forward run 自然覆蓋）。
+
+        ⚠ 前端退階段 confirm modal 的警告清單鏡像本真值表：
+        static/js/features/lr-nav-confirm.js（lrBackNavClearedItems）——
+        改本函式清除範圍時必同步該表與其測試。
         """
         # current_stage + status：退回 target，等使用者在 target checkpoint 重新決定
         self.current_stage = target_stage

@@ -1,0 +1,12 @@
+{
+  "message_type": "time_filter_relaxed",
+  "content": "已放寬時間範圍以取得更多結果。",
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

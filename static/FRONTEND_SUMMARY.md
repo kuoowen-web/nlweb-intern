@@ -1,7 +1,7 @@
 # Frontend Code Summary - Multi-Chat Interface
 
 ## Overview
-The frontend is a modern JavaScript single-page application that provides a multi-participant chat interface with both WebSocket and Server-Sent Events (SSE) support. The code is modular, using ES6 modules for clean separation of concerns.
+The frontend is a JavaScript single-page application providing a multi-participant chat interface with both WebSocket and Server-Sent Events (SSE) support. The code uses ES6 modules to separate concerns.
 
 ## Entry Point
 **multi-chat-index.html**

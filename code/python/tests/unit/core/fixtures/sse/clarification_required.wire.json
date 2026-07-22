@@ -1,0 +1,15 @@
+{
+  "message_type": "clarification_required",
+  "clarification": {
+    "text": "請問您指的是哪個面向？"
+  },
+  "query": "綠能",
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

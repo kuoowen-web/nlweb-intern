@@ -7,7 +7,7 @@ import sys
 import datetime
 
 # Add code/python to sys.path（tests/unit/retrieval/ → 往上三層）
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 
 from retrieval_providers.postgres_client import PgVectorClient
 

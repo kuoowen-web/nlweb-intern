@@ -1,53 +1,13 @@
 # Indexing Module (M0)
-# Semantic chunking and dual-tier storage for news articles
-
-# Phase 1: Core Infrastructure
-from .source_manager import SourceManager, SourceTier
-
-# Phase 2: Data Flow
-from .ingestion_engine import IngestionEngine, CanonicalDataModel
-from .quality_gate import QualityGate, QualityResult, QualityStatus
-from .chunking_engine import ChunkingEngine, Chunk, make_chunk_id, parse_chunk_id
-
-# Phase 3: Storage & Safety
-from .dual_storage import VaultStorage, VaultConfig, MapPayload
-from .rollback_manager import RollbackManager, MigrationRecord
-from .pipeline import IndexingPipeline, PipelineResult, PipelineCheckpoint
-
-# Phase 4: Integration Helpers
-from .vault_helpers import (
-    get_full_text_for_chunk,
-    get_full_article_text,
-    get_chunk_metadata,
-    close_vault
-)
-
-__all__ = [
-    # Phase 1
-    'SourceManager',
-    'SourceTier',
-    # Phase 2
-    'IngestionEngine',
-    'CanonicalDataModel',
-    'QualityGate',
-    'QualityResult',
-    'QualityStatus',
-    'ChunkingEngine',
-    'Chunk',
-    'make_chunk_id',
-    'parse_chunk_id',
-    # Phase 3
-    'VaultStorage',
-    'VaultConfig',
-    'MapPayload',
-    'RollbackManager',
-    'MigrationRecord',
-    'IndexingPipeline',
-    'PipelineResult',
-    'PipelineCheckpoint',
-    # Phase 4
-    'get_full_text_for_chunk',
-    'get_full_article_text',
-    'get_chunk_metadata',
-    'close_vault',
-]
+#
+# 現存兩用途：
+#   1. Prod 索引鏈（路徑 B）：cloud_embed.py（GPU VM embed）+ bulk_load.py（VPS PG 批次載入）
+#   2. Crawler 監控：dashboard_server.py / dashboard_api.py（port 8001）
+#
+# 🪦 桌機批次路徑 A（pg_batch → Ingestion/QualityGate/Chunking → PostgreSQLUploader）
+# 與 Qdrant 時代模組（pipeline/dual_storage/vault_helpers/source_manager/rollback_manager）
+# 已於 2026-07-16 整批刪除（CEO 拍板 D-2026-07-16，刪除不修復）。
+# 需要回溯 → git ref 1d150e49。
+#
+# 本檔刻意不 re-export 任何符號：消費者一律 `from indexing import bulk_load` 等
+# submodule 形式（import 機制直接載入子模組，無需 façade）。

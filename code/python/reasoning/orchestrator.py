@@ -84,6 +84,217 @@ def get_cached_research_state(query_id: str) -> Optional[dict]:
     return cached
 
 
+# === Bug 1: rerunState 持久化——抽精簡子集 + 從 research_report 重建（純函式，write/read path 共用） ===
+
+# [R5 剝欄位 — CEO 拍板選項一] rerun path 對 source_map item 讀取的欄位窮舉集合（親讀 orchestrator.py
+# _format_context_shared + citation 解析下游驗）：url/link、title/name、description/articleBody、site、
+# datePublished——**只有這 5 類**。schema_json 全文其餘、vector（list-row item[4]）、scores（item[5]）
+# 從不被 rerun 讀。Task 5 Step 1 實測：temporal 87 筆 source_map 達 238KB（超 200KB JSONB warn），
+# 大頭正是每 item ~2.6KB 的 schema_json 全文 blob → 剝欄位後 payload 預估 ~15-30KB。
+# 若未來 rerun 下游讀了這 5 類以外欄位 → 剝欄位會使該欄失真 → 必須重審此窮舉集合。
+_RERUN_ITEM_FIELDS = ("url", "title", "description", "site", "datePublished")
+
+
+def _slim_item(item) -> dict:
+    """把單個檢索 item 剝成 rerun 真正用到的精簡 dict（只留 5 欄），丟掉肥大的 schema_json 全文 + vector + scores。
+
+    [verified] 真實 retriever 回的 item 是 **6-element list-row**
+    `[url, schema_json_str, title, source, vector, scores_dict]`（Task 5 Step 1 實測確認）——
+    **description/datePublished 藏在 item[1] 的 schema_json 字串裡**（不是頂層），故不能直接丟 schema_json，
+    要先 json.loads(item[1]) 抽出。統一剝成 dict，讓 restore 後下游 `_format_context_shared` dict 分支
+    正確讀取（不再走 list-row 分支去找已不存在的 item[1]）。dict 格式 item 直接從頂層抽
+    （`description or articleBody` / `title or name` / `url or link`，對齊 `_format_context_shared`
+    dict 分支的 fallback 語義）。
+    """
+    if isinstance(item, dict):
+        return {
+            'url': item.get('url') or item.get('link', ''),
+            'title': item.get('title') or item.get('name', ''),
+            'description': item.get('description') or item.get('articleBody', ''),
+            'site': item.get('site', ''),
+            'datePublished': item.get('datePublished', ''),
+        }
+    if isinstance(item, (list, tuple)):
+        try:
+            schema = json.loads(item[1]) if len(item) > 1 and isinstance(item[1], str) else (item[1] if len(item) > 1 else {})
+        except (json.JSONDecodeError, TypeError) as e:
+            # [AR R1 should-fix] 降級必留訊息（不可 silent fail）：description/datePublished 會變空
+            logger.warning(f"[RERUN SLIM] item schema_json 解析失敗（url={item[0] if len(item) > 0 else '?'!r}）"
+                           f"→ description/datePublished 降空: {e}")
+            schema = {}
+        _schema_ok = isinstance(schema, dict)
+        if not _schema_ok and schema:
+            logger.warning(f"[RERUN SLIM] item schema_json 非 dict（type={type(schema).__name__}, "
+                           f"url={item[0] if len(item) > 0 else '?'!r}）→ description/datePublished 降空")
+        return {
+            'url': item[0] if len(item) > 0 else '',
+            'title': item[2] if len(item) > 2 else '',
+            'description': (schema.get('description') or schema.get('articleBody', '')) if _schema_ok else '',
+            'site': item[3] if len(item) > 3 else '',
+            'datePublished': schema.get('datePublished', '') if _schema_ok else '',
+        }
+    # 非 dict/list（不預期）→ 回空 5 欄殼（不 crash，下游 dict 分支讀到空值優雅降級）
+    # [AR R1 should-fix] 降級必留訊息（不可 silent fail）
+    logger.warning(f"[RERUN SLIM] 未知 item 型別 {type(item).__name__}（非 dict/list）→ 剝成空 5 欄殼")
+    return {'url': '', 'title': '', 'description': '', 'site': '', 'datePublished': ''}
+
+
+def build_rerun_state_subset(state: 'ResearchState') -> dict:
+    """從 phase 1 完成的 ResearchState 抽出 rerun 真正需要的精簡子集，供併進 research_report JSONB。
+
+    [verified] phase 2-4 對 items 的唯一使用是 len(state.items)（sources_filtered stat，
+    orchestrator.py:1554）——故**不存全量 items**，只留 items_count。source_map/current_context
+    才是結構性需要（Analyst/Critic 輸入、citation 解析、web search extend）。
+
+    [R5 剝欄位 — CEO 拍板選項一] source_map 的 value 用 `_slim_item` 剝成精簡 5 欄 dict（見 _slim_item
+    docstring + `_RERUN_ITEM_FIELDS`）：丟掉每 item ~2.6KB 的 schema_json 全文 blob + vector + scores，
+    只留 rerun 真正讀的 url/title/description/site/datePublished。Task 5 Step 1 實測 temporal 87 筆
+    source_map 達 238KB（超 200KB JSONB warn）→ 剝後預估 ~15-30KB。這比 plan 原選項 A/B（都存整個肥
+    item、只糾結去不去重）更根本——真問題是 item 本身太肥。
+
+    source_map key 是 int（citation id），JSON object key 只能是 str → 這裡轉 str 存；
+    重建（restore_rerun_state_from_report）時轉回 int（G17 round-trip 陷阱）。
+
+    [R2 修訂 S1] 走選項 A（預設）：**不單存 current_context**——restore 從 source_map 依 cid
+    排序重建（省一份重複複製、payload 減半）。此一致性只在 phase-1 快照點成立（cc_eq_sm
+    invariant scope，見 items 大小評估段），而 build 拿的就是 :1811 phase-1 快照 state，故成立。
+    Task 5 Step 1 量測時若 cc_eq_sm==False（不預期）→ stop-and-report、退選項 B（見 ⚠️ 註）。
+
+    [R3 修訂 S2-new] 加存 `query_id`：DB fallback 用前端帶的 session_id 讀 research_report.rerunState，
+    但一個 session 可跑多次 DR（不同 query_id），research_report 只存最後一次的產出。若前端 stale
+    （同 session 跑了第二次 DR，但 KG 編輯用的還是第一次的 query_id）→ DB fallback 會拿「最後一次 DR
+    的 rerunState」去 rerun「另一次 query 的 KG 編輯」→ 用錯 formatted_context/source_map → 張冠李戴。
+    memory cache 路徑用 query_id 當 key 天然對齊、無此縫；DB fallback 引入此縫，故 rerunState 必須綁定
+    產生它的 query_id，restore 後由 pre-check/execute_rerun 驗 `query_id == original_query_id`。
+    [verified] `state.query_id` 可讀（research_state.py:33 `query_id: str = ""`；:1811 `_cache_research_state(state.query_id, state)` 已用它當 cache key，證明此 scope 可讀）。
+    """
+    return {
+        'query': state.query,
+        'mode': state.mode,
+        'temporal_context': state.temporal_context,
+        'enable_kg': state.enable_kg,
+        'enable_web_search': state.enable_web_search,
+        'formatted_context': state.formatted_context,
+        # [R5 剝欄位] int key → str key（JSON 相容）；value 用 _slim_item 剝成精簡 5 欄 dict
+        # （丟 schema_json 全文 / vector / scores，payload 238KB → ~15-30KB）。重建時 key 轉回 int。
+        'source_map': {str(k): _slim_item(v) for k, v in state.source_map.items()},
+        # 選項 A：不存 current_context——restore 從 source_map 依 cid 排序重建
+        'items_count': len(state.items),
+        # [R3 修訂 S2-new] 綁定產生此 rerunState 的 query_id，供 DB fallback 驗 session↔query_id 對齊
+        'query_id': state.query_id,
+    }
+
+
+def restore_rerun_state_from_report(research_report: dict) -> Optional[dict]:
+    """從 DB research_report 的內層 rerunState 重建 rerun 所需 state dict。
+
+    回 None 若 research_report 無有效 rerunState（session 14 舊 row / 空內層）——判「有意義內容」
+    而非純 truthiness（模組陷阱 #3：{} / {source_map:{}} 都 truthy 但無用 → 判無效）。
+
+    重建做：(1) source_map str key → int；(2) current_context 依 cid 排序從 source_map 重建
+    （去重，rerunState 未單存 current_context，見 build 的 payload 優化）；(3) items 重建成
+    長度 items_count 的 placeholder list（phase 2-4 只用 len）。
+    """
+    if not isinstance(research_report, dict):
+        return None
+    rs = research_report.get('rerunState')
+    # 有意義內容 predicate（非 truthiness）：必須有 formatted_context 有值 且 source_map 是非空 dict
+    if not isinstance(rs, dict):
+        return None
+    # [R3 修訂 S4-補] source_map 型別檢查納入無效判定：build 恆存 dict，但 DB corrupt/舊資料可能存成
+    # 非 dict（如 list / str）→ 下面 .items() 會拋 AttributeError（原 try/except 只包 int(k) 未涵蓋
+    # 此類）。既然原則是「DB corrupt/舊資料不能把 400 變 500」，該一次涵蓋整類（根解非補丁）。
+    if not (rs.get('formatted_context') and isinstance(rs.get('source_map'), dict) and rs['source_map']):
+        return None
+    # source_map str key → int（G17）。JSON 讀回的 key 恆為 str，這裡權威轉回 int。
+    # [R2 修訂 S4 + R3 修訂 S4-補] DB 可能存 corrupt/舊資料——一次涵蓋整類轉換失敗：
+    #   (a) source_map 非數字 key → int(k) 拋 ValueError/TypeError（原 R2 已涵蓋）；
+    #   (b) source_map 值不是 dict 或結構異常（AttributeError 於 .items() 已由上面 isinstance 攔）；
+    #   (c) items_count 非數字（如 "abc"）→ int(...) 拋 ValueError（R3 新增，原本裸露在 return 段外會炸 500）。
+    # 全包一個 try/except（ValueError/TypeError/AttributeError）→ log warning（明確訊息、不 silent
+    # fail）、return None → 上層走「無有效 rerunState → 400」正常降級。
+    # 注意：這 try/except 是針對「DB corrupt 資料」的邊界降級，**不是**掩蓋「build 忘轉 str→int」的
+    # 容錯（build 端恆存合法數字字串 key + 數字 items_count，round-trip test 以強斷言 int key 鎖死正確性）。
+    try:
+        source_map = {int(k): v for k, v in rs['source_map'].items()}
+        # current_context 依 cid 排序從 source_map 重建（build 未單存 current_context 以省 payload）
+        current_context = [source_map[cid] for cid in sorted(source_map.keys())]
+        # [R3 修訂 S4-補] items_count parse 一併納入 try（非數字 → ValueError，不炸 500）
+        items_count = int(rs.get('items_count', len(current_context)))
+    except (ValueError, TypeError, AttributeError) as e:
+        logger.warning(f"[RERUN] research_report.rerunState corrupt（非數字 source_map key / items_count "
+                       f"非數字 / source_map 結構異常，舊資料或損毀）→ 判無效 rerunState、回落 400: {e}")
+        return None
+    return {
+        'query': rs.get('query', ''),
+        'mode': rs.get('mode', 'discovery'),
+        'temporal_context': rs.get('temporal_context'),
+        'enable_kg': rs.get('enable_kg', False),
+        'enable_web_search': rs.get('enable_web_search', False),
+        'formatted_context': rs['formatted_context'],
+        'source_map': source_map,
+        'current_context': current_context,
+        # phase 2-4 只用 len(items)（stat）→ placeholder，長度 = 原 items_count
+        'items': [None] * items_count,
+        # [R3 修訂 S2-new] 帶回 query_id 供 DB fallback 驗 session↔query_id 對齊（舊資料缺 → None，
+        # 上層 degrade 成不匹配 → 400，見向後相容決策）
+        'query_id': rs.get('query_id'),
+        'cached_at': time.time(),
+    }
+
+
+# === Graph fallback：actor-critic 多輪迭代防 graph 產出蒸發（2026-07-15 rerun E2E 撞出）===
+# 根因：gap-enrichment / revise 輪的 LLM 可能省略 graph（analyst.py C5 已有 observability log），
+# 而 pipeline 一律拿「最終輪」analyst output 去 serialize → 前輪已產好的 KG/argument/推論鏈被
+# 空值覆蓋、整包蒸發（rerun E2E 實證：research 輪 KG 10+10、enriched 輪 0+0 → 前端空殼）。
+# 修法：loop 內追蹤最新「非空」graph → post-loop 最終輪欄位空殼時補回。主 run 與 rerun 同受益。
+
+_ANALYST_GRAPH_FIELDS = ("knowledge_graph", "argument_graph", "reasoning_chain_analysis")
+
+
+def _graph_field_has_content(field: str, value) -> bool:
+    """判 graph 欄位是否有「有意義內容」。
+
+    陷阱：KnowledgeGraph 空物件（entities=[] relationships=[]）是 truthy（pydantic BaseModel
+    instance 恆 truthy），`if analyst_output.knowledge_graph:` 擋不住 → KG 需看 entities/
+    relationships 是否非空。argument_graph 是 list、reasoning_chain_analysis 是 Optional 物件，
+    truthy 判準即足。
+    """
+    if not value:
+        return False
+    if field == "knowledge_graph":
+        return bool(getattr(value, "entities", None) or getattr(value, "relationships", None))
+    return True
+
+
+def track_nonempty_graphs(response, tracker: dict) -> None:
+    """actor-critic loop 每輪 analyst 產出後呼叫：記下最新「非空」的 graph 欄位值。
+
+    兩輪都非空 → 記最新（最終輪語意優先，fallback 只在最終輪空殼時啟動）；
+    空殼輪不覆蓋已記錄的非空版本。
+    """
+    for f in _ANALYST_GRAPH_FIELDS:
+        v = getattr(response, f, None)
+        if _graph_field_has_content(f, v):
+            tracker[f] = v
+
+
+def apply_graph_fallback(response, tracker: dict):
+    """post-loop：最終輪 response 的 graph 欄位空殼/None、而本 run 前輪有非空版本 → 補回。
+
+    fallback 來源是**同一 run 內的前一輪**（rerun 情境即「已含使用者 KG 編輯前提」產的那輪），
+    非舊報告 stale graph，不張冠李戴。回 (response, restored_fields)——restored_fields 供
+    caller log（可觀測，不 silent）；無補回時原物件原樣返回（零開銷）。
+    """
+    updates = {}
+    for f, v in tracker.items():
+        if hasattr(response, f) and not _graph_field_has_content(f, getattr(response, f, None)):
+            updates[f] = v
+    if not updates:
+        return response, []
+    return response.model_copy(update=updates), sorted(updates.keys())
+
+
 class DeepResearchOrchestrator(OrchestratorBase):
     """
     Orchestrator for the Actor-Critic reasoning system.
@@ -710,6 +921,9 @@ class DeepResearchOrchestrator(OrchestratorBase):
         seen_citation_ids: set = set()
         # 防線三：跨迭代 web query 去重（同一 search_query 全 session 只打一次 Google，防額度燒爆）
         web_searched_queries: set = set()
+        # Graph fallback：追蹤本 run 最新非空 graph 產出（KG/argument/推論鏈），post-loop
+        # 最終輪空殼時補回——防 gap-enrichment/revise 輪 LLM 省略 graph 導致產出蒸發
+        last_nonempty_graphs: dict = {}
 
         # Aliases for readability (state is the source of truth)
         query = state.query
@@ -832,6 +1046,9 @@ class DeepResearchOrchestrator(OrchestratorBase):
                     input_prompt=f"Query: {query}\nMode: {mode}",
                     output_response=response
                 )
+
+            # Graph fallback：記下本輪（research/revise）非空 graph 產出
+            track_nonempty_graphs(response, last_nonempty_graphs)
 
             # Gap detection: Handle SEARCH_REQUIRED
             if response.status == "SEARCH_REQUIRED":
@@ -1198,6 +1415,10 @@ class DeepResearchOrchestrator(OrchestratorBase):
                     output_response=response
                 )
 
+                # Graph fallback：記下 enriched 輪非空 graph 產出（此輪 LLM 可能省略 graph，
+                # 空殼不會覆蓋 research 輪已記錄的版本——2026-07-15 rerun E2E 實證的蒸發點）
+                track_nonempty_graphs(response, last_nonempty_graphs)
+
             # Send progress: Analyst complete
             await self._send_progress({
                 "message_type": "intermediate_result",
@@ -1301,6 +1522,14 @@ class DeepResearchOrchestrator(OrchestratorBase):
             iteration += 1
 
         # === Post-loop: Write results back to state ===
+        # Graph fallback：最終輪 analyst 輸出的 graph 欄位空殼/None、而本 run 前輪有非空版本
+        # → 補回前輪版本（防 gap-enrichment/revise 輪 LLM 省略 graph 導致 KG/推論鏈整包蒸發）
+        if response is not None and last_nonempty_graphs:
+            response, _restored_graph_fields = apply_graph_fallback(response, last_nonempty_graphs)
+            if _restored_graph_fields:
+                self.logger.info(
+                    f"[GRAPH-FALLBACK] 最終輪 analyst 輸出缺 {_restored_graph_fields}，"
+                    f"已用本 run 前輪非空版本補回（enriched/revise 輪 LLM 省略 graph 的既有縫）")
         state.draft = draft
         state.review = review
         state.response = response
@@ -1809,6 +2038,9 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
             # Cache state for potential KG editing selective re-run
             _cache_research_state(state.query_id, state)
+            # Bug 1：把精簡子集掛到 handler，供 runQuery 組 research_report 時併入持久化（DB fallback）
+            if getattr(self, "handler", None) is not None:
+                self.handler._rerun_state_subset = build_rerun_state_subset(state)
 
             # Phase 2: Actor-Critic Loop
             state = await self._phase_actor_critic_loop(state)
@@ -1868,6 +2100,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
         self,
         original_query_id: str,
         modified_query: str,
+        restored_state: Optional[dict] = None,   # Bug 1: DB fallback 重建的 rerunState（cache miss 時）
     ) -> List[Dict[str, Any]]:
         """
         Selective re-run: skip search phase, reuse cached formatted_context.
@@ -1876,6 +2109,9 @@ class DeepResearchOrchestrator(OrchestratorBase):
         Args:
             original_query_id: query_id of the original research whose cached state to reuse
             modified_query: the modified query with KG edit instructions appended
+            restored_state: rerunState reconstructed from DB research_report
+                (restore_rerun_state_from_report)。非 None 時作為記憶體 cache miss 的
+                fallback（cache hit 仍優先走記憶體）。
 
         Returns:
             List of NLWeb Item dicts compatible with create_assistant_result().
@@ -1883,7 +2119,19 @@ class DeepResearchOrchestrator(OrchestratorBase):
         Raises:
             ValueError: if no cached state exists for the given query_id
         """
-        cached = get_cached_research_state(original_query_id)
+        # [R4 修訂 RC3] 深度防禦（縱深，defense in depth）：restored_state 是 DB fallback 來的，
+        # 其 query_id 理應已由上游兩道（execute_rerun / api pre-check）驗過 == original_query_id。
+        # 但即使上游驗證因故失效／被繞過，最內層再守一道——restored_state.query_id 與請求不符 → log +
+        # 當無效（不用它、退回記憶體 cache，此時 miss → 落 raise ValueError → SSE error）。不張冠李戴。
+        # 只驗 restored_state；記憶體 cache 用 query_id 當 key 天然對齊（G2 verified）、無此縫、不驗。
+        if restored_state is not None and restored_state.get('query_id') != original_query_id:
+            self.logger.warning(
+                f"[RERUN] 深度防禦攔截：restored_state.query_id={restored_state.get('query_id')!r} "
+                f"與請求 original_query_id={original_query_id!r} 不符（上游對齊驗證應已擋下，"
+                f"此為縱深防線）→ 判無效、棄用 restored_state")
+            restored_state = None
+        # 記憶體 cache 優先（hit 走記憶體、快）；miss 才用 DB fallback 傳入的 restored_state
+        cached = get_cached_research_state(original_query_id) or restored_state
         if not cached:
             raise ValueError(f"No cached research state for query_id={original_query_id}")
 

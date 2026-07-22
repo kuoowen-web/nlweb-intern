@@ -45,6 +45,37 @@ class AuthService:
     def __init__(self):
         self.db = AuthDB.get_instance()
 
+    # ── DB text hygiene ───────────────────────────────────────────
+    #
+    # W-2（D-2026-07-20 規則 4）：org name / user name 是 client 字串，寫入
+    # PG VARCHAR/TEXT 前需剝除 U+0000 null byte（PG 拒絕 → 500）。單點出口，
+    # 掛在所有 name 入庫點。
+
+    @staticmethod
+    def _sanitize_db_text(value):
+        """遞迴剝除字串 null byte；None / 非字串原樣回傳（W-2 單點出口）。"""
+        from core.sanitize import strip_null_bytes
+        return strip_null_bytes(value)
+
+    @staticmethod
+    def _is_unique_violation(exc: Exception) -> bool:
+        """跨方言判定 unique constraint violation（W-3 R2 例外轉譯用）。
+
+        - SQLite：sqlite3.IntegrityError 且訊息含 'UNIQUE'（IntegrityError
+          也涵蓋 FK violation 等，需靠標準訊息 'UNIQUE constraint failed'
+          區分——非 UNIQUE 的 integrity error 應原樣上拋，不誤轉譯）。
+        - PostgreSQL：psycopg.errors.UniqueViolation（精確類型，SQLSTATE
+          23505）。lazy import，無 psycopg 環境不影響 SQLite 路徑。
+        """
+        import sqlite3
+        if isinstance(exc, sqlite3.IntegrityError):
+            return 'UNIQUE' in str(exc).upper()
+        try:
+            import psycopg
+            return isinstance(exc, psycopg.errors.UniqueViolation)
+        except ImportError:
+            return False
+
     # ── Bootstrap Token Management ────────────────────────────────
 
     async def create_bootstrap_token(self, org_name_hint: str = '', expires_hours: int = 72) -> Dict[str, str]:
@@ -98,6 +129,8 @@ class AuthService:
         if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
             raise ValueError("電子郵件格式不正確")
         self._validate_password(password)
+        # W-2: name 是 client 字串，剝除 null byte 再入 users.name。
+        name = self._sanitize_db_text(name)
 
         existing = await self.db.fetchone("SELECT id FROM users WHERE email = ?", (email,))
         if existing:
@@ -162,6 +195,8 @@ class AuthService:
         email = email.strip().lower()
         if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
             raise ValueError("電子郵件格式不正確")
+        # W-2: name 是 client 字串，剝除 null byte 再入 users.name。
+        name = self._sanitize_db_text(name)
 
         # Verify admin has permission
         membership = await self.db.fetchone(
@@ -546,7 +581,15 @@ class AuthService:
 
     async def set_user_active(self, target_user_id: str, is_active: bool,
                                admin_user_id: str, org_id: str) -> bool:
-        """Admin activates or deactivates a user. Deactivation also revokes all tokens."""
+        """Admin activates or deactivates a user. Deactivation also revokes all tokens.
+
+        W-3+W-4（D-2026-07-20 規則 3）：本方法對 users.is_active 做全域更新。
+        這是刻意的——migration bccf83d23bc2 對 org_memberships.user_id 加了
+        UNIQUE constraint，保證「一 user 一 org」（一 email 一公司），故不存在
+        跨組織使用者，全域停用等價於本組織停用，無跨 org blast radius。
+        （若未來要支援「一人多組織」，需先移除該 UNIQUE 並把此處改為
+        org-scoped 的 membership.status 停用語義。）
+        """
         if target_user_id == admin_user_id:
             raise PermissionError("無法停用您自己的帳號")
 
@@ -583,7 +626,15 @@ class AuthService:
     # ── Admin: Delete User (Soft) ──────────────────────────────────
 
     async def delete_user(self, target_user_id: str, admin_user_id: str, org_id: str) -> bool:
-        """Hard-delete a user: revoke tokens, clean up all associated data, delete record."""
+        """Hard-delete a user: revoke tokens, clean up all associated data, delete record.
+
+        W-3+W-4（D-2026-07-20 規則 3）：本方法最後 DELETE FROM users 是全域硬刪。
+        這是刻意的——migration bccf83d23bc2 對 org_memberships.user_id 加了
+        UNIQUE constraint，保證「一 user 一 org」（一 email 一公司），故不存在
+        跨組織使用者，全域刪除等價於本組織刪除，無跨 org blast radius。
+        （若未來要支援「一人多組織」，需先移除該 UNIQUE 並把此處改為只刪本 org
+        membership 的移出語義，與 remove_member 對齊。）
+        """
         if target_user_id == admin_user_id:
             raise PermissionError("無法刪除您自己的帳號")
 
@@ -678,6 +729,9 @@ class AuthService:
     async def create_organization(self, name: str, admin_user_id: str) -> Dict[str, Any]:
         """Create organization and set creator as admin."""
         org_id = str(uuid.uuid4())
+        # W-2: org name 是 client 字串，剝除 null byte 再入 organizations.name
+        # （slug 由 name 衍生，故先清）。
+        name = self._sanitize_db_text(name)
         slug = name.lower().replace(' ', '-').replace('.', '')[:50]
         now = time.time()
 
@@ -763,18 +817,41 @@ class AuthService:
         if not user or user['email'] != invitation['email']:
             raise ValueError("此邀請是寄給另一個電子郵件地址的")
 
+        # W-3 R2 補修（D-2026-07-20 一 email 一公司）：
+        # fast-path pre-check（禮貌層，非守護）——**不帶 status 條件**，守護面
+        # 對齊 UNIQUE(user_id) 涵蓋面（removed row 也佔席位，remove_member 是
+        # UPDATE status='removed' 留 row）。真正守護在下方 INSERT-first + 例外
+        # 轉譯：check-then-act 有 TOCTOU 窗，pre-check 只提供好訊息與省一次
+        # 寫入嘗試。
+        existing_membership = await self.db.fetchone(
+            "SELECT org_id FROM org_memberships WHERE user_id = ?",
+            (user_id,)
+        )
+        if existing_membership:
+            raise ValueError("此帳號已屬於其他組織")
+
         now = time.time()
+
+        # 原子順序：先 INSERT membership（成功＝真正取得 UNIQUE 唯一席位），
+        # **成功後才**燒邀請（UPDATE accepted_at）。任何失敗路徑邀請自然未
+        # 被燒（accepted_at 仍 NULL，可重試）。INSERT 撞 UNIQUE（TOCTOU 被
+        # 搶 / pre-check 未見的 row）→ 轉譯明確 ValueError，routes 層既有
+        # except ValueError → 400 接手，不裸 500。
+        membership_id = str(uuid.uuid4())
+        try:
+            await self.db.execute(
+                "INSERT INTO org_memberships (id, user_id, org_id, role, status, accepted_at) "
+                "VALUES (?, ?, ?, ?, 'active', ?)",
+                (membership_id, user_id, invitation['org_id'], invitation['role'], now)
+            )
+        except Exception as e:
+            if self._is_unique_violation(e):
+                raise ValueError("此帳號已屬於其他組織") from e
+            raise
 
         await self.db.execute(
             "UPDATE invitations SET accepted_at = ? WHERE id = ?",
             (now, invitation['id'])
-        )
-
-        membership_id = str(uuid.uuid4())
-        await self.db.execute(
-            "INSERT INTO org_memberships (id, user_id, org_id, role, status, accepted_at) "
-            "VALUES (?, ?, ?, ?, 'active', ?)",
-            (membership_id, user_id, invitation['org_id'], invitation['role'], now)
         )
 
         logger.info(f"Invitation accepted by user {user_id} for org {invitation['org_id']}")

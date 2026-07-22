@@ -565,6 +565,14 @@ class DeepResearchHandler(NLWebHandler):
         #   皆 camel `knowledgeGraph`）。shape = dict {entities,relationships,metadata}（displayKnowledgeGraph 直接吃）。
         if _knowledge_graph:
             report_obj["knowledgeGraph"] = _knowledge_graph    # camel，對齊 (c) serverReport.knowledgeGraph / (b) hydrate 搬
+        # Bug 1：把 rerun 所需的精簡輸入狀態（phase 1 完成後 orchestrator 掛上）塞進
+        # research_report 內層，供 server 重啟後 rerun cache miss 時從 DB 重建。
+        # 無子集（如 rerun 自身、或非 composable 路徑）→ 不塞（不塞 None 空殼）。
+        # [verified] rerun 走 execute_rerun 不呼叫 _persist_research_report → 不覆蓋 research_report、
+        # 原內層 rerunState 天然保留（update_session 整欄覆蓋只發生在主 DR run persist 時）。
+        _rerun_subset = getattr(self, "_rerun_state_subset", None)
+        if _rerun_subset:
+            report_obj["rerunState"] = _rerun_subset
         return report_obj
 
     async def _persist_research_report(self, session_id: str, report_obj: dict, results: list) -> bool:
@@ -758,7 +766,7 @@ class DeepResearchHandler(NLWebHandler):
             logger.error(f"[AMBIGUITY] Detection failed: {e}", exc_info=True)
             return []
 
-    async def execute_rerun(self, original_query_id: str, kg_edits_json: str):
+    async def execute_rerun(self, original_query_id: str, kg_edits_json: str, session_id: str = ""):
         """Execute selective re-run with KG edits.
 
         Builds a modified query by appending KG edit instructions to the original query,
@@ -767,6 +775,8 @@ class DeepResearchHandler(NLWebHandler):
         Args:
             original_query_id: query_id from the original deep research run
             kg_edits_json: serialized JSON string of KG edits from frontend
+            session_id: 前端帶的 PG session UUID（Bug 1：記憶體 cache miss 時用它讀 DB
+                research_report 的 rerunState 重建；空字串 = 前端未載入 session，僅走記憶體 cache）
 
         Raises:
             ValueError: if no cached state for original_query_id
@@ -819,12 +829,49 @@ class DeepResearchHandler(NLWebHandler):
 
         logger.info(f"[DEEP RESEARCH RERUN] Starting rerun for query_id={original_query_id}")
 
-        from reasoning.orchestrator import DeepResearchOrchestrator
+        from reasoning.orchestrator import (
+            DeepResearchOrchestrator,
+            get_cached_research_state,
+            restore_rerun_state_from_report,
+        )
         orchestrator = DeepResearchOrchestrator(handler=self)
+
+        # Bug 1：記憶體 cache miss（server 重啟/TTL/LRU）→ 用 session UUID 讀 DB research_report 重建
+        restored_state = None
+        if get_cached_research_state(original_query_id) is None and session_id:
+            user_id = getattr(self, "user_id", "") or ""
+            org_id = getattr(self, "org_id", "") or ""
+            if user_id and org_id:
+                from core.session_service import SessionService
+                svc = SessionService()
+                row = await svc.get_session(session_id, user_id, org_id)   # owner 綁定，不跨 user
+                if row:
+                    _candidate = restore_rerun_state_from_report(row.get("research_report"))
+                    # [R3 修訂 S2-new] session↔query_id 對齊驗證：一個 session 可跑多次 DR，
+                    # research_report 只存最後一次的 rerunState。若前端 stale（KG 編輯用的 query_id
+                    # 與 session 最後一次 DR 不符）→ DB fallback 會拿錯 rerunState → 張冠李戴。
+                    # 不匹配（含舊資料缺 query_id → None ≠ original_query_id）→ 當作無有效 rerunState、
+                    # 不放行（放行會用錯研究狀態）。memory cache 路徑用 query_id 當 key 無此縫。
+                    if _candidate and _candidate.get("query_id") == original_query_id:
+                        restored_state = _candidate
+                        # cache miss 時 api.py 的 research_mode 已 fallback 成 'discovery'（讀不到
+                        # cache）——用重建 state 的真實 mode 對齊，避免 methodology_note 顯示錯 mode。
+                        if _candidate.get("mode"):
+                            self.research_mode = _candidate["mode"]
+                        logger.info(f"[RERUN] cache miss → DB fallback 重建成功 session={session_id}")
+                    elif _candidate:
+                        logger.warning(
+                            f"[RERUN] cache miss + DB rerunState 的 query_id="
+                            f"{_candidate.get('query_id')!r} 與請求 original_query_id={original_query_id!r} "
+                            f"不符（session 跑過多次 DR / 前端 stale / 舊資料缺 query_id）→ 判無效、回落"
+                            f" session={session_id}")
+                    else:
+                        logger.warning(f"[RERUN] cache miss + DB research_report 無有效 rerunState session={session_id}")
 
         results = await orchestrator.run_research_rerun(
             original_query_id=original_query_id,
             modified_query=modified_query,
+            restored_state=restored_state,
         )
 
         # Send results via existing SSE mechanism (same path as execute_deep_research)

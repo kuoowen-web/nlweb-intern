@@ -32,6 +32,14 @@ if sys.platform == "win32":
 
 # 設定
 DB_NAME = "project_index.db"
+# FTS5 tokenizer：trigram 對無空格中文（CJK）子字串可命中（unicode61 把整段中文當單一
+# token → 任何中文查詢靜默回 0，HT-1）。SQLite ≥3.34 支援 trigram（本機 3.45.1）。
+# 限制：trigram 最少需 3 字元才能匹配 → 2 字中文詞（如「推論」「排序」）FTS 回 0，
+# 由 search_files() 的 LIKE fallback 補上（見該函式）。
+FTS_TOKENIZER = "trigram"
+# schema 版本標記：tokenizer 改變 → 舊 DB 的 FTS 索引語意不同，偵測不符時自動 drop+rebuild
+# （不能靜默沿用舊 unicode61 索引 → 中文仍搜不到）。改 tokenizer 時 bump 此值。
+SCHEMA_VERSION = "2-trigram"
 # 程式碼 + 文件 + config/schema。不收資料檔（.jsonl/.log/.tsv/.db/.ndjson）避免灌爆索引。
 INCLUDE_EXTENSIONS = {
     ".py", ".yaml", ".yml", ".md", ".js", ".css", ".html",
@@ -57,8 +65,31 @@ EXCLUDE_DIRS = {
     "fixtures",
     "models",
     "temp_files_archive",
+    # 舊碼 / 爬蟲產物 / 日誌 / 實驗探針 — 會混入搜尋雜訊（非現行程式）。crawler/（爬蟲程式）保留不排
+    "legacy",
+    "crawled",
+    "logs",
+    "task0-probes",
 }
 EXCLUDE_PATTERNS = {".db", ".pyc", ".pyo"}
+# HT-7 白名單：hidden dir（. 開頭）與 EXCLUDE_DIRS 預設整批排除，但守護碼 / skill 碼
+# 是 CLAUDE.md 規定用 indexer 搜的目標（.claude/hooks 的 check_h12 等），不納入 = 搜尋盲區。
+# 這些相對路徑前綴（相對專案根，正斜線）即使命中 hidden/exclude 規則也強制納入索引。
+# 只納守護/skill 程式碼本身，排除其下的 state/logs/worktrees/probe-dumps 等執行期垃圾。
+INCLUDE_PATH_PREFIXES = (
+    ".claude/hooks",
+    ".claude/scripts",
+    ".claude/skills",
+    ".agents/skills",
+)
+# 白名單目錄底下仍要排除的執行期產物子路徑（相對根，正斜線）。
+INCLUDE_PATH_EXCLUDE_SUBSTRINGS = (
+    ".claude/hooks/state",
+    ".claude/hooks/logs",
+    ".claude/hooks/__pycache__",
+    "worktrees",
+    "probe",
+)
 # 單檔大小上限：config/schema/程式碼都遠小於此；擋住任何漏網的大型資料/dump 檔
 MAX_FILE_SIZE = 256 * 1024  # 256 KB
 
@@ -72,6 +103,73 @@ def get_db_path() -> Path:
 def get_project_root() -> Path:
     """取得專案根目錄"""
     return Path(__file__).parent.parent
+
+
+def _fts_schema_stale(cursor: sqlite3.Cursor) -> bool:
+    """偵測既有 FTS 索引是否與目前 SCHEMA_VERSION 不符（tokenizer 變更）。
+
+    存於 meta 表的 schema_version 與常數比對；表不存在 / 值不符 → 視為 stale，
+    需 drop+rebuild（HT-1：不能靜默沿用舊 unicode61 索引，否則中文仍搜不到）。
+    """
+    cursor.execute("""
+        SELECT name FROM sqlite_master WHERE type='table' AND name='files_fts'
+    """)
+    if not cursor.fetchone():
+        return False  # 尚未建 FTS → 走全新建立路徑，非 stale
+    cursor.execute("""
+        SELECT name FROM sqlite_master WHERE type='table' AND name='index_meta'
+    """)
+    if not cursor.fetchone():
+        return True  # 有舊 FTS 但無版本標記 → 舊 schema，需重建
+    cursor.execute("SELECT value FROM index_meta WHERE key='schema_version'")
+    row = cursor.fetchone()
+    return not (row and row[0] == SCHEMA_VERSION)
+
+
+def _drop_fts_objects(cursor: sqlite3.Cursor) -> None:
+    """移除 FTS 虛擬表與同步觸發器（rebuild 前清空舊 schema）。"""
+    for trig in ("files_ai", "files_ad", "files_au"):
+        cursor.execute(f"DROP TRIGGER IF EXISTS {trig}")
+    cursor.execute("DROP TABLE IF EXISTS files_fts")
+
+
+def _create_fts_objects(cursor: sqlite3.Cursor) -> None:
+    """建立 FTS5 虛擬表（指定 tokenizer）+ 同步觸發器，並從 files 主表回填。"""
+    cursor.execute(f"""
+        CREATE VIRTUAL TABLE files_fts USING fts5(
+            path,
+            content,
+            content='files',
+            content_rowid='rowid',
+            tokenize='{FTS_TOKENIZER}'
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
+            INSERT INTO files_fts(rowid, path, content)
+            VALUES (new.rowid, new.path, new.content);
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
+            INSERT INTO files_fts(files_fts, rowid, path, content)
+            VALUES ('delete', old.rowid, old.path, old.content);
+        END
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
+            INSERT INTO files_fts(files_fts, rowid, path, content)
+            VALUES ('delete', old.rowid, old.path, old.content);
+            INSERT INTO files_fts(rowid, path, content)
+            VALUES (new.rowid, new.path, new.content);
+        END
+    """)
+    # 從既有 files 主表回填 FTS（rebuild 情境；全新 DB 時 files 為空 = no-op）
+    cursor.execute("""
+        INSERT INTO files_fts(rowid, path, content)
+        SELECT rowid, path, content FROM files
+    """)
 
 
 def init_database(conn: sqlite3.Connection) -> None:
@@ -89,52 +187,72 @@ def init_database(conn: sqlite3.Connection) -> None:
         )
     """)
 
-    # 檢查 FTS5 虛擬表是否存在
+    # meta 表：記 schema_version，供 tokenizer 變更偵測（HT-1）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS index_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+
+    # tokenizer schema 過時（舊 unicode61 索引）→ drop 後以新 tokenizer 重建 + 回填。
+    if _fts_schema_stale(cursor):
+        print(
+            f"[indexer] 偵測到 FTS 索引 schema 過時（tokenizer 非 {FTS_TOKENIZER}），"
+            "自動重建索引以支援中文搜尋…"
+        )
+        _drop_fts_objects(cursor)
+
+    # 建立 FTS5 虛擬表（若不存在）
     cursor.execute("""
         SELECT name FROM sqlite_master
         WHERE type='table' AND name='files_fts'
     """)
-
     if not cursor.fetchone():
-        # 建立 FTS5 虛擬表用於全文搜尋
-        cursor.execute("""
-            CREATE VIRTUAL TABLE files_fts USING fts5(
-                path,
-                content,
-                content='files',
-                content_rowid='rowid'
-            )
-        """)
+        _create_fts_objects(cursor)
 
-        # 建立觸發器以同步 FTS 索引
-        cursor.execute("""
-            CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-                INSERT INTO files_fts(rowid, path, content)
-                VALUES (new.rowid, new.path, new.content);
-            END
-        """)
-
-        cursor.execute("""
-            CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-                INSERT INTO files_fts(files_fts, rowid, path, content)
-                VALUES ('delete', old.rowid, old.path, old.content);
-            END
-        """)
-
-        cursor.execute("""
-            CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
-                INSERT INTO files_fts(files_fts, rowid, path, content)
-                VALUES ('delete', old.rowid, old.path, old.content);
-                INSERT INTO files_fts(rowid, path, content)
-                VALUES (new.rowid, new.path, new.content);
-            END
-        """)
+    # 記錄目前 schema 版本
+    cursor.execute(
+        "INSERT OR REPLACE INTO index_meta(key, value) VALUES ('schema_version', ?)",
+        (SCHEMA_VERSION,),
+    )
 
     conn.commit()
 
 
-def should_exclude_dir(dir_name: str) -> bool:
-    """檢查是否應該排除此目錄"""
+def _rel_posix(path: Path, root_dir: Path) -> str:
+    """相對專案根的正斜線路徑（白名單前綴比對用）。"""
+    return os.path.relpath(path, root_dir).replace("\\", "/")
+
+
+def _dir_on_whitelist_path(rel_path: str) -> bool:
+    """rel_path（目錄，正斜線）是否在通往白名單守護/skill 碼的路徑上（HT-7）。
+
+    True 條件（且非執行期垃圾子路徑）：
+      - rel_path 是白名單前綴的祖先（如 .claude 是 .claude/hooks 的祖先）→ 需允許遞迴進去
+      - rel_path 等於或位於白名單前綴之下（如 .claude/hooks、.claude/hooks/state 排除）
+    """
+    if any(bad in rel_path for bad in INCLUDE_PATH_EXCLUDE_SUBSTRINGS):
+        return False
+    for pre in INCLUDE_PATH_PREFIXES:
+        # 位於白名單之內，或正好是白名單目錄本身
+        if rel_path == pre or rel_path.startswith(pre + "/"):
+            return True
+        # 是白名單前綴的祖先目錄 → 允許 os.walk 遞迴穿越
+        if pre == rel_path or pre.startswith(rel_path + "/"):
+            return True
+    return False
+
+
+def should_exclude_dir(dir_name: str, rel_path: str | None = None) -> bool:
+    """檢查是否應該排除此目錄。
+
+    rel_path（相對根、正斜線）若在通往 HT-7 白名單（守護/skill 碼）的路徑上則不排除，
+    即使目錄名命中 hidden / EXCLUDE_DIRS 規則。
+    """
+    # HT-7：白名單路徑（.claude/hooks 等）強制納入，覆蓋 hidden / EXCLUDE 排除
+    if rel_path is not None and _dir_on_whitelist_path(rel_path):
+        return False
     # 排除隱藏資料夾（以 . 開頭）
     if dir_name.startswith("."):
         return True
@@ -162,16 +280,45 @@ def should_include_file(file_path: Path) -> bool:
     return True
 
 
+def _file_in_include_whitelist(rel_path: str) -> bool:
+    """檔案 rel_path（正斜線）是否真正落在白名單前綴內（非僅祖先目錄）。
+
+    用於放行 hidden/exclude 目錄下的守護/skill 碼；祖先目錄（如 .claude 直掛的
+    settings.json）不因遞迴穿越而被納入。
+    """
+    if any(bad in rel_path for bad in INCLUDE_PATH_EXCLUDE_SUBSTRINGS):
+        return False
+    return any(rel_path.startswith(pre + "/") for pre in INCLUDE_PATH_PREFIXES)
+
+
+def _rel_hidden_or_excluded(rel_path: str) -> bool:
+    """rel_path 是否有任一路徑段命中 hidden（. 開頭）或 EXCLUDE_DIRS（一般排除）。"""
+    for seg in rel_path.split("/")[:-1]:  # 只看目錄段，不含檔名
+        if seg.startswith(".") or seg in EXCLUDE_DIRS:
+            return True
+    return False
+
+
 def scan_files(root_dir: Path) -> Generator[Path, None, None]:
     """遞迴掃描目錄，產生符合條件的檔案路徑"""
     for dirpath, dirnames, filenames in os.walk(root_dir):
         # 過濾要排除的目錄（修改 dirnames 會影響 os.walk 的遞迴）
-        dirnames[:] = [d for d in dirnames if not should_exclude_dir(d)]
+        # 傳 rel_path 讓白名單（HT-7）能允許遞迴穿越 .claude 進入 hooks/scripts
+        dirnames[:] = [
+            d for d in dirnames
+            if not should_exclude_dir(d, _rel_posix(Path(dirpath) / d, root_dir))
+        ]
 
         for filename in filenames:
             file_path = Path(dirpath) / filename
-            if should_include_file(file_path):
-                yield file_path
+            if not should_include_file(file_path):
+                continue
+            rel = _rel_posix(file_path, root_dir)
+            # 檔案在被穿越的 hidden/exclude 目錄下（如 .claude/*）時，
+            # 僅真正落在白名單前綴內的守護/skill 碼才納入（祖先直掛檔不納）。
+            if _rel_hidden_or_excluded(rel) and not _file_in_include_whitelist(rel):
+                continue
+            yield file_path
 
 
 def read_file_content(file_path: Path) -> Optional[str]:
@@ -216,8 +363,10 @@ def index_files(conn: sqlite3.Connection, root_dir: Path) -> dict:
             )
             row = cursor.fetchone()
 
-            if row and row[0] >= last_modified:
-                # 檔案沒有變動，跳過
+            if row and row[0] == last_modified:
+                # mtime 完全相同才視為無變動而跳過（HT-9）。
+                # 原用 >=：mtime 回退（git restore 舊 blob / tar·rsync -a / os.utime）
+                # 時 DB 的 mtime 大於檔案 mtime → 靜默 skip 不重索引，新內容搜不到。
                 stats["skipped"] += 1
                 continue
 
@@ -243,20 +392,61 @@ def index_files(conn: sqlite3.Connection, root_dir: Path) -> dict:
             stats["errors"] += 1
 
     # 清理已刪除的檔案記錄
-    cursor.execute("SELECT path FROM files")
-    db_files = {row[0] for row in cursor.fetchall()}
+    # HT-13：delete-loop + commit 原無 try/except（per-file 迴圈有 = 不對稱）。
+    # DB 唯讀/鎖/滿時 raw traceback 崩、留半更新索引。包起來 → 有聲降級、索引不半殘。
+    try:
+        cursor.execute("SELECT path FROM files")
+        db_files = {row[0] for row in cursor.fetchall()}
 
-    deleted_files = db_files - current_files
-    for deleted_path in deleted_files:
-        cursor.execute("DELETE FROM files WHERE path = ?", (deleted_path,))
-        stats["deleted"] += 1
+        deleted_files = db_files - current_files
+        for deleted_path in deleted_files:
+            cursor.execute("DELETE FROM files WHERE path = ?", (deleted_path,))
+            stats["deleted"] += 1
 
-    conn.commit()
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"錯誤: 清理刪除記錄 / commit 失敗（索引可能未完整寫入）: {e}")
+        stats["errors"] += 1
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
     return stats
 
 
+def _like_snippet(content: str, query: str, radius: int = 40) -> str:
+    """LIKE fallback 用：擷取命中位置周邊片段，命中詞用 >>><<< 標示（對齊 FTS snippet 風格）。"""
+    idx = content.lower().find(query.lower())
+    if idx < 0:
+        return ""
+    start = max(0, idx - radius)
+    end = min(len(content), idx + len(query) + radius)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(content) else ""
+    seg = content[start:idx] + ">>>" + content[idx:idx + len(query)] + "<<<" + content[idx + len(query):end]
+    return prefix + seg + suffix
+
+
+def _search_like(cursor: sqlite3.Cursor, query: str, limit: int) -> list:
+    """LIKE 子字串搜尋（HT-1 fallback）：trigram 對 <3 字元查詢（含 2 字中文詞）無法匹配，
+    改掃 files.content。ESCAPE 處理 % _ 萬用字元字面值。"""
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    like_pattern = f"%{escaped}%"
+    cursor.execute("""
+        SELECT path, extension, size, content
+        FROM files
+        WHERE content LIKE ? ESCAPE '\\'
+        ORDER BY path
+        LIMIT ?
+    """, (like_pattern, limit))
+    results = []
+    for path, ext, size, content in cursor.fetchall():
+        results.append((path, ext, size, _like_snippet(content or "", query)))
+    return results
+
+
 def search_files(conn: sqlite3.Connection, query: str, limit: int = 20) -> list:
-    """使用 FTS5 搜尋檔案"""
+    """使用 FTS5 搜尋檔案；trigram 無法匹配的短查詢 / FTS 零結果時 LIKE fallback（HT-1）。"""
     cursor = conn.cursor()
 
     # 將整個查詢詞包成 FTS5 phrase：連字號 / 點號等字元否則會被當運算子（如 - = NOT）導致 syntax error。
@@ -276,8 +466,14 @@ def search_files(conn: sqlite3.Connection, query: str, limit: int = 20) -> list:
         ORDER BY rank
         LIMIT ?
     """, (fts_query, limit))
+    results = cursor.fetchall()
 
-    return cursor.fetchall()
+    # HT-1 fallback：trigram tokenizer 最少需 3 字元才能匹配 → 2 字中文詞（推論/排序）等
+    # 短查詢 FTS 必回 0。查詢核心 <3 字元、或 FTS 意外零結果時，改走 LIKE 子字串搜尋。
+    if not results and len(query.strip()) < 3:
+        results = _search_like(cursor, query.strip(), limit)
+
+    return results
 
 
 def get_statistics(conn: sqlite3.Connection) -> dict:
@@ -382,6 +578,7 @@ def main():
     conn = sqlite3.connect(db_path)
     init_database(conn)
 
+    had_index_errors = False
     try:
         if args.index:
             print(f"正在索引專案: {project_root}")
@@ -390,13 +587,19 @@ def main():
 
             stats = index_files(conn, project_root)
 
-            print(f"索引完成!")
+            # R1 裁決 7（HT-13 尾巴）：有錯誤時不可印「索引完成!」+ exit 0 假綠 ——
+            # 改印警示總結 + 非零退出（呼叫端／agent 能看見索引不完整）。
+            if stats['errors']:
+                print("索引結束（有錯誤 — 索引可能不完整！）")
+            else:
+                print("索引完成!")
             print(f"  新增: {stats['added']} 個檔案")
             print(f"  更新: {stats['updated']} 個檔案")
             print(f"  跳過: {stats['skipped']} 個檔案 (無變動)")
             print(f"  刪除: {stats['deleted']} 個記錄 (檔案已移除)")
             if stats['errors']:
                 print(f"  錯誤: {stats['errors']} 個檔案")
+                had_index_errors = True
 
         if args.search:
             results = search_files(conn, args.search, args.limit)
@@ -444,6 +647,10 @@ def main():
 
     finally:
         conn.close()
+
+    if had_index_errors:
+        print("警示: 本次索引有錯誤（見上）— 非零退出，索引可能不完整。")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

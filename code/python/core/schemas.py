@@ -28,41 +28,30 @@ class MessageStatus(str, Enum):
 
 class MessageType(str, Enum):
     """Type/purpose of the message content."""
+    # G8 (SSE typed pipeline Task 2): 13 enum-only dead members removed
+    # (STATISTICS/CHART/COMPARISON/SUBSTITUTION/ENSEMBLE/ITEM_DETAILS/INTERMEDIATE/
+    #  SITE_QUERYING/SITE_COMPLETE/SITE_ERROR/MULTI_SITE_COMPLETE/NO_RESULTS/
+    #  CONVERSATION_START) — all 0 typed refs, handler files deleted, dead factory.
+    # Message.from_dict() tolerates unknown message_type (falls back to raw string),
+    # so historical DB/session strings still deserialize.
     # User interactions
     QUERY = "query"  # Also covers USER_INPUT
-    
+
     # Results and responses
     RESULT = "result"
     NLWS = "nlws"  # Generated answers (also covers NLW_RESPONSE)
-    
+
     # Status and progress
     STATUS = "status"
-    INTERMEDIATE = "intermediate_message"
-    
+
     # Errors
     ERROR = "error"
-    
-    # Specific content types
-    ITEM_DETAILS = "item_details"
-    STATISTICS = "statistics_result"
-    CHART = "chart_result"
-    COMPARISON = "compare_items"
-    SUBSTITUTION = "substitution_suggestions"
-    ENSEMBLE = "ensemble_result"
-    
-    # Multi-site operations
-    SITE_QUERYING = "site_querying"
-    SITE_COMPLETE = "site_complete"
-    SITE_ERROR = "site_error"
-    MULTI_SITE_COMPLETE = "multi_site_complete"
-    
+
     # System messages
-    NO_RESULTS = "no_results"
     COMPLETE = "complete"
     TOOL_SELECTION = "tool_selection"
-    
-    # Chat-specific events
-    CONVERSATION_START = "conversation_start"
+
+    # Chat-specific events (presence — not in this gate's scope)
     USER_JOINING = "user_joining"
     USER_LEAVING = "user_leaving"
     JOIN = "join"
@@ -289,37 +278,11 @@ def create_assistant_answer(answer: str,
     return message
 
 
-def create_status_message(status_text: str, 
-                         handler=None,
-                         sender_type: SenderType = SenderType.SYSTEM,
-                         send: bool = True) -> Message:
-    """
-    Create a status/intermediate message.
-    
-    Args:
-        status_text: The status message text
-        handler: Handler instance (provides conversation_id and send capability)
-        sender_type: Who is sending the status (default: SYSTEM)
-        send: If True and handler provided, automatically send the message
-    
-    Returns:
-        The created Message object
-    """
-    message = Message(
-        sender_type=sender_type,
-        message_type=MessageType.INTERMEDIATE,
-        content=status_text,
-        conversation_id=handler.conversation_id if handler and hasattr(handler, 'conversation_id') else None
-    )
-    
-    if send and handler:
-        import asyncio
-        asyncio.create_task(handler.send_message(message.to_dict()))
-    
-    return message
+# create_status_message removed (G8, SSE typed pipeline Task 2):
+# dead factory — used MessageType.INTERMEDIATE (now removed), 0 live callers.
 
 
-def create_error_message(error_text: str, 
+def create_error_message(error_text: str,
                         handler=None,
                         metadata: Optional[Dict[str, Any]] = None,
                         send: bool = True) -> Message:

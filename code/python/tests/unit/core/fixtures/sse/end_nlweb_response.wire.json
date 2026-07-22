@@ -1,0 +1,6 @@
+{
+  "message_type": "end-nlweb-response",
+  "conversation_id": "conv-abc",
+  "timestamp": 1721000000000,
+  "user_id": "user-uuid-x"
+}

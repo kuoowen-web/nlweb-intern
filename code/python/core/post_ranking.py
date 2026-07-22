@@ -48,13 +48,22 @@ class SummarizeResults(PromptRunner):
         response = await self.run_prompt(self.SUMMARIZE_RESULTS_PROMPT_NAME, timeout=20, max_length=1024)
         if (not response):
             return
-        self.handler.summary = response["summary"]
+        # CORE-4 (full-scan 批7)：不裸取 response["summary"]。缺 key → 無摘要可送，
+        # 早退不炸（比照上方 empty-response early-return 語意），並 log。
+        summary = response.get("summary")
+        if not summary:
+            logger.warning("[SUMMARIZE] response missing 'summary'; skipping summary emit")
+            return
+        self.handler.summary = summary
+        # msg_type discriminator stays here (caller-side); send goes through
+        # send_sse(path="full") -> message_sender.send_message.
+        from core.sse.send import send_sse  # local import: avoid load cycle
         msg_type = "summary" if self.handler.generate_mode == 'unified' else "result"
         message = {"message_type": msg_type, "@type": "Summary", "content": self.handler.summary}
         if self.handler.generate_mode == 'unified':
             # Await for ordering guarantee in unified mode
-            await self.handler.send_message(message)
+            await send_sse(self.handler, message, path="full")
         else:
-            asyncio.create_task(self.handler.send_message(message))
+            asyncio.create_task(send_sse(self.handler, message, path="full"))
         # Use proper state update
         await self.handler.state.precheck_step_done("post_ranking")

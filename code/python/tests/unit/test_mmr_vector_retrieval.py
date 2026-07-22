@@ -37,7 +37,7 @@ from unittest.mock import patch, MagicMock
 import asyncio
 
 # Add code/python to sys.path so we can import the module under test
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from retrieval_providers.postgres_client import PgVectorClient
 

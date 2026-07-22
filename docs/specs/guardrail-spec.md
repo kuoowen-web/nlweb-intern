@@ -109,8 +109,8 @@ Guardrails 的目標：
 | Critic Agent | `reasoning/agents/critic.py` | 已上線 | T5 部分 | 品質/準確/偏見審查，可 REJECT 要求重做 |
 | Error Handling | `core/error_handling.py` | 已上線 | T3 部分 | LLM timeout/rate limit 偵測，優雅降級 |
 | CORS | `webserver/middleware/cors.py` | 已上線 | 基礎設施 | 跨域請求控制 |
-| Source Tiering | `indexing/source_manager.py` | 已上線 | T4 部分 | 來源分級（Tier 1-4：AUTHORITATIVE/VERIFIED/STANDARD/AGGREGATOR），白名單制。（此為 **indexing 層** 分塊/來源信譽用途，仍存在；**非** 2026-06 廢除的 **reasoning 層** 權威分級 Tier 1-5——後者 config 已清、`SourceTierFilter` 降為 no-op，見 `reasoning-spec.md` §1/§9） |
-| Quality Gate | `indexing/quality_gate.py` | 已上線 | T4 部分 | 長度、HTML 殘留、中文比例驗證 |
+| Source Tiering | `indexing/source_manager.py` | 🪦 已隨路徑 A 刪除批移除 2026-07-16（回溯 `1d150e49`） | T4 部分 | 原 indexing 層 Tier 1-4 機制（AUTHORITATIVE/VERIFIED/STANDARD/AGGREGATOR，白名單制）僅存 git 史；**非** 2026-06 廢除的 **reasoning 層** 權威分級 Tier 1-5——後者 config 已清、`SourceTierFilter` 降為 no-op，見 `reasoning-spec.md` §1/§9 |
+| Quality Gate | `indexing/quality_gate.py` | 🪦 完整版已隨路徑 A 移除 2026-07-16（回溯 `1d150e49`） | T4 部分 | **prod 現行為 cloud_embed.py 行內簡化版（僅 body 長度 + 中文比例，無標題/HTML/script 檢查）**——見 backlog 2026-07-16-d。原「已上線」為過度宣稱：完整檢查只在桌機 A 路，prod 從來只有行內簡化版 |
 | Parameterized Query | `postgres_client.py`, `auth_db.py` | 已上線 | T5.5 | 所有 DB 操作使用 `%s` placeholder，防 SQL injection |
 
 ### 缺口

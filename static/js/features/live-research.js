@@ -69,13 +69,17 @@
 //   saveCurrentSession invoked via window bridge (KEEP-in-place until commit 25 sweep).
 
 import { injectStateSyncBackref } from '../core/state-sync.js';
-import { setProcessingState, pushConversationHistory, setCurrentConversationId, escapeHTML } from './search.js?v=20260714a';
+import { setProcessingState, pushConversationHistory, setCurrentConversationId, escapeHTML } from './search.js?v=20260717a';
 import { getSelectedSitesParam } from './source-filters.js';
 import { markSessionDirty } from './session-manager.js';
 import { getCurrentSessionId } from '../utils/analytics.js';
 import { classifyLRResumeState } from './lr-resume-classify.js';
+import { lrBackNavClearedItems, LR_NAV_STAGE_LABELS } from './lr-nav-confirm.js';
 import { buildCitationHref, escapeHtmlAttr } from './text-fragment.js';
-import { serializeLRChatRoot, lrStagesInSnapshot, lrSnapshotForStage, shouldSaveLRSnapshot, snapshotHasReplayableEntries, _isReplayRealContent, LR_CHECKPOINT_CANNED_STRINGS } from './lr-snapshot.js';
+import { classifyEnvelope } from './sse-dispatch.js';
+import { serializeLRChatRoot, lrStagesInSnapshot, lrSnapshotForStage, shouldSaveLRSnapshot, snapshotHasReplayableEntries, _isReplayRealContent, LR_CHECKPOINT_CANNED_STRINGS, stripLRContentDataset } from './lr-snapshot.js';
+// plan: lr-snapshot-timing-fallback-render — 回顧 fallback pure HTML builder（node --test 直測）
+import { lrReviewBannerHTML, LR_REVIEW_FALLBACK_BANNER_TEXT, lrContextMapHTML, lrStyleFeaturesHTML } from './lr-review-render.js';
 import { getCurrentLoadedSessionId } from './sessions-list.js';
 import { classifyReconnectFetchOutcome, lrReconnectAuthCopy } from './lr-reconnect-auth.js';
 // Re-export pure snapshot helpers (unit-tested in lr-snapshot.js) for any importers of this module.
@@ -157,10 +161,14 @@ let _lrReconnectTimer = null;
 // 由 _doLRReconnect 實作；wake 流程只透過 _debouncedLRReconnect 進入，保證 read-only。
 
 function showLRConnectionInterrupted() {
-    // 非 error 樣式的 system bubble：明確告知「研究仍在背景跑」，不可顯示終止性 error。
+    // plan: lr-disconnect-midstage-persist — 誠實文案：方向 B 下 task 會有序收場（非
+    // 「仍在背景跑完」），且不承諾「自動接回」（read-only reconnect + 離線防呆會停）。
+    // 只承諾「進度已保存、恢復後可從這裡繼續」——與 reconnect 後 restoreLRCheckpointFromState
+    // 的 offline_capped / in_progress resume-notice UX 語義一致（都是「手動繼續」）。
+    // 非 error 樣式的 system bubble（後端沒崩，是連線中斷）。
     addLRChatMessage(
         'system',
-        '<em>連線中斷，研究仍在背景進行中，恢復連線後會自動接回。</em>'
+        '<em>連線中斷。目前的研究進度已保存，恢復連線後可以從中斷處繼續（回到頁面時會自動載入已保存的進度）。</em>'
     );
 }
 
@@ -556,6 +564,15 @@ export function resetLiveResearchUI() {
     if (lrKGRestoreBar) lrKGRestoreBar.style.display = 'none';
 }
 
+// U2（plan: lr-ux-u1u2u3）：.lr-chat 成為 scroll container 後的黏底判斷。
+// append 前呼叫（append 後距底必然變大，量早了才準）：使用者已上捲離底 >80px 時
+// 不跟捲，避免上捲閱讀被逐條強制拉底；內容未滿容器（無 overflow）時
+// scrollHeight−clientHeight≈0 → 恆判黏底（維持既有體感）。
+// replay 載入路徑（_appendReplayedBubbles）刻意不走此判斷 — 載入即跳最新是正確語意。
+function _lrChatIsNearBottom(chat) {
+    return (chat.scrollHeight - chat.scrollTop - chat.clientHeight) < 80;
+}
+
 // G-M1 (2026-05-29): 加 options.dataset 參數，讓呼叫端注入 data-* attributes，
 // 消除 SSE live_research_section handler 內 inline 重複的 avatar/wrapper DOM 結構。
 // 呼叫端可傳 { dataset: { lrSectionIndex: '0' } }，wrapper.dataset 會被一次性 assign。
@@ -603,8 +620,9 @@ export function addLRChatMessage(type, text, options = {}) {
             <div class="lr-msg-bubble">${bubbleInner}</div>`;
     }
 
+    const stick = _lrChatIsNearBottom(chat);   // U2：append 前量
     chat.appendChild(wrapper);
-    chat.scrollTop = chat.scrollHeight;
+    if (stick) chat.scrollTop = chat.scrollHeight;
 }
 
 // ── LR dialog snapshot (DOM serialize at save time + replay state) ──────────
@@ -724,7 +742,9 @@ function _appendReplayedBubbles(bubbles) {
             ? window.DOMPurify.sanitize(b.html || '')
             : (b.html || '');
         const wrapper = document.createElement('div');
-        wrapper.className = `lr-chat-message ${type}`;
+        // U2：lr-replayed = 歷史訊息免進場動畫。加在第三段 class — serializeLRChatRoot
+        // 以 cls[1] 取 type（lr-snapshot.js:33-34），第三段不影響 type 判定與 round-trip。
+        wrapper.className = `lr-chat-message ${type} lr-replayed`;
         // ── R8 BLOCKER 1 FIX — STRIP the inherited `lrContent` from the entry's dataset
         // BEFORE copying it into the new wrapper, so the type/content-aware judge below is the
         // SOLE authoritative source of data-lr-content. serializeLRChatRoot pushes each entry
@@ -737,8 +757,7 @@ function _appendReplayedBubbles(bubbles) {
         // dataset carries lrContent:"1" would replay WITH data-lr-content, ride past the
         // [data-lr-content] serialize filter, and SURVIVE = self-heal defeated. Deleting it here
         // makes the type/content judge the only authority → legacy garbage truly heals.
-        const replayDataset = { ...(b.dataset || {}) };
-        delete replayDataset.lrContent;
+        const replayDataset = stripLRContentDataset(b.dataset);   // U1（AR R1 SF4）：strip 收斂共用 helper（lr-snapshot.js），行為不變
         Object.entries(replayDataset).forEach(([k, v]) => { wrapper.dataset[k] = v; });
         // CANDIDATE A + R7/R8 BLOCKER FIX — re-apply the SAME positive allow-list to replayed
         // bubbles, keyed off the serialized `type` AND (for checkpoint) the entry html. DO NOT
@@ -764,6 +783,7 @@ function _appendReplayedBubbles(bubbles) {
         n++;
     }
     chat.appendChild(frag);              // single DOM mutation
+    // U2：replay 載入維持無條件拉底（載入即跳最新）；黏底 guard 只用於逐條 append 路徑。
     chat.scrollTop = chat.scrollHeight;  // single scroll (not per-bubble)
     return n;
 }
@@ -779,8 +799,10 @@ function _appendReplayedBubbles(bubbles) {
  * D-7: `triggeringLRSid` is captured at stream start (Step 1b) and passed in,
  * so a stale background stream (old run after a session switch) skips correctly.
  *
- * D-6: export passes {immediate:true} (bypass 2s debounce). NOT a sync flush —
- * returns the underlying promise so the export caller can await dispatch.
+ * D-6: export AND checkpoint pass {immediate:true} (bypass 2s debounce; checkpoint
+ * added by plan lr-snapshot-timing-fallback-render — closes the reload-inside-
+ * debounce-window pending-PUT loss gap). NOT a sync flush — returns the underlying
+ * promise so callers can await PUT settle.
  *
  * @param {string} reason  'checkpoint' | 'export'
  * @param {{immediate?: boolean, triggeringLRSid?: string|null}} [opts]
@@ -823,8 +845,9 @@ export function showLRTypingIndicator() {
         <span class="lr-typing-dot"></span>
         <span class="lr-typing-dot"></span>
         <span id="lrTypingText">${DOMPurify.sanitize(String(text))}</span>`;
+    const stick = _lrChatIsNearBottom(chat);   // U2：append 前量
     chat.appendChild(ind);
-    chat.scrollTop = chat.scrollHeight;
+    if (stick) chat.scrollTop = chat.scrollHeight;
 }
 
 export function hideLRTypingIndicator() {
@@ -1087,6 +1110,85 @@ export function showLRReadonlyModal() {
 }
 
 /**
+ * U3（plan: lr-ux-u1u2u3）：「← 退回上一階段」confirm modal。
+ * back_one 是四個破壞性動作中唯一無 consent gate 者（restart / recollect / export
+ * 皆有後端 gate + fail-loud）；本 modal 補前端知情 gate（案 a，D-1）。
+ * 警告清單以 stage_state.py reset_to_stage 真值表為準（lr-nav-confirm.js 鏡像）。
+ * 復用 showLRReadonlyModal 的 lr-modal-* pattern；重開時 body 依當前 stage 重建
+ * （S5-7 紀律：跨 stage 內容不可殘留）。刻意不做 overlay 點擊關閉（與 readonly
+ * modal 同慣例，避免誤觸歧義；取消按鈕是唯一取消入口）。
+ */
+export function showLRBackNavConfirmModal() {
+    // D-11：legacy 唯讀 session 讓位 — lockLRUIForLegacySession 已在同按鈕加掛
+    // showLRReadonlyModal listener（stopPropagation 不阻同元素 listener，兩個都會 fire），
+    // 不讓位會兩個 modal 疊開。
+    if (_lrSessionIsLegacy) return;
+
+    const stage = _currentLRStage;
+    let bodyHtml;
+    if (!(stage >= 2 && stage <= 5)) {
+        // 防禦（AR R1 修訂：Codex + in-house 獨立同抓）：navAllowed gate
+        // （showLRCheckpoint :1201-1205，stage 2-5）外本 modal 不該被觸發；此時
+        // 前端 stage 追蹤可能失準，但後端真 state 可能仍在 2-5 → 不可降級成
+        // 「無確認直送」（那正是 U3 要修的知情缺口在例外路徑重現）。改開
+        // 通用文案 confirm（固定句、無動態清單）——同樣不卡死使用者，
+        // 但保住 consent gate。
+        console.warn('[LR] back-nav confirm at unexpected stage', stage, '— generic confirm fallback');
+        bodyHtml = `
+        將退回上一階段。部分已產生的內容（章節草稿、大綱、文筆設定等，視目前階段而定）
+        會被清除；已蒐集的資料（證據池）與研究主題架構<strong>會保留</strong>。<br>
+        退回本身不會重新蒐集或改寫；之後往前推進時，讀豹會依你的新決定重新產生上述內容。`;
+    } else {
+        const target = stage - 1;
+        const items = lrBackNavClearedItems(stage);
+        // 文案語意紅線（scratch 檔拍板）：back_one 純導航不燒 BAB —— 絕不可寫成
+        // 「按下去就重新蒐集/燒運算」；重算發生在之後 forward 重跑。
+        // 「（若已產生）」：非線性歷史（連退，如 5→4→3）下前次退回已清的項目
+        // 仍會列出（純函式只吃 currentStage 的固有限制，方向=只多列不漏列，
+        // AR R1 拍板此措辭吸收，特性記入 §10）。
+        bodyHtml = `
+        將從「${LR_NAV_STAGE_LABELS[stage]}」退回「${LR_NAV_STAGE_LABELS[target]}」。<br>
+        退回會<strong>清除</strong>以下內容（若已產生）：
+        <ul class="lr-modal-list">${items.map(i => `<li>${i}</li>`).join('')}</ul>
+        已蒐集的資料（證據池）與研究主題架構<strong>會保留</strong>。<br>
+        退回本身不會重新蒐集或改寫；之後往前推進時，讀豹會依你的新決定重新產生上述內容。`;
+    }
+
+    let modal = document.getElementById('lrBackNavConfirmModal');
+    if (modal) {
+        // 重開：body 依當前 stage 重建（stage 已變，不可殘留上次清單）
+        const bodyEl = modal.querySelector('.lr-modal-body');
+        if (bodyEl) bodyEl.innerHTML = bodyHtml;
+        modal.style.display = 'flex';
+        return;
+    }
+
+    modal = document.createElement('div');
+    modal.id = 'lrBackNavConfirmModal';
+    modal.className = 'lr-modal-overlay';
+    modal.innerHTML = `
+        <div class="lr-modal-box">
+            <div class="lr-modal-title">退回上一階段？</div>
+            <div class="lr-modal-body">${bodyHtml}</div>
+            <div class="lr-modal-actions">
+                <button class="lr-btn-primary" id="lrBackNavConfirmBtn">確認退回</button>
+                <button class="lr-btn-cancel" id="lrBackNavCancelBtn">取消</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+
+    document.getElementById('lrBackNavConfirmBtn')?.addEventListener('click', () => {
+        modal.style.display = 'none';
+        // 語意化系統訊息從 news-search.js handler 移入此處：取消路徑 chat 零殘留。
+        addLRChatMessage('system', '（退回上一階段）');
+        continueLiveResearch('', false, 'back_one');
+    });
+    document.getElementById('lrBackNavCancelBtn')?.addEventListener('click', () => {
+        modal.style.display = 'none';
+    });
+}
+
+/**
  * renderEvidenceList — 把 evidence_list payload 渲染為可摺疊 HTML。
  *
  * P0 #5: 設計邊界已 CEO 拍板：
@@ -1320,16 +1422,33 @@ function renderLRStageDialog(stageNum, snapshot) {
     const container = getLRReviewContainer(true);     // 取 #lrStageReview、設可見、清空
     if (!container) return;
     const entries = lrSnapshotForStage(snapshot, stageNum);
+    // U1 D-6（AR R1 修訂：banner 提前，空狀態路徑也要有唯讀辨識——Codex SF3）：
+    // 唯讀語意 banner 與「← 退回上一階段」（真 mutation）做認知區分。
+    // banner 無 data-lr-content → 即使未來容器搬家也不進 serialize。
+    // plan lr-snapshot-timing-fallback-render：banner 建構抽共用 pure helper
+    // （lr-review-render.js），fallback 路（loadLRStageReview）注入同款。
     if (!entries.length) {
-        container.innerHTML = `<div class="lr-review-empty">此階段無對話紀錄。</div>`;  // 不 silent
+        // U1 D-5：誠實空狀態 — 進行中 session 剛跑過的 stage 對話在本次 stream、
+        // 不在載入時 snapshot（_lrLoadedSnapshot 是載入快照，不隨 SSE 更新）。
+        container.innerHTML = lrReviewBannerHTML();   // 共用 helper，文字與改前逐字一致
+        const empty = document.createElement('div');
+        empty.className = 'lr-review-empty';
+        empty.textContent = '此階段沒有已存檔的對話紀錄（可能為本次進行中剛產生、尚未存檔，或該階段沒有對話）。';  // 不 silent
+        container.appendChild(empty);
         return;
     }
     const avatarMap = { narration: '&#x1F43E;', user: '&#x1F464;', system: '&#x2139;&#xFE0F;', error: '&#x26A0;', checkpoint: '&#x1F43E;', section: '&#x1F4DD;' };
     const frag = document.createDocumentFragment();
     for (const e of entries) {
         const wrapper = document.createElement('div');
-        wrapper.className = `lr-chat-message ${e.type}`;
-        Object.entries(e.dataset || {}).forEach(([k, v]) => { wrapper.dataset[k] = v; });
+        wrapper.className = `lr-chat-message ${e.type} lr-replayed`;   // U2：回顧重建亦免進場動畫
+        // U1 防禦（plan: lr-ux-u1u2u3；AR R1 修訂改用共用 production helper——
+        // mirror 測試不防假綠，Codex SF4）：strip 繼承的 lrContent 再複製 —— 今天
+        // #lrStageReview 不在 serialize 白名單掃描範圍（:scope > 只掃 #lrChat 直接
+        // 子層，Zoe 已驗 parent 是 #liveResearchView），零污染風險；此 strip 防未來
+        // 有人把回顧容器搬進 #lrChat 時踩 R8 BLOCKER 1 同類坑。
+        const reviewDataset = stripLRContentDataset(e.dataset);
+        Object.entries(reviewDataset).forEach(([k, v]) => { wrapper.dataset[k] = v; });
         const avatar = avatarMap[e.type] || '&#x2022;';
         const cleanHtml = (typeof window !== 'undefined' && window.DOMPurify)
             ? window.DOMPurify.sanitize(e.html || '')      // C4 邊界二
@@ -1341,7 +1460,7 @@ function renderLRStageDialog(stageNum, snapshot) {
         }
         frag.appendChild(wrapper);   // 絕不呼 showLRCheckpoint（V11 副作用）
     }
-    container.innerHTML = '';
+    container.innerHTML = lrReviewBannerHTML();   // D-6：banner（共用 helper，空/非空兩路一致）
     container.appendChild(frag);
 }
 
@@ -1584,7 +1703,7 @@ function _addLRToggleAllToolbar(sectionsEl) {
 // D-CEO-Q1 LOCKED Option (a): 複用 DR displayKnowledgeGraph + prefix 化
 // D-CEO-Q4 LOCKED Option (β): LR 獨立 #lrKGDisplayContainer + DR module 參數化
 // (D2a placeholder DOM list 已刪除, displayLRKnowledgeGraph 被取代)
-import { displayKnowledgeGraph } from './knowledge-graph.js?v=20260714a';
+import { displayKnowledgeGraph } from './knowledge-graph.js?v=20260721a';
 
 // Track D D2b Step 1b (sprint 2026-05-28, fix-up round 1 C-2 / R2-I2):
 // 移植 DR initKGVisibilityToggle IIFE 到 LR (來源 static/news-search.js:3285-3323)
@@ -1919,17 +2038,27 @@ function wireLRStageNavigation(lrState) {
  */
 function loadLRStageReview(stageNum, lrState) {
     const labels = { 1: '研究架構', 2: '資料蒐集與分析', 3: '文筆風格', 4: '章節大綱', 5: '章節撰寫', 6: '匯出報告' };
+    let renderedIntoReview = true;  // stage 5/6 render 進 export view，不注 #lrStageReview banner
     switch (stageNum) {
         case 1:
         case 2: renderLRContextMap(lrState); break;
         case 3: renderLRStyleFeatures(lrState); break;
         case 4: renderLROutline(lrState); break;
         case 5:
-        case 6: showLRExportFromState(lrState); break;  // 路 3：主路徑 / fallback 自動判斷
+        case 6: showLRExportFromState(lrState); renderedIntoReview = false; break;  // 路 3：主路徑 / fallback 自動判斷（fallback 自帶顯眼降級 banner）
         default: {
             const c = getLRReviewContainer();
             if (c) c.innerHTML = lrReviewEmptyNotice(labels[stageNum] || `階段 ${stageNum}`);
         }
+    }
+    // plan lr-snapshot-timing-fallback-render：fallback 全路徑唯讀 banner。
+    // 統一在 dispatch 收尾 afterbegin 注入 — renderer 的 main/empty/error 出口
+    // 全蓋到，單一注入點。stage 5/6 除外：render 目標是 export view 非
+    // #lrStageReview（showLRExportFromState :1868；renderLRReviewReport 已自帶
+    // lr-review-fallback-banner），往回顧容器塞 banner 會成孤兒節點。
+    if (renderedIntoReview) {
+        const c = document.getElementById('lrStageReview');
+        if (c) c.insertAdjacentHTML('afterbegin', lrReviewBannerHTML(LR_REVIEW_FALLBACK_BANNER_TEXT));
     }
 }
 
@@ -1956,10 +2085,10 @@ function renderLRContextMap(lrState) {
         return;
     }
 
-    const cmHTML = cm
-        ? `<div class="lr-review-block"><h4>研究架構</h4>
-             <pre class="lr-review-json">${escapeHTML(JSON.stringify(cm, null, 2))}</pre></div>`
-        : '';
+    // plan lr-snapshot-timing-fallback-render：context_map 已知欄位人類可讀渲染
+    // （欄位映射以後端 schema 親讀為準——schemas_live.py:266 ContextMap；未知欄位
+    // 落 lr-review-render.js「其他欄位」<pre> 殘塊，不 silent drop）。
+    const cmHTML = lrContextMapHTML(cm);
 
     // SF-C：外部連結用 DOM API + scheme 白名單，不用 encodeURI 直塞 innerHTML。
     const safeLink = (url, text) => {
@@ -1985,7 +2114,8 @@ function renderLRContextMap(lrState) {
           + `</ul></div>`
         : '';
 
-    container.innerHTML = cmHTML + evHTML + sHTML;
+    const combinedHTML = cmHTML + evHTML + sHTML;
+    container.innerHTML = combinedHTML || lrReviewEmptyNotice('研究架構');
 }
 
 // ============================================================================
@@ -2007,11 +2137,11 @@ function renderLRStyleFeatures(lrState) {
         container.innerHTML = lrReviewEmptyNotice('文筆風格');
         return;
     }
-    const block = (label, obj) => obj
-        ? `<div class="lr-review-block"><h4>${escapeHTML(label)}</h4>
-             <pre class="lr-review-json">${escapeHTML(JSON.stringify(obj, null, 2))}</pre></div>`
-        : '';
-    container.innerHTML = block('文筆風格設定', sf) + block('使用者語氣', voice);
+    // plan lr-snapshot-timing-fallback-render：style_features / user_voice 人類可讀渲染
+    // （schemas_live.py:1060 StyleAnalysisOutput + stage_state.py:23 UserVoice 親讀映射；
+    // 未知欄位落「其他欄位」<pre> 殘塊）。sf/voice 皆空物件時不留白，loud empty notice。
+    const sfHTML = lrStyleFeaturesHTML(sf, voice);
+    container.innerHTML = sfHTML || lrReviewEmptyNotice('文筆風格');
 }
 
 // ============================================================================
@@ -2344,6 +2474,14 @@ export function restoreLRCheckpointFromState(lrState, lrServerId = null, switchT
         return;
     }
 
+    // U1（plan: lr-ux-u1u2u3）：mid-flight（offline_capped / checkpoint / in_progress）
+    // 也接上 stage bar 唯讀回看 — 復用 completed 回顧鏈（wireLRStageNavigation →
+    // renderLRStageDialog → #lrStageReview）。maxStage = current_stage 天然 gate 未達
+    // stage（lr-stage-unreached）。純 DOM：無 HTTP、無 state mutation、#lrStageReview
+    // 在 serialize 白名單掃描範圍外（調查 + Zoe browser 雙重驗證，2026-07-16）。
+    // 單點放此 = 三個 mid-flight 分類一次覆蓋（completed/not_started 已在上方 return）。
+    wireLRStageNavigation(lrState);
+
     if (resumeClass === 'offline_capped') {
         // plan 5e (iii)：達離線防呆上限被停。顯示「研究已暫停」+「繼續研究」按鈕。
         // 按鈕**使用者點擊**才走 continueLiveResearch（非自動，遵 5c read-only invariant）。
@@ -2532,6 +2670,18 @@ export async function handleLiveResearchSSE(response, triggeringLRSid = null) {
                             updateLRTypingIndicatorText();
                         }
                         updateLRStageProgress(data.stage);
+                        // U1（plan: lr-ux-u1u2u3）：resume 過的 mid-flight session
+                        // （_lrReviewState 非 null = wire 過）stage 前進/退回後同步
+                        // clickable 範圍。不 rewire 會留下 completed + lr-stage-unreached
+                        // 並存的灰 dot（updateLRStageProgress 只管 active/completed，
+                        // 不動 nav class）。dataset.lrNavWired sentinel 防重綁已內建；
+                        // fresh run（_lrReviewState === null）不 wire，維持既有行為。
+                        // 退回（back_one/restart）時 stageNum 變小 → 高 stage dot 回
+                        // unreached，與後端已清該區資料的事實一致。
+                        if (_lrReviewState && stageNum >= 1 && stageNum <= 6) {
+                            _lrReviewState.current_stage = stageNum;
+                            wireLRStageNavigation(_lrReviewState);
+                        }
 
                     } else if (type === 'live_research_writer_status') {
                         // Stage 5 per-section writer status — typing indicator updates.
@@ -2576,7 +2726,11 @@ export async function handleLiveResearchSSE(response, triggeringLRSid = null) {
                             data.evidence_total,  // evidence_pool 完整筆數（舊 session undefined → 退回「N 筆資料」）
                             { isRealContent: true }   // candidate A: real AI proposal → store in snapshot
                         );
-                        _saveLRSnapshot('checkpoint', { triggeringLRSid });  // re-serialize #lrChat now that this stage's dialog is appended (D-7: pass captured stream id)
+                        // 時序縫根因修（plan: lr-snapshot-timing-fallback-render）：checkpoint 是
+                        // 「內容已 settle 的停點」→ immediate 繞 2s debounce + await settle，關閉
+                        // 「debounce 窗內 reload 丟 pending PUT → DB 空 → 首次 hydrate 回空」縫。
+                        // 完整 RCA 見 plan/診斷檔；PUT 失敗 loud（immediate 路 .catch）。
+                        await _saveLRSnapshot('checkpoint', { immediate: true, triggeringLRSid });  // re-serialize #lrChat now that this stage's dialog is appended (D-7: pass captured stream id)
 
                     } else if (type === 'live_research_section') {
                         addLRSection(data.section_index, data.title, data.content, data.sources, data.methodology_note, data.citation_sources, data.citation_format);
@@ -2660,11 +2814,15 @@ export async function handleLiveResearchSSE(response, triggeringLRSid = null) {
                         addLRChatMessage('error', data.error || data.message || '發生未知錯誤');
 
                     } else if (type === 'begin-nlweb-response' || type === 'begin_nlweb_response') {
+                        // TODO: 後端已釘死連字號 'begin-nlweb-response'，底線拼法 'begin_nlweb_response'
+                        // 僅為舊 client 快取的向後相容；一個 release 後可移除底線分支。
                         if (data.conversation_id) setCurrentConversationId(data.conversation_id);
 
                     } else if (type === 'intermediate_result') {
-                        // Ignore or show as narration
-                        if (data.text) addLRChatMessage('narration', data.text);
+                        // 後端 intermediate_result 不發 data.text（§0.6/Task 5 已證，該讀恆 no-op）。
+                        // 改讀 user_message/stage（與 KG 一致），保留降級顯示、不留死分支。
+                        const irText = data.user_message || data.stage;
+                        if (irText) addLRChatMessage('narration', irText);
 
                     } else if (type === 'clarification_required') {
                         console.log('[Live Research] Clarification required:', data.clarification);
@@ -2707,6 +2865,15 @@ export async function handleLiveResearchSSE(response, triggeringLRSid = null) {
                             const input = document.getElementById('lrReplyInput');
                             if (input) { input.value = ''; input.focus(); }
                         }
+                    } else {
+                        // 修正 §0.2 silent drop：unknown 型別不 render 也要被看見（no-silent-fail）。
+                        // 注意：LR 不累積 accumulatedData，故 unknown 不需 merge，只需 loud log。
+                        // 用同一個 `type`（data.message_type || data.type）做分類，避免誤判走 data.type 的事件。
+                        const c = classifyEnvelope({ message_type: type });
+                        if (c.kind === 'unknown') {
+                            // 🔧 SF5：結構化欄位（classification/type）讓「某 event 沒到前端」可快速定位。
+                            console.warn('[Live Research SSE] unhandled envelope', { classification: c.kind, message_type: type, data });
+                        } // kind==='skip' → 靜默略過（本就是中間 envelope）
                     }
                 }
             }

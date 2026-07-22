@@ -698,11 +698,35 @@ class TestOrganization:
 
     @pytest.mark.asyncio
     async def test_create_org(self, service, _no_email):
-        user = await _register_and_verify(service)
-        org = await service.create_organization("Test Org", user['id'])
+        """全新 user（無任何 membership）建 org 成功。
+
+        D-2026-07-20 規則 3（一 email 一公司）後 org_memberships.user_id 有
+        UNIQUE——register_user 已自動建 org，故這裡直接 INSERT 一個無
+        membership 的裸 user 來驗 create_organization 本體。
+        """
+        db = AuthDB.get_instance()
+        user_id = str(uuid.uuid4())
+        await db.execute(
+            "INSERT INTO users (id, email, password_hash, name, email_verified, created_at) "
+            "VALUES (?, ?, ?, ?, 1, ?)",
+            (user_id, "fresh@example.com", "x", "Fresh User", time.time())
+        )
+        org = await service.create_organization("Test Org", user_id)
         assert org['name'] == "Test Org"
         assert 'id' in org
         assert org['slug'] == "test-org"
+
+    @pytest.mark.asyncio
+    async def test_create_org_existing_member_blocked_by_unique(self, service, _no_email):
+        """既有 member 建第二 org 被 UNIQUE 擋（D-2026-07-20 一 email 一公司）。
+
+        bootstrap admin 已有 org membership，再 create_organization 會在
+        INSERT org_memberships 時撞 UNIQUE(user_id)——DB 層強制單組織。
+        """
+        import sqlite3
+        user = await _register_and_verify(service)  # 已自動建 org + membership
+        with pytest.raises(sqlite3.IntegrityError):
+            await service.create_organization("Second Org", user['id'])
 
     @pytest.mark.asyncio
     async def test_list_user_orgs(self, service, _no_email):
@@ -713,6 +737,133 @@ class TestOrganization:
         # Auto-created org name follows the pattern "{name}'s organization"
         assert "Test User" in orgs[0]['name']
         assert orgs[0]['role'] == "admin"
+
+
+class TestAcceptInvitationSingleOrg:
+    """W-3 review 補修：既有 member 接受他 org 邀請必須明確拒絕且不燒邀請。
+
+    背景：accept_invitation 原本先 UPDATE invitations SET accepted_at 再
+    INSERT membership——org A 既有使用者接受 org B 邀請時 INSERT 撞
+    UNIQUE(user_id) → 裸 IntegrityError（route 500），且邀請已被燒
+    （accepted_at 非 NULL → 永久不可重試）。修法＝INSERT 前 pre-check 既有
+    active membership → raise ValueError（routes 層既有 except ValueError
+    → 400 模式自動接手）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_existing_member_gets_clear_error_and_invite_not_burned(
+            self, service, _no_email, monkeypatch):
+        import auth.email_service as es
+        monkeypatch.setattr(es, 'send_invitation_email', lambda *a, **kw: None)
+
+        # org A admin（既有 member，email=test@example.com）
+        user_a = await _register_and_verify(service)
+        # org B admin（獨立 bootstrap）
+        user_b = await _register_and_verify(
+            service, email="admin-b@example.com", name="Admin B")
+        orgs_b = await service.list_user_orgs(user_b['id'])
+        org_b_id = orgs_b[0]['id']
+
+        # B 邀請 A 的 email 加入 org B
+        inv = await service.invite_member(
+            org_b_id, "test@example.com", "member", user_b['id'])
+
+        # A 接受 → 必須明確 ValueError（單組織規則），不可裸 IntegrityError
+        with pytest.raises(ValueError):
+            await service.accept_invitation(inv['token'], user_a['id'])
+
+        # 邀請不可被燒掉：accepted_at 仍 NULL
+        db = AuthDB.get_instance()
+        row = await db.fetchone(
+            "SELECT accepted_at FROM invitations WHERE id = ?", (inv['id'],))
+        assert row is not None
+        assert row['accepted_at'] is None, "邀請被燒掉了（accepted_at 非 NULL）"
+
+    @pytest.mark.asyncio
+    async def test_removed_member_also_blocked_and_invite_not_burned(
+            self, service, _no_email, monkeypatch):
+        """R2 破口 (a)：removed membership row 仍佔 UNIQUE(user_id) 席位。
+
+        remove_member 是 UPDATE status='removed' 留 row——pre-check 若只查
+        status='active' 會放行，燒邀請後 INSERT 撞 UNIQUE → 500。守護面必須
+        對齊 UNIQUE 涵蓋面（全 row，不分 status）。
+        """
+        import auth.email_service as es
+        monkeypatch.setattr(es, 'send_invitation_email', lambda *a, **kw: None)
+        monkeypatch.setattr(es, 'send_activation_email', lambda *a, **kw: None)
+
+        # org A：admin A + member X（admin_create_user 建 active membership）
+        admin_a = await _register_and_verify(service)
+        orgs_a = await service.list_user_orgs(admin_a['id'])
+        org_a_id = orgs_a[0]['id']
+        user_x = await service.admin_create_user(
+            "x@example.com", "User X", "member", org_a_id, admin_a['id'])
+
+        # A 把 X 移出（status='removed'，row 留存仍佔 UNIQUE 席位）
+        await service.remove_member(org_a_id, user_x['id'], admin_a['id'])
+
+        # org B admin 邀請 X 的 email
+        admin_b = await _register_and_verify(
+            service, email="admin-b2@example.com", name="Admin B2")
+        orgs_b = await service.list_user_orgs(admin_b['id'])
+        inv = await service.invite_member(
+            orgs_b[0]['id'], "x@example.com", "member", admin_b['id'])
+
+        # X 接受 → 必須明確 ValueError（不可裸 IntegrityError 500）
+        with pytest.raises(ValueError):
+            await service.accept_invitation(inv['token'], user_x['id'])
+
+        # 且邀請未被燒
+        db = AuthDB.get_instance()
+        row = await db.fetchone(
+            "SELECT accepted_at FROM invitations WHERE id = ?", (inv['id'],))
+        assert row is not None
+        assert row['accepted_at'] is None, "邀請被燒掉了（accepted_at 非 NULL）"
+
+    @pytest.mark.asyncio
+    async def test_race_after_precheck_translated_and_invite_not_burned(
+            self, service, _no_email, monkeypatch):
+        """R2 破口 (b)：TOCTOU 後盾——pre-check 通過後席位被搶。
+
+        模擬手法：攔截 pre-check 那條 fetchone（對 org_memberships 的
+        user_id-only 存在性查詢回 None＝check 當下對手尚未寫入），其餘查詢走
+        真 DB。user 實際已有 membership → INSERT 撞 UNIQUE。驗：例外被轉譯
+        為 ValueError（非裸 IntegrityError）且邀請未被燒（INSERT 先於
+        UPDATE invitations 的順序保證）。
+        """
+        import auth.email_service as es
+        monkeypatch.setattr(es, 'send_invitation_email', lambda *a, **kw: None)
+
+        # user A（org A 既有 member）+ org B admin 邀請 A 的 email
+        user_a = await _register_and_verify(service)
+        admin_b = await _register_and_verify(
+            service, email="admin-b3@example.com", name="Admin B3")
+        orgs_b = await service.list_user_orgs(admin_b['id'])
+        inv = await service.invite_member(
+            orgs_b[0]['id'], "test@example.com", "member", admin_b['id'])
+
+        # 攔截 pre-check：org_memberships 的 user_id-only 查詢回 None
+        db = AuthDB.get_instance()
+        real_fetchone = db.fetchone
+
+        async def racing_fetchone(query, params=None):
+            if ('FROM org_memberships WHERE user_id' in query
+                    and 'AND org_id' not in query):
+                return None  # 模擬 pre-check 當下對手尚未寫入
+            return await real_fetchone(query, params)
+
+        monkeypatch.setattr(db, 'fetchone', racing_fetchone)
+
+        # 直達 INSERT 撞 UNIQUE → 必須轉譯 ValueError
+        with pytest.raises(ValueError):
+            await service.accept_invitation(inv['token'], user_a['id'])
+
+        # 還原後驗邀請未被燒
+        monkeypatch.setattr(db, 'fetchone', real_fetchone)
+        row = await db.fetchone(
+            "SELECT accepted_at FROM invitations WHERE id = ?", (inv['id'],))
+        assert row is not None
+        assert row['accepted_at'] is None, "邀請被燒掉了（accepted_at 非 NULL）"
 
 
 # ── List Org Members is_activated Tests ─────────────────────────

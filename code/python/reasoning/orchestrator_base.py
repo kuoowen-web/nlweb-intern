@@ -124,18 +124,18 @@ class OrchestratorBase:
                 message["user_message"] = stage_info["message"]
                 message["progress"] = ProgressConfig.calculate_progress(stage, iteration, total)
 
-        # Existing send logic (unchanged)
-        try:
-            if hasattr(self.handler, 'message_sender'):
-                await self.handler.message_sender.send_message(message)
-        except Exception as e:
-            # Progress messages are non-critical - log but don't crash
-            self.logger.warning(f"Progress message send failed (non-critical): {e}")
-
-        # Bridge: detect disconnect after send attempt
-        wrapper = getattr(self.handler, 'http_handler', None)
-        if wrapper and not wrapper.connection_alive:
-            raise ResearchCancelledError("Client disconnected (detected in _send_progress)")
+        # Task 12 (B2 dependency direction): delegate send + disconnect-raise to
+        # send_sse(path="progress"). The mutate above STAYS here (caller-side).
+        # send_sse replicates: hasattr(handler,'message_sender') guard, send via
+        # message_sender.send_message, swallow send exception as warning, then
+        # detect disconnect and raise the injected on_disconnect factory. We inject
+        # ResearchCancelledError so core/sse/send.py never imports reasoning.
+        from core.sse.send import send_sse
+        await send_sse(
+            self.handler, message, path="progress",
+            on_disconnect=lambda: ResearchCancelledError(
+                "Client disconnected (detected in send_sse progress)"),
+        )
 
     async def _emit_phase_event(self, phase_name: str, status: str):
         """Push phase progress event to frontend via SSE.

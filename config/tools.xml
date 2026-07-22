@@ -122,7 +122,7 @@
         </prompt>
         <returnStruc>
           {
-            "score": "100"
+            "score": "integer, always 100 for conversation history"
           }
         </returnStruc>
       </Tool>

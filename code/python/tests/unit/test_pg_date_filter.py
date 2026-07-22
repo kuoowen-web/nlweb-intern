@@ -16,7 +16,7 @@ import os
 import unittest
 
 # Add code/python to sys.path so we can import the module under test
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 # We test _build_filters() in isolation — no DB connection needed.
 # We instantiate PgVectorClient only for unit tests on _build_filters(),

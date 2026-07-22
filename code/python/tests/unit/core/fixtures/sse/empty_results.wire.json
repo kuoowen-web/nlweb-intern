@@ -1,0 +1,12 @@
+{
+  "message_type": "empty_results",
+  "content": "這個站台似乎沒有與您問題相關的內容，建議換個關鍵字或改到其他站台查詢。",
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

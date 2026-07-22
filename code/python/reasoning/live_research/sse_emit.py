@@ -33,6 +33,8 @@ MessageSender 的 add_message_metadata / filter_message_pii / store_message
 import logging
 from typing import Any, Dict
 
+from core.sse.send import SseTypedValidationError  # reasoning->core 正向依賴，無反向
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,6 +64,13 @@ async def emit_sse(handler: Any, payload: Dict[str, Any]) -> bool:
         try:
             await sender.send_message(payload)
             return True
+        except SseTypedValidationError:
+            # 🔧R4（R3-BLK-A）contract violation：typed 驗證失敗是開發期 bug，要 fail-loud。
+            # **不吞、不 fallback**——re-raise 穿透，讓 dev/CI 真的紅（與 G9「dev/CI fail-loud」
+            # 一致）。flag OFF 時 _typed_validate 是 no-op、永不產此例外 → 此 except 永不觸發
+            # → 零行為變化。prod 時 _typed_validate 內部已 log-loud + return 原始 payload、
+            # 不 raise 此例外 → 不斷流。
+            raise
         except Exception as e:
             # 不吞掉：先記再嘗試 fallback。
             # 例外 ⇒ 必未送達（見 module docstring 的 message_senders.py:358-361

@@ -8,7 +8,6 @@ WARNING: This code is under development and may undergo changes in future releas
 Backwards compatibility is not guaranteed at this time.
 """
 
-import asyncio
 import json
 
 import core.retriever as retriever
@@ -58,49 +57,46 @@ class PrevQueryDecontextualizer(NoOpDecontextualizer):
             self.handler.requires_decontextualization = False
             await self.handler.state.precheck_step_done(self.STEP_NAME)
             return
-        
-        response = await self.run_prompt(self.DECONTEXTUALIZE_QUERY_PROMPT_NAME, 
-                                         level="high", verbose=True)
-        logger.info(f"response: {response}")
-        if not response:
-            logger.info("No response from decontextualizer")
-            self.handler.requires_decontextualization = False
-            self.handler.decontextualized_query = self.handler.query
-            await self.handler.state.precheck_step_done(self.STEP_NAME)
-            return
-        elif "requires_decontextualization" not in response:
-            error_msg = f"Missing 'requires_decontextualization' key in response: {response}"
-            logger.error(error_msg)
-            if CONFIG.should_raise_exceptions():
-                raise KeyError(f"Decontextualization failed: {error_msg}")
-            else:
-                # Fallback in production mode
-                self.handler.requires_decontextualization = False
-                self.handler.decontextualized_query = self.handler.query
-                await self.handler.state.precheck_step_done(self.STEP_NAME)
+
+        # CORE-5 (full-scan 批7) try/finally 死鎖防線：無論 run_prompt / key 存取
+        # 是否拋例外，finally 都保證 precheck_step_done("Decon") 被呼叫（→ 一併 set
+        # _decon_event），使 wait_for_decontextualization() 的 waiter 不會永久阻塞。
+        # fail-open 預設：先把 decontextualized_query 設回原 query，任何失敗都退回
+        # 「不做 decon」而非阻塞或炸 pipeline。
+        self.handler.decontextualized_query = self.handler.query
+        self.handler.requires_decontextualization = False
+        try:
+            response = await self.run_prompt(self.DECONTEXTUALIZE_QUERY_PROMPT_NAME,
+                                             level="high", verbose=True)
+            logger.info(f"response: {response}")
+            if not response:
+                logger.info("No response from decontextualizer")
                 return
-        elif (response["requires_decontextualization"] == "True"):
-            self.handler.requires_decontextualization = True
-            self.handler.decontextualized_query = response["decontextualized_query"]
-            await self.handler.state.precheck_step_done(self.STEP_NAME)
-            message = {
-                "message_type": "decontextualized_query",
-                "decontextualized_query": self.handler.decontextualized_query,
-                "original_query": self.handler.query
-            }
-            logger.info(f"Sending decontextualized query: {self.handler.decontextualized_query}")
-            asyncio.create_task(self.handler.send_message(message))
-        else:
-            logger.info("No decontextualization required despite previous query")
-            message = {
-                "message_type": "decontextualized_query",
-                "decontextualized_query": self.handler.decontextualized_query,
-                "original_query": self.handler.query
-            }
-            self.handler.decontextualized_query = self.handler.query
-            await self.handler.state.precheck_step_done(self.STEP_NAME)
-            asyncio.create_task(self.handler.send_message(message))
-        return
+            elif "requires_decontextualization" not in response:
+                error_msg = f"Missing 'requires_decontextualization' key in response: {response}"
+                logger.error(error_msg)
+                if CONFIG.should_raise_exceptions():
+                    raise KeyError(f"Decontextualization failed: {error_msg}")
+                # Fallback in production mode（fail-open，已在上方預設）
+                return
+            elif (response["requires_decontextualization"] == "True"):
+                self.handler.requires_decontextualization = True
+                # CORE-4：decontextualized_query 缺 key 不裸取 → fail-open 保留原 query
+                dq = response.get("decontextualized_query")
+                if dq:
+                    self.handler.decontextualized_query = dq
+                else:
+                    logger.warning(
+                        "[Decon] requires_decontextualization=True but "
+                        "'decontextualized_query' missing; keeping original query (fail-open)"
+                    )
+                # dead-emit removed (decontextualized_query: frontend 0 handler) — SSE typed pipeline Task 2
+            else:
+                logger.info("No decontextualization required despite previous query")
+                # dead-emit removed (decontextualized_query: frontend 0 handler) — SSE typed pipeline Task 2
+        finally:
+            if not self.handler.state.is_precheck_step_done(self.STEP_NAME):
+                await self.handler.state.precheck_step_done(self.STEP_NAME)
 
 class ContextUrlDecontextualizer(PrevQueryDecontextualizer):
     
@@ -122,37 +118,38 @@ class ContextUrlDecontextualizer(PrevQueryDecontextualizer):
             self.handler.requires_decontextualization = False
             await self.handler.state.precheck_step_done(self.STEP_NAME)
             return
-        
-        response = await self.run_prompt(self.DECONTEXTUALIZE_QUERY_PROMPT_NAME, level="high", verbose=False)
-        if not response:
-            self.handler.requires_decontextualization = False
-            await self.handler.state.precheck_step_done(self.STEP_NAME)
-            return
-        await self.retriever.do()
-        item = self.retriever.handler.context_item
-        if (item is None):
-            self.handler.requires_decontextualization = False
-            await self.handler.state.precheck_step_done(self.STEP_NAME)
-            return
-        else:
+
+        # CORE-5 (full-scan 批7) try/finally 死鎖防線 + fail-open 預設（同 PrevQuery）。
+        # run_prompt / retriever.do() / decontextualized_query 缺 key 任一拋錯，finally
+        # 都保證 precheck_step_done("Decon") 被呼叫，避免 _decon_event 永不 set 死鎖。
+        self.handler.decontextualized_query = self.handler.query
+        self.handler.requires_decontextualization = False
+        try:
+            response = await self.run_prompt(self.DECONTEXTUALIZE_QUERY_PROMPT_NAME, level="high", verbose=False)
+            if not response:
+                return
+            await self.retriever.do()
+            item = self.retriever.handler.context_item
+            if (item is None):
+                return
             (url, schema_json, name, site) = item
             self.context_description = json.dumps(trim_json(schema_json))
             self.handler.context_description = self.context_description
             response = await self.run_prompt(self.DECONTEXTUALIZE_QUERY_PROMPT_NAME, verbose=True)
             self.handler.requires_decontextualization = True
-            self.handler.decontextualized_query = response["decontextualized_query"]
-            await self.handler.state.precheck_step_done(self.STEP_NAME)
-            
-            # Send decontextualized query message if it's different from the original
-            if self.handler.decontextualized_query != self.handler.query:
-                message = {
-                    "message_type": "decontextualized_query",
-                    "decontextualized_query": self.handler.decontextualized_query,
-                    "original_query": self.handler.query
-                }
-                logger.info(f"Sending decontextualized query: {self.handler.decontextualized_query}")
-                asyncio.create_task(self.handler.send_message(message))
-            return
+            # CORE-4：不裸取 response["decontextualized_query"] → fail-open 保留原 query
+            dq = response.get("decontextualized_query") if response else None
+            if dq:
+                self.handler.decontextualized_query = dq
+            else:
+                logger.warning(
+                    "[Decon/ContextUrl] 'decontextualized_query' missing in response; "
+                    "keeping original query (fail-open)"
+                )
+            # dead-emit removed (decontextualized_query: frontend 0 handler) — SSE typed pipeline Task 2
+        finally:
+            if not self.handler.state.is_precheck_step_done(self.STEP_NAME):
+                await self.handler.state.precheck_step_done(self.STEP_NAME)
 
 class FullDecontextualizer(ContextUrlDecontextualizer):
     

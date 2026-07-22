@@ -9,7 +9,6 @@ Backwards compatibility is not guaranteed at this time.
 """
 
 from misc.logger.logging_config_helper import get_configured_logger
-import asyncio
 from core.prompts import PromptRunner
 from core.config import CONFIG
 
@@ -43,15 +42,25 @@ class RequiredInfo(PromptRunner):
         
         if response:
             logger.debug(f"Required info prompt response received: {response}")
-            self.handler.required_info_found = response["required_info_found"] == "True"
-            
+            # CORE-4 (full-scan 批7)：不裸取 response["required_info_found"]。缺 key →
+            # fail-open 預設「已有必要資訊」（不擋 query、不反覆追問），並 log。
+            _required_info_raw = response.get("required_info_found")
+            if _required_info_raw is None:
+                logger.warning(
+                    "[RequiredInfo] response missing 'required_info_found'; "
+                    "assuming info present (fail-open)"
+                )
+                self.handler.required_info_found = True
+                self.handler.user_question = ""
+                await self.handler.state.precheck_step_done(self.STEP_NAME)
+                return
+            self.handler.required_info_found = _required_info_raw == "True"
+
             if not self.handler.required_info_found:
                 logger.info("Required information not found, will ask user for more details")
                 self.handler.query_done = True
 
-                logger.debug(f"Sending ask_user message: {response['user_question']}")
-                asyncio.create_task(self.handler.send_message({"message_type": "ask_user", "message": response["user_question"]}))
-                
+                # dead-emit removed (ask_user: frontend 0 handler) — SSE typed pipeline Task 2
                 logger.info(f"Precheck step complete: {self.STEP_NAME} (missing required info)")
                 await self.handler.state.precheck_step_done(self.STEP_NAME)
                 return

@@ -1,0 +1,8 @@
+{
+  "message_type": "progress",
+  "stage": "ranking",
+  "message": "整理排序中…",
+  "percent": 40,
+  "timestamp": 1721000000000,
+  "user_id": "user-uuid-x"
+}

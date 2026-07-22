@@ -1,7 +1,7 @@
 # Tests for retrieval low-relevance / low-keyword-match warning signals.
 # These test the pure signal-computation helpers; the DB query itself is not exercised.
 import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from retrieval_providers.postgres_client import (
     compute_low_relevance_warning,

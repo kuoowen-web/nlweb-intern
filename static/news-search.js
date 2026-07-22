@@ -72,7 +72,7 @@ import {
     populateResultsFromAPI, showMemoryNotification, showTimeFilterRelaxedWarning,
     showLowRelevanceWarning, showLowKeywordMatchWarning,
     showSummaries, hideSummaries
-} from './js/features/search.js?v=20260714a';
+} from './js/features/search.js?v=20260717a';
 // v4.0 Commit 3 (2026-05-24) — chatHistory.
 // v4.0 Commit 17 (2026-05-25, Phase 8): 13 chat function bodies MIGRATED.
 //   - performFreeConversation (main entry — POST /ask streaming for free-chat with research context)
@@ -160,7 +160,13 @@ import {
     bumpLRSwitchToken,
     // v3 LR dialog snapshot — feed loaded snapshot to restore for stage-toggle replay
     setLRLoadedSnapshot,
-} from './js/features/live-research.js?v=20260714a';
+    // U3（plan: lr-ux-u1u2u3）— 退階段 confirm modal
+    showLRBackNavConfirmModal,
+} from './js/features/live-research.js?v=20260717a';
+// 時序縫對稱防護（plan: lr-snapshot-timing-fallback-render）：hydrate 端「空不蓋非空」
+// 重用寫路徑 TRAP2 同一 pure helper（session-coordinator.js saveCurrentSession 同款）。
+// pure 模組不帶 ?v=（比照 session-coordinator.js:60 / live-research.js 既有 import 先例）。
+import { resolveLRSnapshotForSave } from './js/features/lr-snapshot.js';
 // Re-bridge performLiveResearch onto window so features/search.js performSearch
 // LR mode delegate can still find it via window.performLiveResearch. Sweep target
 // commit 25 final cleanup when search.js imports it directly.
@@ -300,7 +306,7 @@ import {
     createCriticalNodesAlert, renderArgumentNode, setupHoverInteractions,
     inferScore, formatReasoningForVerification,
     getCurrentResearchQueryId, setCurrentResearchQueryId, clearCurrentResearchQueryId
-} from './js/features/deep-research.js?v=20260715b';
+} from './js/features/deep-research.js?v=20260717a';
 
         // v4.0 Commit 15 (2026-05-25, Phase 8): re-bridge deep-research.js exports to
         //   window so features/search.js performSearch (DR mode delegate) can reach them
@@ -325,7 +331,7 @@ import {
 import {
     displayKnowledgeGraph,
     getCurrentKGData, getKGEditMode, resetKGState
-} from './js/features/knowledge-graph.js?v=20260714a';
+} from './js/features/knowledge-graph.js?v=20260721a';
 // Re-bridge so features/deep-research.js can still reach via window. Sweep commit 25
 // when deep-research.js direct-imports from knowledge-graph.js.
 window.displayKnowledgeGraph = displayKnowledgeGraph;
@@ -2360,8 +2366,10 @@ window.__resetKGState = resetKGState;
             const navBackBtn = document.getElementById('lrBtnNavBack');
             if (navBackBtn) {
                 navBackBtn.addEventListener('click', () => {
-                    addLRChatMessage('system', '（退回上一階段）');
-                    continueLiveResearch('', false, 'back_one');
+                    // U3（plan: lr-ux-u1u2u3）：先開 confirm modal，確認才送 back_one。
+                    // 「（退回上一階段）」系統訊息已移入 modal 確認 callback——
+                    // 取消時 chat 不得殘留任何訊息、不得發出任何 HTTP。
+                    showLRBackNavConfirmModal();
                 });
             }
 
@@ -2594,6 +2602,21 @@ window.__resetKGState = resetKGState;
                     if (res.ok && data.success && data.session) {
                         // Server returns snake_case; map to camelCase for in-memory shape
                         const s = data.session;
+                        // TRAP2 對稱防護（hydrate 端，plan: lr-snapshot-timing-fallback-render）：
+                        // server 回空 snapshot 且 in-memory 非空 → 保留 in-memory，loud warn 不 silent。
+                        // 寫路徑同款防護在 session-coordinator.js saveCurrentSession（resolveLRSnapshotForSave）。
+                        // 語意邊界（AR R1）：server 變空可來自任何合法 PUT（update allowlist 含此欄），
+                        // 但現行前端流程中「in-memory 非空 + server 空」高度疑似 server 落後
+                        // debounced save——保留 in-memory 正確。⚠️ 若未來新增「明確清空 snapshot」
+                        // 產品行為，需帶 explicit clear signal 並重審此防護。server 非空但較短
+                        // （recollect/revise 合法縮短）照常覆蓋（helper 的 === 0 INVARIANT）。
+                        // 同時消除診斷 d-3 二次覆寫鏈：空 hydrate 蓋掉 prior → 寫路徑 TRAP2 的
+                        // prior 變空 → 保護失效 → 可能 PUT 空 snapshot 蓋 DB。
+                        const serverLRSnap = s.lr_dialog_snapshot ?? s.lrDialogSnapshot ?? [];
+                        const lrSnapHydrate = resolveLRSnapshotForSave(serverLRSnap, session.lrDialogSnapshot);
+                        if (lrSnapHydrate.preserved) {
+                            console.warn('[Session] Hydrate 回空 lr_dialog_snapshot 但 in-memory 非空 — 保留 in-memory（server 可能落後 debounced save）。sessionId=', session.id);
+                        }
                         const hydrated = {
                             ...session,
                             // Bug A defense: ensure _serverId is set so subsequent saveCurrentSession
@@ -2616,8 +2639,9 @@ window.__resetKGState = resetKGState;
                             conversationId: s.conversation_id ?? s.conversationId ?? null,
                             // G3：live_research_state 含 schema_version，供 legacy session gate 使用
                             liveResearchState: s.live_research_state ?? s.liveResearchState ?? null,
-                            // v3 LR dialog snapshot：snake→camel hydrate，供回顧逐條重播（Task 6）
-                            lrDialogSnapshot: s.lr_dialog_snapshot ?? s.lrDialogSnapshot ?? [],
+                            // v3 LR dialog snapshot：snake→camel hydrate，供回顧逐條重播（Task 6）。
+                            // 經上方空不蓋非空 resolve（server 空 + in-memory 非空 → 保留 in-memory）。
+                            lrDialogSnapshot: lrSnapHydrate.snapshot,
                         };
                         // Replace in-memory entry so future clicks (and saveSession) see full content
                         const idx = getSavedSessions().findIndex(x => window.matchSessionId(x.id, session.id));

@@ -1,0 +1,14 @@
+{
+  "message_type": "final_result",
+  "final_report": "報告全文…",
+  "confidence_level": "high",
+  "methodology": "多來源交叉驗證",
+  "sources": [
+    {
+      "url": "https://example.com/a",
+      "title": "來源 A"
+    }
+  ],
+  "dr_session_id": "dr-sess-1",
+  "user_id": "user-uuid-x"
+}

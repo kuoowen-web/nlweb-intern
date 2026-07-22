@@ -71,3 +71,41 @@ def test_handler_init_sets_client_offline_since_none():
     http_handler = MagicMock()
     h = LiveResearchHandler(query_params={'query': 'x', 'dry_run': 'true'}, http_handler=http_handler)
     assert h._client_offline_since is None
+
+
+def test_on_lr_research_complete_soft_interrupt_logged_as_info():
+    """soft-interrupt 造成的 ResearchCancelledError 不該被記成 'Background task failed' error。
+
+    注意：本模組的 logger 是 misc/logger/logging_config_helper.py 的
+    LazyLogger（async_processor.enqueue_log，非標準 logging module），pytest
+    的 caplog fixture 掛鉤 root logger handler 抓不到這種非同步自訂 log 呼叫
+    （會造成 assertion 恆真的假陽性）。改用 patch logger.error /
+    logger.info 直接驗證呼叫層級，才是對這個 logger 實作的正確驗證方式。
+    """
+    import asyncio
+    from unittest.mock import patch
+    from methods.live_research import LiveResearchHandler
+    from reasoning.orchestrator_base import ResearchCancelledError
+
+    h = LiveResearchHandler.__new__(LiveResearchHandler)
+    h.lr_session_id = "sess-x"
+
+    async def _boom():
+        raise ResearchCancelledError("User interrupted BAB loop (soft)")
+
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(_boom())
+    try:
+        loop.run_until_complete(task)
+    except ResearchCancelledError:
+        pass
+
+    with patch("methods.live_research.logger") as mock_logger:
+        h._on_lr_research_complete(task)
+        # 不該把 ResearchCancelledError 記成 error（斷線/取消不是 error）
+        mock_logger.error.assert_not_called()
+        # 應改記成 info（含「已由 per-boundary persist 落盤」的說明）
+        mock_logger.info.assert_called_once()
+        info_msg = mock_logger.info.call_args[0][0]
+        assert "sess-x" in info_msg
+    loop.close()

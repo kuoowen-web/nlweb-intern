@@ -469,28 +469,41 @@ class LiveResearchHandler(DeepResearchHandler):
             raise
 
     def _on_lr_research_complete(self, task: asyncio.Task):
-        """
-        Callback when background LR task completes / fails / is cancelled.
+        """Callback when background LR task completes / fails / is cancelled.
 
-        Mirrors DR `_on_research_complete` (methods/deep_research.py:259).
-        Without this callback, exceptions raised inside the task would be
-        silently swallowed if the outer `await` is interrupted (asyncio
-        "Task exception was never retrieved" warning).
+        Mirrors DR `_on_research_complete`. Without this callback, exceptions
+        raised inside the task would be silently swallowed.
+
+        plan: lr-disconnect-midstage-persist — 分流：
+        - asyncio.CancelledError（明確 cancel）→ info（正常）。
+        - ResearchCancelledError（soft-interrupt / 殘留斷線例外）→ info + 提示
+          進度已由背景 task 內部 per-boundary persist（Task 3）落盤，非資料遺失。
+        - 其他 exception → error（真異常）。**進度仍靠 Task 3 每 topic persist
+          兜底**——callback 不做 async persist（done-callback 是同步 context，
+          且 in-memory state 落盤責任已在 orchestrator 內部每 boundary 完成）。
         """
+        from reasoning.orchestrator_base import ResearchCancelledError
         try:
             exc = task.exception()
-            if exc:
-                logger.error(
-                    f"[LIVE RESEARCH] Background task failed: {exc}",
-                    exc_info=exc,
+            if exc is None:
+                return
+            if isinstance(exc, ResearchCancelledError):
+                logger.info(
+                    f"[LIVE RESEARCH] Background task stopped by disconnect/interrupt "
+                    f"(lr_session={getattr(self, 'lr_session_id', None)}): {exc}. "
+                    f"進度已由 per-boundary persist 落盤（可從中途進度手動續跑）。"
                 )
+                return
+            logger.error(
+                f"[LIVE RESEARCH] Background task failed "
+                f"(lr_session={getattr(self, 'lr_session_id', None)}): {exc}",
+                exc_info=exc,
+            )
         except asyncio.CancelledError:
-            # Normal cancellation (client disconnect or user-stop) — not an error.
             logger.info(
                 f"[LIVE RESEARCH] Background task cancelled: {task.get_name()}"
             )
         except asyncio.InvalidStateError:
-            # Should not happen in a done-callback, but be defensive.
             pass
 
     async def _save_state(self, state: LiveResearchStageState):

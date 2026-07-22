@@ -71,7 +71,7 @@ import {
     pushConversationHistory,
     setCurrentConversationId, getCurrentConversationId,
     setCurrentDeepResearchAbortController, getCurrentDeepResearchAbortController
-} from './search.js?v=20260714a';
+} from './search.js?v=20260717a';
 import {
     setResearchReport, getResearchReport,
     setArgumentGraph, getArgumentGraph,
@@ -86,7 +86,12 @@ import { getSelectedSitesParam, getIncludePrivateSources } from './source-filter
 import { markSessionDirty } from './session-manager.js';
 import { getCurrentMode } from './mode.js';
 import { getCurrentSessionId } from '../utils/analytics.js';
-import { getConversationHistory } from './search.js?v=20260714a';
+import { getConversationHistory, isSafeUrl } from './search.js?v=20260717a';
+import { classifyEnvelope } from './sse-dispatch.js';
+// FE-4（full-scan-2026-07 P1 批6）：citation href 等屬性 sink 需跳脫 `"`/`'`，
+// escapeHTML（textContent→innerHTML）不跳脫引號，屬性內須用 escapeHtmlAttr。
+// R1 補修：isSafeUrl（search.js export，復用不自創）給 citation href 協議白名單（擋 javascript:）。
+import { escapeHtmlAttr } from './text-fragment.js';
 
 // ============================================================================
 // Owned state (was: news-search.js line 1676)
@@ -116,14 +121,20 @@ export function addCitationLinks(htmlContent, sources) {
                 // Stage 5: URN (LLM Knowledge source)
                 if (url.startsWith('urn:llm:knowledge:')) {
                     const topic = url.replace('urn:llm:knowledge:', '');
-                    return `<span class="citation-urn" title="讀豹背景知識：${topic}">[${num}]<sup>讀豹</sup></span>`;
+                    // R1 補修：topic 為 LLM url replace 派生、進 title 屬性 → escapeHtmlAttr。
+                    return `<span class="citation-urn" title="讀豹背景知識：${escapeHtmlAttr(topic)}">[${num}]<sup>讀豹</sup></span>`;
                 }
                 // Bug #13: private:// (user-uploaded documents)
                 if (url.startsWith('private://')) {
                     return `<span class="citation-private" title="私人文件來源">[${num}]<sup>\u{1F4C1}</sup></span>`;
                 }
                 // Normal URL
-                return `<a href="${url}" target="_blank" class="citation-link" title="來源 ${num}">[${num}]</a>`;
+                // R1 補修：href 除 escapeHtmlAttr 外須過 isSafeUrl 協議白名單，擋 javascript:/data:
+                //   等可執行協議；不安全 url → 降級為不可點 span（比照 :134 out-of-range 處置）。
+                if (!isSafeUrl(url)) {
+                    return `<span class="citation-no-link" title="來源連結不安全，已停用">[${num}]</span>`;
+                }
+                return `<a href="${escapeHtmlAttr(url)}" target="_blank" class="citation-link" title="來源 ${num}">[${num}]</a>`;
             }
         }
         // Bug #25 Plan C: Out-of-range citation
@@ -164,12 +175,17 @@ export function generateCitationReferenceList(sources) {
         } else if (url.startsWith('private://')) {
             sourceType = '私人文件';
             isClickable = false;
+        } else if (!isSafeUrl(url)) {
+            // R1 補修：非 urn/private 但協議不安全（javascript:/data: 等）→ 併入不可點分支，
+            //   走下方純文字展示（既有降級路徑），與 addCitationLinks 的 href 白名單一致。
+            sourceType = '連結不安全';
+            isClickable = false;
         }
 
         if (isClickable) {
             html += `<div class="citation-reference-item">
                 <span class="citation-reference-number">[${item.index}]</span>
-                <a href="${escapeHTML(url)}" target="_blank" class="citation-reference-link">
+                <a href="${escapeHtmlAttr(url)}" target="_blank" class="citation-reference-link">
                     ${escapeHTML(url)}
                 </a>
             </div>`;
@@ -515,7 +531,7 @@ export function createCycleWarning(cycleDetails) {
     `;
     alert.innerHTML = `
         <div style="font-weight: 700; color: #991b1b; margin-bottom: 4px;"><img src="/static/images/icon-warning.svg" alt="警告" class="inline-icon"> 檢測到循環依賴</div>
-        <div style="color: #7f1d1d; font-size: 13px;">${cycleDetails || '推論鏈存在循環引用，可能影響可靠性'}</div>
+        <div style="color: #7f1d1d; font-size: 13px;">${cycleDetails ? escapeHTML(cycleDetails) : '推論鏈存在循環引用，可能影響可靠性'}</div>
     `;
     return alert;
 }
@@ -535,9 +551,9 @@ export function createCriticalNodesAlert(criticalNodes, nodeMap) {
         if (!node) return '';
         return `
             <div style="margin-bottom: 8px; color: #2D3436;">
-                <strong>「${node.claim.substring(0, 50)}${node.claim.length > 50 ? '...' : ''}」</strong>
+                <strong>「${escapeHTML(node.claim.substring(0, 50))}${node.claim.length > 50 ? '...' : ''}」</strong>
                 影響 ${critical.affects_count} 個後續推論
-                ${critical.criticality_reason ? `<br><span style="font-size: 13px;">└─ ${critical.criticality_reason}</span>` : ''}
+                ${critical.criticality_reason ? `<br><span style="font-size: 13px;">└─ ${escapeHTML(critical.criticality_reason)}</span>` : ''}
             </div>
         `;
     }).join('');
@@ -593,7 +609,7 @@ export function renderArgumentNode(node, stepNumber, nodeMap, chainAnalysis) {
     if (node.logic_warnings && node.logic_warnings.length > 0) {
         warningsHtml = node.logic_warnings.map(w => `
             <div style="color: #FDCB6E; font-size: 13px; margin-top: 4px;">
-                <img src="/static/images/icon-warning.svg" alt="警告" class="inline-icon"> ${w}
+                <img src="/static/images/icon-warning.svg" alt="警告" class="inline-icon"> ${escapeHTML(w)}
             </div>
         `).join('');
     }
@@ -611,7 +627,7 @@ export function renderArgumentNode(node, stepNumber, nodeMap, chainAnalysis) {
 
     const evidenceHtml = node.evidence_ids && node.evidence_ids.length > 0
         ? `<div style="color: #666; font-size: 13px; margin-top: 4px;">
-               證據來源：${node.evidence_ids.map(id => `<span style="background: #e5e7eb; padding: 2px 6px; border-radius: 3px; margin-right: 4px;">[${id}]</span>`).join('')}
+               證據來源：${node.evidence_ids.map(id => `<span style="background: #e5e7eb; padding: 2px 6px; border-radius: 3px; margin-right: 4px;">[${escapeHTML(id)}]</span>`).join('')}
            </div>`
         : '<div style="color: #999; font-size: 13px; margin-top: 4px;">無直接證據引用</div>';
 
@@ -623,7 +639,7 @@ export function renderArgumentNode(node, stepNumber, nodeMap, chainAnalysis) {
                 信心度 ${score.toFixed(1)}/10
             </span>
         </div>
-        <div style="color: #2D3436; margin-bottom: 8px; line-height: 1.6;">「${node.claim}」</div>
+        <div style="color: #2D3436; margin-bottom: 8px; line-height: 1.6;">「${escapeHTML(node.claim)}」</div>
         ${evidenceHtml}
         ${depsHtml}
         ${impactInfo}
@@ -1097,7 +1113,7 @@ export function addClarificationMessage(clarificationData, originalQuery, eventS
 
     contentHTML += `
         <div class="clarification-header">
-            ${clarificationData.instruction || '為了精準搜尋'}「${escapeHTML(originalQuery)}」，請選擇以下條件
+            ${clarificationData.instruction ? escapeHTML(clarificationData.instruction) : '為了精準搜尋'}「${escapeHTML(originalQuery)}」，請選擇以下條件
         </div>
     `;
 
@@ -1106,7 +1122,7 @@ export function addClarificationMessage(clarificationData, originalQuery, eventS
         const requiredMark = question.required ? '<span class="required">*</span>' : '';
 
         contentHTML += `
-            <div class="question-block" data-question-id="${question.question_id}">
+            <div class="question-block" data-question-id="${escapeHtmlAttr(question.question_id)}">
                 <div class="question-label">
                     <span class="question-icon">${icon}</span>
                     <span class="question-text">${escapeHTML(question.question)}${requiredMark}</span>
@@ -1117,16 +1133,20 @@ export function addClarificationMessage(clarificationData, originalQuery, eventS
 
         question.options.forEach(opt => {
             const queryModifier = opt.query_modifier || '';
-            const isComprehensive = opt.is_comprehensive || false;
+            // R2 尾修：normalize 成真 boolean。opt.is_comprehensive 若為 LLM 回的字串，
+            //   `|| false` 會讓字串直穿 data-is-comprehensive 屬性可 breakout；`=== true`
+            //   強制真 boolean → 屬性值恆為 "true"/"false" 字面（下游 dataset.isComprehensive
+            //   === 'true' 相容），天然無注入面。
+            const isComprehensive = opt.is_comprehensive === true;
             const timeRangeJson = opt.time_range ? JSON.stringify(opt.time_range) : '';
 
             contentHTML += `
                 <button class="option-chip"
-                        data-option-id="${opt.id}"
-                        data-label="${escapeHTML(opt.label)}"
-                        data-query-modifier="${escapeHTML(queryModifier)}"
+                        data-option-id="${escapeHtmlAttr(opt.id)}"
+                        data-label="${escapeHtmlAttr(opt.label)}"
+                        data-query-modifier="${escapeHtmlAttr(queryModifier)}"
                         data-is-comprehensive="${isComprehensive}"
-                        data-time-range="${escapeHTML(timeRangeJson)}">
+                        data-time-range="${escapeHtmlAttr(timeRangeJson)}">
                     ${escapeHTML(opt.label)}
                 </button>
             `;
@@ -1136,10 +1156,10 @@ export function addClarificationMessage(clarificationData, originalQuery, eventS
             <div class="custom-input-group" style="margin-top: 8px; display: flex; gap: 6px; align-items: center;">
                 <input type="text" class="custom-option-input"
                        placeholder="或自行輸入..."
-                       data-question-id="${question.question_id}"
+                       data-question-id="${escapeHtmlAttr(question.question_id)}"
                        style="flex: 1; padding: 6px 10px; border: 1px solid #B2BEC3; border-radius: 16px; font-size: 0.9em;">
                 <button class="option-chip custom-input-confirm"
-                        data-question-id="${question.question_id}"
+                        data-question-id="${escapeHtmlAttr(question.question_id)}"
                         style="padding: 6px 12px; background: #2D3436; color: #FFFFFF;">
                     確定
                 </button>
@@ -1170,7 +1190,7 @@ export function addClarificationMessage(clarificationData, originalQuery, eventS
     contentHTML += `
         <div class="clarification-actions" style="margin-top: 12px;">
             <button class="submit-clarification" disabled style="width: 100%;">
-                ${clarificationData.submit_label || '開始搜尋'}
+                ${escapeHTML(clarificationData.submit_label || '開始搜尋')}
             </button>
         </div>
     `;
@@ -1801,6 +1821,14 @@ export async function performDeepResearch(query, skipClarification = false, comp
                             setProcessingState(false);
                             showDRError(data.message || 'Deep Research 已中斷，未產生完整報告。');
                             return;
+                        } else {
+                            // 修正 §0.2 silent drop：unknown 型別不 render 也要被看見（no-silent-fail）。
+                            // 注意：DR 不累積 accumulatedData，故 unknown 不需 merge，只需 loud log。
+                            const c = classifyEnvelope(data);
+                            if (c.kind === 'unknown') {
+                                // 🔧 SF5：結構化欄位（classification/type）讓「某 event 沒到前端」可快速定位。
+                                console.warn('[Deep Research SSE] unhandled envelope', { classification: c.kind, message_type: data.message_type, data });
+                            } // kind==='skip' → 靜默略過（本就是中間 envelope）
                         }
                     }
                 }

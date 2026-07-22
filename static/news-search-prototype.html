@@ -9,7 +9,7 @@
     <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png?v=20260604a">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon-180.png?v=20260604a">
     <link rel="shortcut icon" href="/static/images/favicon.ico">
-    <link rel="stylesheet" href="/static/news-search.css?v=20260705c">
+    <link rel="stylesheet" href="/static/news-search.css?v=20260716b">
     <link rel="stylesheet" href="/static/css/feedback-modal.css">
     <script src="/static/js/feedback-utils.js"></script>
     <!-- D3.js for Knowledge Graph Visualization -->
@@ -531,8 +531,13 @@
                                 <button class="kg-edit-btn kg-edit-confirm-btn" id="kgConfirmEditBtn">確認送出</button>
                                 <button class="kg-edit-btn kg-edit-cancel-btn" id="kgCancelEditBtn">取消</button>
                             </div>
+                            <button class="kg-nav-btn" id="kgResetSkeletonBtn" title="回到核心骨架" style="display:none;">回骨架</button>
+                            <button class="kg-nav-btn" id="kgShowAllBtn" title="顯示全部節點（可能較密集）">顯示全部</button>
                             <button class="kg-edit-toggle-btn kg-copy-btn" id="kgCopyBtn" title="複製實體與關係文字">
                                 複製文字
+                            </button>
+                            <button class="kg-edit-toggle-btn kg-download-btn" id="kgDownloadBtn" title="下載當前顯示的知識圖譜（SVG）">
+                                下載圖譜
                             </button>
                             <button class="kg-edit-toggle-btn" id="kgEditToggleBtn" title="進入編輯模式">
                                 編輯
@@ -757,8 +762,13 @@
                                     <button class="kg-edit-btn kg-edit-confirm-btn" id="lrKGConfirmEditBtn">確認送出</button>
                                     <button class="kg-edit-btn kg-edit-cancel-btn" id="lrKGCancelEditBtn">取消</button>
                                 </div>
+                                <button class="kg-nav-btn" id="lrKGResetSkeletonBtn" title="回到核心骨架" style="display:none;">回骨架</button>
+                                <button class="kg-nav-btn" id="lrKGShowAllBtn" title="顯示全部節點（可能較密集）">顯示全部</button>
                                 <button class="kg-edit-toggle-btn kg-copy-btn" id="lrKGCopyBtn" title="複製實體與關係文字">
                                     複製文字
+                                </button>
+                                <button class="kg-edit-toggle-btn kg-download-btn" id="lrKGDownloadBtn" title="下載當前顯示的知識圖譜（SVG）">
+                                    下載圖譜
                                 </button>
                                 <button class="kg-edit-toggle-btn" id="lrKGEditToggleBtn" title="進入編輯模式">
                                     編輯
@@ -953,7 +963,7 @@
     <!-- DOMPurify for sanitizing HTML output from marked.js -->
     <script src="/static/dompurify.min.js"></script>
 
-    <script type="module" src="/static/news-search.js?v=20260715b"></script>
+    <script type="module" src="/static/news-search.js?v=20260717a"></script>
 
     <!-- D-11 Programmatic Probe — external parser-blocking self-gated script (Phase 1).
          MUST load BEFORE main.js module so the probe object & EventTarget monkey-patch
@@ -963,7 +973,7 @@
 
     <!-- ES-module bootstrap entrypoint (Phase 3 Path B). main.js controls all internal module
          import ordering; external classic <script src> above remain HTML-loaded. -->
-    <script type="module" src="/static/js/main.js?v=20260715b"></script>
+    <script type="module" src="/static/js/main.js?v=20260716c"></script>
 
     <!-- Org Management Modal -->
     <div class="org-modal-overlay" id="orgModalOverlay" style="display:none;">

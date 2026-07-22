@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 # Ensure code/python is in path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from reasoning.research_state import ResearchState
 

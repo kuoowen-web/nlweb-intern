@@ -7,10 +7,10 @@
 - export payload 原樣到 write_stream（收斂點 4 折衷 + 收斂點 8）
 - per call-site delivery tests（收斂點 4）：7 個可直測 emit 點各一條
 """
-import logging
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
 
+import reasoning.live_research.sse_emit as sse_mod
 from reasoning.live_research.sse_emit import emit_sse
 
 
@@ -53,19 +53,57 @@ async def test_sender_none_falls_back_to_write_stream():
 
 
 @pytest.mark.asyncio
-async def test_fallback_success_logs_info(caplog):
-    """收斂點 2：fallback 成功必有 logger.info — 降級必有訊息，不可無痕降級。"""
+async def test_fallback_success_logs_info():
+    """收斂點 2：fallback 成功必有 logger.info — 降級必有訊息，不可無痕降級。
+
+    ordering 免疫（full-scan-2026-07 收尾）：sse_emit 的 logger 是
+    logging.getLogger(__name__)，全套 ordering 下祖先 logger propagate 被前面
+    測試設 False → caplog（掛 root）records 空、假紅。改用 patch.object 直攔
+    logger.info 呼叫捕捉訊息 token，繞過全域 propagation 過濾（lessons-testing-review
+    §184 輕解）。行為斷言逐字不變（訊息含 message_type + "fallback"）。"""
     handler = _make_handler(with_sender=False, with_http=True)
     payload = {"message_type": "live_research_narration", "text": "hi"}
 
-    with caplog.at_level(logging.INFO):
+    with patch.object(sse_mod, "logger") as mock_logger:
         sent = await emit_sse(handler, payload)
 
     assert sent is True
+    info_msgs = [str(c.args[0]) for c in mock_logger.info.call_args_list if c.args]
     assert any(
-        "live_research_narration" in r.message and "fallback" in r.message.lower()
-        for r in caplog.records if r.levelno == logging.INFO
-    ), f"expected an INFO naming the fallback, got: {[r.message for r in caplog.records]}"
+        "live_research_narration" in m and "fallback" in m.lower()
+        for m in info_msgs
+    ), f"expected an INFO naming the fallback, got: {info_msgs}"
+
+
+@pytest.mark.asyncio
+async def test_emit_sse_contract_violation_reraises_no_fallback():
+    # 🔧R4（R3-BLK-A / §0.1b 分支 3a）：send_message 拋 SseTypedValidationError
+    # （contract violation）→ emit_sse **re-raise 穿透、不 fallback**，
+    # http_handler.write_stream 不被呼叫。
+    #
+    # 收尾（full-scan-2026-07）ordering 免疫：SseTypedValidationError 必須取
+    # **sse_emit 模組實際綁定的那個 class ref**（= emit_sse 的 except 用的同一物件），
+    # 不可 `from core.sse.send import`。否則若前面某測試（test_api_raw_sse_migration）
+    # 對 core.sse.send 做 importlib.reload，會產生新 class 物件，raise 新 class 而
+    # except 綁舊 class → isinstance 不成立 → 落 except Exception 走 fallback → 假紅。
+    from reasoning.live_research.sse_emit import SseTypedValidationError
+    handler = _make_handler(with_sender=True, with_http=True)
+    handler.message_sender.send_message = AsyncMock(
+        side_effect=SseTypedValidationError("bad shape"))
+    with pytest.raises(SseTypedValidationError):
+        await emit_sse(handler, {"message_type": "live_research_narration", "text": "x"})
+    handler.http_handler.write_stream.assert_not_awaited()  # 未 fallback、未送 raw payload
+
+
+@pytest.mark.asyncio
+async def test_emit_sse_transport_failure_still_falls_back():
+    # 🔧R4（§0.1b 分支 3b）：send_message 拋一般 Exception（transport failure）→
+    # 維持現行 fallback 語義，http_handler.write_stream 被呼叫、不 raise（研究不斷）。
+    handler = _make_handler(with_sender=True, with_http=True)
+    handler.message_sender.send_message = AsyncMock(side_effect=RuntimeError("conn dead"))
+    ok = await emit_sse(handler, {"message_type": "live_research_narration", "text": "x"})
+    handler.http_handler.write_stream.assert_awaited_once()  # 走 transport fallback
+    assert ok is True
 
 
 @pytest.mark.asyncio
@@ -87,37 +125,43 @@ async def test_sender_raises_falls_back_to_write_stream():
 
 
 @pytest.mark.asyncio
-async def test_both_paths_unavailable_logs_warning_and_not_silent(caplog):
+async def test_both_paths_unavailable_logs_warning_and_not_silent():
+    # ordering 免疫（同 test_fallback_success_logs_info）：patch.object 攔 logger.warning
+    # 繞過 caplog propagation 污染；行為斷言逐字不變（WARN 含 message_type + "dropped"）。
     handler = _make_handler(with_sender=False, with_http=False)
     payload = {"message_type": "live_research_stage_change", "stage": 3}
 
-    with caplog.at_level(logging.WARNING):
+    with patch.object(sse_mod, "logger") as mock_logger:
         sent = await emit_sse(handler, payload)
 
     assert sent is False
     # 不可 silent：必須留下含 message_type 的 WARN
+    warn_msgs = [str(c.args[0]) for c in mock_logger.warning.call_args_list if c.args]
     assert any(
-        "live_research_stage_change" in r.message and "dropped" in r.message.lower()
-        for r in caplog.records
-    ), f"expected a WARN naming the dropped message_type, got: {[r.message for r in caplog.records]}"
+        "live_research_stage_change" in m and "dropped" in m.lower()
+        for m in warn_msgs
+    ), f"expected a WARN naming the dropped message_type, got: {warn_msgs}"
 
 
 @pytest.mark.asyncio
-async def test_sender_and_fallback_both_raise_logs_warning(caplog):
-    """收斂點 5：取代原 invalid placeholder — 兩路皆拋例外時必留 WARN、回 False、不 raise。"""
+async def test_sender_and_fallback_both_raise_logs_warning():
+    """收斂點 5：取代原 invalid placeholder — 兩路皆拋例外時必留 WARN、回 False、不 raise。
+
+    ordering 免疫（同上）：patch.object 攔 logger.warning；行為斷言逐字不變。"""
     handler = _make_handler(with_sender=True, with_http=True)
     handler.message_sender.send_message = AsyncMock(side_effect=RuntimeError("s"))
     handler.http_handler.write_stream = AsyncMock(side_effect=RuntimeError("w"))
     payload = {"message_type": "live_research_narration", "text": "x"}
 
-    with caplog.at_level(logging.WARNING):
+    with patch.object(sse_mod, "logger") as mock_logger:
         sent = await emit_sse(handler, payload)
 
     assert sent is False
+    warn_msgs = [str(c.args[0]) for c in mock_logger.warning.call_args_list if c.args]
     assert any(
-        "live_research_narration" in r.message and "dropped" in r.message.lower()
-        for r in caplog.records
-    ), f"expected a WARN naming the dropped message_type, got: {[r.message for r in caplog.records]}"
+        "live_research_narration" in m and "dropped" in m.lower()
+        for m in warn_msgs
+    ), f"expected a WARN naming the dropped message_type, got: {warn_msgs}"
 
 
 @pytest.mark.asyncio

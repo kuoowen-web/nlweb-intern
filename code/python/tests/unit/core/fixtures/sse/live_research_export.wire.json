@@ -1,0 +1,23 @@
+{
+  "message_type": "live_research_export",
+  "content": "匯出內容…",
+  "format": "markdown",
+  "citation_sources": [
+    {
+      "id": 1
+    }
+  ],
+  "citation_format": "numeric",
+  "knowledge_graph": {
+    "nodes": [],
+    "edges": []
+  },
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

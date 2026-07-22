@@ -28,7 +28,7 @@ import os
 import unittest
 
 # Add code/python to sys.path so we can import the module under test
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 
 def _make_result(name, site, score, url=None):

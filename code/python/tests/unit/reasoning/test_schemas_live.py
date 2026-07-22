@@ -4,7 +4,7 @@ import os
 import json
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 
 from reasoning.schemas_live import (
     ContextMap, ContextMapTopic, ContextMapRelation,

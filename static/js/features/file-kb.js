@@ -52,6 +52,9 @@ import {
     getSelectedFileCount
 } from './folders.js';
 import { setIncludePrivateSources } from './source-filters.js';
+// FE-3（full-scan-2026-07 P1 批6）：檔名（file.name）為 XSS 攻擊向量。屬性 sink
+// （title=/data-file-name=）須用 escapeHtmlAttr（跳脫 `"`/`'`）；文字節點用 window.escapeHTML。
+import { escapeHtmlAttr } from './text-fragment.js';
 
 // ============================================================================
 // Owned state (was: news-search.js line 1734 `let userFiles = []`)
@@ -334,11 +337,11 @@ export function renderFileTreeView() {
                                data-file-id="${file.source_id}"
                                title="${file.status === 'ready' ? '勾選以包含在搜尋中' : '處理中，無法選取'}">
                         <span class="tree-item-icon">${icon}</span>
-                        <span class="tree-item-name" title="${file.name}">${file.name}</span>
+                        <span class="tree-item-name" title="${escapeHtmlAttr(file.name)}">${escapeHTML(file.name)}</span>
                         <span class="tree-item-status ${file.status}">${statusText}</span>
                         ${canDelete ? `
                         <div class="tree-item-actions">
-                            <button class="tree-item-action-btn delete" data-file-id="${file.source_id}" data-file-name="${file.name}" title="刪除檔案"><img src="/static/images/icon-delete.svg" alt="刪除" class="inline-icon"></button>
+                            <button class="tree-item-action-btn delete" data-file-id="${file.source_id}" data-file-name="${escapeHtmlAttr(file.name)}" title="刪除檔案"><img src="/static/images/icon-delete.svg" alt="刪除" class="inline-icon"></button>
                         </div>
                         ` : ''}
                     </div>

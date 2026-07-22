@@ -224,12 +224,15 @@ class GenerateAnswer(NLWebHandler):
                 from core.results_cache import get_results_cache
                 import json
                 cache = get_results_cache()
-                # Use same fallback key as baseHandler: query+site if conversation_id is empty
-                cache_key = self.conversation_id if self.conversation_id else f"{self.query}_{self.site}"
-                cached_results = cache.retrieve(cache_key)
+                # CORE-1: 按 trusted user_id 隔離 retrieve。空 conversation_id 或
+                # 無 user_id → cache 層必 miss（與 baseHandler store 對稱，不再用
+                # 可碰撞的 query+site fallback key）。
+                cached_results = cache.retrieve(
+                    self.conversation_id, user_id=self.user_id
+                )
 
                 if cached_results:
-                    print(f"[CACHE] OK: Reusing {len(cached_results)} cached results for key {cache_key}")
+                    print(f"[CACHE] OK: Reusing {len(cached_results)} cached results for conversation {self.conversation_id}")
                     logger.info(f"Reusing {len(cached_results)} cached results - skipping retrieval and ranking")
 
                     # Use cached results directly
@@ -248,8 +251,8 @@ class GenerateAnswer(NLWebHandler):
                     await self.synthesizeAnswer()
                     return
                 else:
-                    print(f"[CACHE] MISS: No cached results found for key {cache_key}")
-                    logger.warning(f"No cached results found for key {cache_key}, falling back to fresh retrieval")
+                    print(f"[CACHE] MISS: No cached results found for conversation {self.conversation_id}")
+                    logger.warning(f"No cached results found for conversation {self.conversation_id}, falling back to fresh retrieval")
             except Exception as e:
                 logger.error(f"Error retrieving cached results: {e}, falling back to fresh retrieval")
                 print(f"[CACHE] Error: {e}, doing fresh retrieval")
@@ -267,19 +270,13 @@ class GenerateAnswer(NLWebHandler):
                     import json
                     cache = get_results_cache()
 
-                    # For free conversation, try to use the FIRST query in conversation as cache key
-                    # since that's what was used to store the original results
-                    if self.conversation_id:
-                        cache_key = self.conversation_id
-                    elif self.prev_queries and len(self.prev_queries) > 0:
-                        # Use the first query from conversation history as cache key
-                        first_query = self.prev_queries[0]
-                        cache_key = f"{first_query}_{self.site}"
-                        print(f"[FREE_CONVERSATION] Using first query as cache key: {first_query}")
-                    else:
-                        cache_key = f"{self.query}_{self.site}"
-
-                    cached_results = cache.retrieve(cache_key)
+                    # CORE-1: free conversation 也按 trusted user_id 隔離 retrieve。
+                    # 結果只在 store 時用 f"{user_id}:{conversation_id}" 記入，故這裡
+                    # 一律以 conversation_id + user_id 查（舊的 first_query/query+site
+                    # 弱 fallback key 已不再是有效 store key，移除以免跨 user 碰撞）。
+                    cached_results = cache.retrieve(
+                        self.conversation_id, user_id=self.user_id
+                    )
 
                     if cached_results:
                         print(f"[FREE_CONVERSATION] OK: Found {len(cached_results)} cached results for free conversation")
@@ -805,10 +802,16 @@ class GenerateAnswer(NLWebHandler):
             logger.warning("Connection lost, skipping answer synthesis")
             print("[CANCEL] Skipping answer synthesis - client disconnected")
             return
-            
+
+        # G4(ii): msg_type moved ABOVE the try so the except-fallback (:931) can
+        # read it even if an exception fires before this line — unifying the
+        # exception fallback to msg_type (was hardcoded "nlws", invisible in
+        # unified mode). Task 12: sends route through send_sse(path="full").
+        from core.sse.send import send_sse  # local import: avoid load cycle
+        msg_type = "answer" if self.generate_mode == 'unified' else "nlws"
+
         try:
             logger.info("Starting answer synthesis")
-            msg_type = "answer" if self.generate_mode == 'unified' else "nlws"
 
             # Check if we have any ranked answers to work with
             if not self.final_ranked_answers:
@@ -819,7 +822,7 @@ class GenerateAnswer(NLWebHandler):
                     "answer": "抱歉，找不到與您問題相關的資訊。",
                     "items": []
                 }
-                await self.send_message(message)
+                await send_sse(self, message, path="full")
                 return
 
             response = await PromptRunner(self).run_prompt(self.SYNTHESIZE_PROMPT_NAME, timeout=100, verbose=False, max_length=2048)
@@ -834,7 +837,7 @@ class GenerateAnswer(NLWebHandler):
                     "answer": "抱歉，無法生成回答。系統配置可能有問題，請聯繫管理員。",
                     "items": []
                 }
-                await self.send_message(message)
+                await send_sse(self, message, path="full")
                 return
 
             json_results = []
@@ -871,7 +874,7 @@ class GenerateAnswer(NLWebHandler):
             # Create initial message with just the answer (msg_type set at function start)
             message = {"message_type": msg_type, "@type": "GeneratedAnswer", "answer": answer, "items": json_results}
             logger.info("Sending initial answer")
-            await self.send_message(message)
+            await send_sse(self, message, path="full")
             
             # Process each URL mentioned in the response
             if "urls" in response and response["urls"]:
@@ -913,7 +916,7 @@ class GenerateAnswer(NLWebHandler):
                     # Update message with descriptions
                     message = {"message_type": msg_type, "@type": "GeneratedAnswer", "answer": answer, "items": json_results}
                     logger.info(f"Sending final answer with {len(json_results)} item descriptions")
-                    await self.send_message(message)
+                    await send_sse(self, message, path="full")
             else:
                 logger.warning("No URLs found in synthesis response")
 
@@ -928,8 +931,12 @@ class GenerateAnswer(NLWebHandler):
             logger.exception(f"Error in synthesizeAnswer: {e}")
             if self.connection_alive_event.is_set():
                 try:
-                    error_msg = {"message_type": "nlws", "@type": "GeneratedAnswer", "answer": "抱歉，生成回答時發生錯誤，請重新嘗試。", "items": []}
-                    await self.send_message(error_msg)
+                    # G4(ii): use msg_type (was hardcoded "nlws"). In unified mode
+                    # the frontend has no 'nlws' case, so the fallback text was
+                    # never rendered; msg_type="answer" makes it visible. msg_type
+                    # is defined above the try so this always reads it.
+                    error_msg = {"message_type": msg_type, "@type": "GeneratedAnswer", "answer": "抱歉，生成回答時發生錯誤，請重新嘗試。", "items": []}
+                    await send_sse(self, error_msg, path="full")
                 except Exception as e:
                     logger.warning(f"Failed to send error message to client: {e}")
                     pass

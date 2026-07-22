@@ -1,0 +1,12 @@
+{
+  "message_type": "remember",
+  "item_to_remember": "使用者偏好台灣本地新聞",
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

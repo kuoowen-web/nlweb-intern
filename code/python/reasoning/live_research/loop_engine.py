@@ -97,6 +97,13 @@ class BABLoopEngine:
         self.executed_searches: List[str] = []
         self.consistency_review: Optional[ConsistencyReview] = None
         self.paused_by_consistency: bool = False
+        # plan: lr-disconnect-midstage-persist（D-7，R1 AR blocker 消化）— 是否因
+        # client offline cooperative break 提早退出（vs 正常收斂 return）。caller
+        # （_run_stage_2）靠這個訊號分辨「這個 topic 真的跑完了」還是「跑到一半被
+        # 打斷」，避免把半套研究誤標 completed_sections（見 D-7 完整論證）。
+        # per-run 重置於 run_loop 入口（對齊本行下方既有 paused_by_consistency 的
+        # per-run-reset pattern，非只在 __init__ 設一次）。
+        self.stopped_early: bool = False
         # 降級旁白 per-run dedup flags（FIX-3：__init__ 兜底 + run_loop 入口重置共用一個
         # helper，避免兩處各自展開 + 註解互相交叉引用）。語意見 _reset_per_run_dedup_flags。
         self._reset_per_run_dedup_flags()
@@ -197,6 +204,10 @@ class BABLoopEngine:
         """
         執行 B->A->B' 迴圈。
 
+        plan: lr-disconnect-midstage-persist — 例外退出契約：例外退出（soft-interrupt /
+        LLM fail）時 caller 應從 engine.evidence_pool + engine.executed_searches 讀已累積
+        成果，不可假設 return 值。
+
         Args:
             query: 研究問題
             initial_context: 初始 retrieval 結果（Phase 0 用）
@@ -211,6 +222,8 @@ class BABLoopEngine:
         """
         self.executed_searches = list(prior_executed_searches or [])
         self.paused_by_consistency = False
+        # plan: lr-disconnect-midstage-persist（D-7）— per-run 重置，理由同 __init__ 註解。
+        self.stopped_early = False
         # per-run dedupe flags 重置（FIX-3：與 __init__ 共用 helper）。**per-run 重置**
         # 是正確語意——engine instance 被重用（多次 run_loop）時，第二次 run 的降級旁白
         # 不會被永久靜音。見 _reset_per_run_dedup_flags docstring。
@@ -233,119 +246,152 @@ class BABLoopEngine:
             await self._emit_phase("bab_phase0", "completed")
 
         # B->A->B' Loop
-        for iteration in range(self.max_iterations):
-            logger.info(f"[BAB LOOP] Iteration {iteration + 1}/{self.max_iterations}")
-            self._check_connection()
-            # 標記當前 iteration 給 _execute_search 寫進 EvidencePoolEntry.iteration_origin
-            self._current_iteration = iteration + 1
-
-            # Phase 1: 從 B 推導 A
-            await self._emit_phase("bab_phase1", "started")
-            derive_output = await self._run_derive_phase(
-                context_map, self.executed_searches, focus_topic_ids
-            )
-            await self._emit_narration(derive_output.narration)
-            await self._emit_phase("bab_phase1", "completed")
-
-            # Phase 2: 執行 A (retrieval)
-            await self._emit_phase("bab_phase2", "started")
-            formatted_results, new_source_map = await self._execute_search(derive_output.search_seeds)
-            for seed in derive_output.search_seeds:
-                self.executed_searches.append(seed.query)
-            await self._emit_phase("bab_phase2", "completed")
-
-            # Phase 3: Mini-Reasoning (optional — Analyst + Critic on new evidence)
-            # bab_phase3 進度事件 + 預期管理 narration：mini-reasoning 是 BAB loop 最耗時的
-            # LLM 段（Analyst high model + Critic + 可能 gap routing）。沿 #8 長 LLM call 前
-            # 推進度 pattern（phase1/phase4 已有），補 phase3 進度，避免前端最長窗口零進度。
-            # emit 放 run_loop 包夾處而非 _run_mini_reasoning 內部：dry_run 會整個替換
-            # _run_mini_reasoning，放內部 dry_run emit 不到；放這裡 dry_run 也會 emit。
-            # s5-4 收斂（O5-B/O5-C 耦合判定，見 plan）：
-            # - early-skip 輪（gate False，檢索空手）完全不 emit phase3 事件 —
-            #   沒有資料可分析，不對 user 謊稱「正在深入分析這批資料」。
-            # - mini 失敗輪（O5-B 降級，回傳 False）不 emit completed —
-            #   降級旁白「已先略過⋯我會繼續往下進行」就是該輪收尾，緊接的
-            #   bab_phase4 started 標記邊界；「完成」與「已先略過」並列矛盾。
-            if self._has_mini_reasoning_input(formatted_results):
-                await self._emit_phase("bab_phase3", "started")
-                await self._emit_narration("正在深入分析這批資料、交叉檢驗論點...")
-                mini_ok = await self._run_mini_reasoning(context_map, formatted_results)
-                if mini_ok:
-                    await self._emit_phase("bab_phase3", "completed")
-            else:
-                # early-skip 輪：保留呼叫維持行為等價（內部 early return + 既有 log）
-                await self._run_mini_reasoning(context_map, formatted_results)
-
-            # Phase 4: 更新 B -> B'
-            await self._emit_phase("bab_phase4", "started")
-            # #8: 長 LLM call 前推進度 narration
-            await self._emit_narration("正在根據新資料更新研究結構...")
-            refine_output = await self.associator.refine_context_map(
-                current_context_map=context_map,
-                initial_context_map=self.initial_context_map,
-                retrieval_results=formatted_results,
-                focus_topic_ids=focus_topic_ids,
-            )
-            context_map = refine_output.updated_context_map
-            await self._emit_narration(refine_output.narration)
-            await self._emit_phase("bab_phase4", "completed")
-
-            # Consistency Monitor (always-on)
-            if self.enable_consistency_monitor:
-                # #8: 長 LLM call 前推進度 narration
-                await self._emit_narration("正在檢查研究方向的一致性...")
-                self.consistency_review = await self._run_consistency_check(
-                    context_map, self.initial_context_map
-                )
-
-                # Track F F2 (sprint 2026-05-28): 持久化 consistency drift log
-                # spec §9.2 自標未實現的補完；F-AMB-3 LOCKED: 每輪都 append
-                # （drift_level=none 也 append，audit trail 完整）。
-                # I-3: stage 欄位區分 Stage 1 (global) / Stage 2 (per-topic) invoke
-                # — caller (orchestrator) 透過 self._current_stage attribute inject。
-                if self.state is not None:
-                    try:
-                        from reasoning.schemas_live import ConsistencyDriftEntry
-                        entry = ConsistencyDriftEntry(
-                            stage=getattr(self, "_current_stage", "stage_1"),
-                            iteration=self._current_iteration,
-                            topic_id=self._current_topic_id or "",
-                            drift_level=self.consistency_review.drift_level,
-                            drift_description=(
-                                self.consistency_review.drift_description or ""
-                            ),
-                            recommended_action=(
-                                self.consistency_review.recommended_action
-                            ),
-                            monitor_degraded=getattr(
-                                self.consistency_review, "monitor_degraded", False
-                            ),  # O5-A: 降級旗標傳入 audit entry
-                        )
-                        self.state.consistency_drift_log.append(entry.model_dump())
-                    except Exception as e:
-                        # secondary defense: 不阻塞 BAB loop
-                        logger.warning(
-                            f"[BAB LOOP F2] consistency drift log append failed "
-                            f"(non-fatal): {type(e).__name__}: {e}"
-                        )
-
-                if self.consistency_review.dubao_voice_message:
-                    await self._emit_narration(self.consistency_review.dubao_voice_message)
-                elif getattr(self.consistency_review, "monitor_degraded", False):
-                    # O5-A: 降級必有 user-facing 訊息（CLAUDE.md「不可 silent fail」）。
-                    # round-3（Gemini critical）：consistency check 每輪（for iteration in
-                    # range(max_iterations)）都跑，持久失敗會每輪 emit → 高頻迴圈訊息轟炸。
-                    # per-run 只提示一次（flag 在 run_loop 入口初始化，見 Step 3b）。
-                    await self._narrate_once("_consistency_degraded_narrated", "（一致性監控暫時無法使用，研究仍會繼續，但這一輪沒有做方向一致性檢查。）")
-                if self.consistency_review.recommended_action == "pause_confirm":
-                    self.paused_by_consistency = True
-                    logger.info("[BAB LOOP] Paused by Consistency Monitor")
+        # plan: lr-disconnect-midstage-persist — try/finally 兜底：無論正常收斂 /
+        # cooperative offline break / soft-interrupt raise / LLM 例外，退出時 caller
+        # 都能從 engine.evidence_pool（instance attr，本迴圈持續 mutate）撈已累積 evidence。
+        # 這是「斷線進度不蒸發」的最後一道：raise 路徑下 `updated_map = await run_loop()`
+        # 賦值不會發生，但 caller 改讀 engine.evidence_pool（Task 3）就拿得到。
+        try:
+            for iteration in range(self.max_iterations):
+                logger.info(f"[BAB LOOP] Iteration {iteration + 1}/{self.max_iterations}")
+                # plan: lr-disconnect-midstage-persist — cooperative stop：client 純斷線時
+                # _check_connection 回 "offline"（不 raise），break 出迴圈把當前累積的
+                # context_map / evidence_pool 帶回 caller（_run_stage_2）落盤，不蒸發。
+                # soft-interrupt（使用者主動停）仍會在 _check_connection 內 raise。
+                #
+                # D-7（R1 AR blocker 消化）：break 前設 self.stopped_early = True——這是
+                # caller（_run_stage_2）分辨「這個 topic 正常收斂完成」vs「跑到一半被
+                # offline 打斷」的唯一依據。沒有這個旗標，caller 會把半套研究誤標
+                # completed_sections（見 D-7 完整論證）。正常收斂（is_stable 或跑滿
+                # max_iterations）不會經過這個 break，stopped_early 維持 run_loop 入口
+                # 重置的 False。
+                if self._check_connection() == "offline":
+                    self.stopped_early = True
+                    logger.info(
+                        f"[BAB LOOP] Client offline detected at iteration {iteration + 1}; "
+                        f"cooperative stop (stopped_early=True) — returning accumulated "
+                        f"context_map + {len(self.evidence_pool)} evidence entries for "
+                        f"caller to persist WITHOUT marking topic as completed"
+                    )
                     break
+                # 標記當前 iteration 給 _execute_search 寫進 EvidencePoolEntry.iteration_origin
+                self._current_iteration = iteration + 1
 
-            # 穩定性判定
-            if refine_output.is_stable:
-                logger.info(f"[BAB LOOP] Stable after iteration {iteration + 1}")
-                break
+                # Phase 1: 從 B 推導 A
+                await self._emit_phase("bab_phase1", "started")
+                derive_output = await self._run_derive_phase(
+                    context_map, self.executed_searches, focus_topic_ids
+                )
+                await self._emit_narration(derive_output.narration)
+                await self._emit_phase("bab_phase1", "completed")
+
+                # Phase 2: 執行 A (retrieval)
+                await self._emit_phase("bab_phase2", "started")
+                formatted_results, new_source_map = await self._execute_search(derive_output.search_seeds)
+                for seed in derive_output.search_seeds:
+                    self.executed_searches.append(seed.query)
+                await self._emit_phase("bab_phase2", "completed")
+
+                # Phase 3: Mini-Reasoning (optional — Analyst + Critic on new evidence)
+                # bab_phase3 進度事件 + 預期管理 narration：mini-reasoning 是 BAB loop 最耗時的
+                # LLM 段（Analyst high model + Critic + 可能 gap routing）。沿 #8 長 LLM call 前
+                # 推進度 pattern（phase1/phase4 已有），補 phase3 進度，避免前端最長窗口零進度。
+                # emit 放 run_loop 包夾處而非 _run_mini_reasoning 內部：dry_run 會整個替換
+                # _run_mini_reasoning，放內部 dry_run emit 不到；放這裡 dry_run 也會 emit。
+                # s5-4 收斂（O5-B/O5-C 耦合判定，見 plan）：
+                # - early-skip 輪（gate False，檢索空手）完全不 emit phase3 事件 —
+                #   沒有資料可分析，不對 user 謊稱「正在深入分析這批資料」。
+                # - mini 失敗輪（O5-B 降級，回傳 False）不 emit completed —
+                #   降級旁白「已先略過⋯我會繼續往下進行」就是該輪收尾，緊接的
+                #   bab_phase4 started 標記邊界；「完成」與「已先略過」並列矛盾。
+                if self._has_mini_reasoning_input(formatted_results):
+                    await self._emit_phase("bab_phase3", "started")
+                    await self._emit_narration("正在深入分析這批資料、交叉檢驗論點...")
+                    mini_ok = await self._run_mini_reasoning(context_map, formatted_results)
+                    if mini_ok:
+                        await self._emit_phase("bab_phase3", "completed")
+                else:
+                    # early-skip 輪：保留呼叫維持行為等價（內部 early return + 既有 log）
+                    await self._run_mini_reasoning(context_map, formatted_results)
+
+                # Phase 4: 更新 B -> B'
+                await self._emit_phase("bab_phase4", "started")
+                # #8: 長 LLM call 前推進度 narration
+                await self._emit_narration("正在根據新資料更新研究結構...")
+                refine_output = await self.associator.refine_context_map(
+                    current_context_map=context_map,
+                    initial_context_map=self.initial_context_map,
+                    retrieval_results=formatted_results,
+                    focus_topic_ids=focus_topic_ids,
+                )
+                context_map = refine_output.updated_context_map
+                await self._emit_narration(refine_output.narration)
+                await self._emit_phase("bab_phase4", "completed")
+
+                # Consistency Monitor (always-on)
+                if self.enable_consistency_monitor:
+                    # #8: 長 LLM call 前推進度 narration
+                    await self._emit_narration("正在檢查研究方向的一致性...")
+                    self.consistency_review = await self._run_consistency_check(
+                        context_map, self.initial_context_map
+                    )
+
+                    # Track F F2 (sprint 2026-05-28): 持久化 consistency drift log
+                    # spec §9.2 自標未實現的補完；F-AMB-3 LOCKED: 每輪都 append
+                    # （drift_level=none 也 append，audit trail 完整）。
+                    # I-3: stage 欄位區分 Stage 1 (global) / Stage 2 (per-topic) invoke
+                    # — caller (orchestrator) 透過 self._current_stage attribute inject。
+                    if self.state is not None:
+                        try:
+                            from reasoning.schemas_live import ConsistencyDriftEntry
+                            entry = ConsistencyDriftEntry(
+                                stage=getattr(self, "_current_stage", "stage_1"),
+                                iteration=self._current_iteration,
+                                topic_id=self._current_topic_id or "",
+                                drift_level=self.consistency_review.drift_level,
+                                drift_description=(
+                                    self.consistency_review.drift_description or ""
+                                ),
+                                recommended_action=(
+                                    self.consistency_review.recommended_action
+                                ),
+                                monitor_degraded=getattr(
+                                    self.consistency_review, "monitor_degraded", False
+                                ),  # O5-A: 降級旗標傳入 audit entry
+                            )
+                            self.state.consistency_drift_log.append(entry.model_dump())
+                        except Exception as e:
+                            # secondary defense: 不阻塞 BAB loop
+                            logger.warning(
+                                f"[BAB LOOP F2] consistency drift log append failed "
+                                f"(non-fatal): {type(e).__name__}: {e}"
+                            )
+
+                    if self.consistency_review.dubao_voice_message:
+                        await self._emit_narration(self.consistency_review.dubao_voice_message)
+                    elif getattr(self.consistency_review, "monitor_degraded", False):
+                        # O5-A: 降級必有 user-facing 訊息（CLAUDE.md「不可 silent fail」）。
+                        # round-3（Gemini critical）：consistency check 每輪（for iteration in
+                        # range(max_iterations)）都跑，持久失敗會每輪 emit → 高頻迴圈訊息轟炸。
+                        # per-run 只提示一次（flag 在 run_loop 入口初始化，見 Step 3b）。
+                        await self._narrate_once("_consistency_degraded_narrated", "（一致性監控暫時無法使用，研究仍會繼續，但這一輪沒有做方向一致性檢查。）")
+                    if self.consistency_review.recommended_action == "pause_confirm":
+                        self.paused_by_consistency = True
+                        logger.info("[BAB LOOP] Paused by Consistency Monitor")
+                        break
+
+                # 穩定性判定
+                if refine_output.is_stable:
+                    logger.info(f"[BAB LOOP] Stable after iteration {iteration + 1}")
+                    break
+        finally:
+            # instance state 一致性：_current_iteration 停在最後跑到的輪次。
+            # evidence_pool / executed_searches 已是 instance attr，天然保留。
+            logger.info(
+                f"[BAB LOOP] run_loop exiting: evidence_pool={len(self.evidence_pool)}, "
+                f"executed_searches={len(self.executed_searches)}, "
+                f"last_iteration={self._current_iteration}"
+            )
 
         return context_map
 
@@ -1620,33 +1666,42 @@ class BABLoopEngine:
             )
 
     def _check_connection(self):
-        """檢查客戶端是否仍然連線。
+        """檢查客戶端連線狀態，回傳 cooperative-stop 訊號。
 
-        使用與 OrchestratorBase._check_connection 相同的 3-signal 檢查：
-        1. wrapper.connection_alive flag
-        2. handler.connection_alive_event
-        3. handler._soft_interrupt_event（使用者打字中斷）
+        plan: lr-disconnect-midstage-persist — 語義分流（root cause 修復）：
+        - **client offline（純斷線）**：回 "offline"（**不 raise**）。舊行為 raise
+          會把「api_routes 刻意要背景跑完」的 task 自己殺掉（自相矛盾），且走 error
+          路徑無 finally persist → Stage 2 累積 evidence 全蒸發。改回訊號讓 run_loop
+          有序收場（break + return 已累積 context_map/evidence_pool，caller persist）。
+        - **soft interrupt（使用者主動打字中斷研究）**：仍 raise ResearchCancelledError
+          （使用者要立刻停，語義與純斷線不同）。
+        - **在線**：回 None。
+
+        3-signal 檢查順序與 OrchestratorBase._check_connection 對齊。
         """
         from reasoning.orchestrator_base import ResearchCancelledError
 
         wrapper = getattr(self.handler, 'http_handler', None)
         event = getattr(self.handler, 'connection_alive_event', None)
 
-        # Signal 1: wrapper connection_alive flag
-        if wrapper and not wrapper.connection_alive:
-            # 同步清除 event，確保下游檢查一致
-            if event and event.is_set():
-                event.clear()
-            raise ResearchCancelledError("Client disconnected during BAB loop (wrapper)")
-
-        # Signal 2: handler connection_alive_event
-        if event and not event.is_set():
-            raise ResearchCancelledError("Client disconnected during BAB loop (event)")
-
-        # Signal 3: soft interrupt（使用者打字中斷研究）
+        # Signal 3 先判：soft interrupt = 使用者主動打斷 → raise（立刻停）。
+        # 放最前面確保「使用者主動停」優先於「純斷線 cooperative」語義。
         soft_interrupt = getattr(self.handler, '_soft_interrupt_event', None)
         if soft_interrupt and soft_interrupt.is_set():
             raise ResearchCancelledError("User interrupted BAB loop (soft)")
+
+        # Signal 1: wrapper connection_alive flag → offline（cooperative，不 raise）
+        if wrapper and not wrapper.connection_alive:
+            # 同步清除 event，確保下游 offline 檢查一致（沿舊行為）
+            if event and event.is_set():
+                event.clear()
+            return "offline"
+
+        # Signal 2: handler connection_alive_event → offline（cooperative，不 raise）
+        if event and not event.is_set():
+            return "offline"
+
+        return None
 
     async def _emit_narration(self, text: str):
         """推送讀豹旁白到前端。"""

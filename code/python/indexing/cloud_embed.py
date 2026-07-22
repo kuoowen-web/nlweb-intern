@@ -332,6 +332,26 @@ def process_tsv(tsv_path: Path, output_dir: Path, batch_size: int = 32) -> dict:
     return stats
 
 
+def _should_mark_done(stats: dict) -> bool:
+    """.done gate 判準（對稱化，比照 bulk_load.py 的 errors==0 硬化 gate）。
+
+    IT-1（full-scan-2026-07，三席同抓）：舊 main() 對每個未 raise 的 TSV 無條件
+    寫 .done，完全不看 skipped/failed。暫時性大量 parse None（壞 JSON / 短文）的
+    TSV 會被永久 checkpoint 跳過 → 該批文章永不 embed（silent 漏資料）。
+
+    對稱化判準（保守方向，寧可重試也不永久漏 embed）：
+      - failed>0：有文章處理失敗 → 不寫 done，讓下輪重試。
+      - success==0：沒有任何文章真的被 embed（全 skip / 空檔）→ 不寫 done。
+        全 skip 常是暫時性上游資料損壞，寫 done 會把它永久跳過。
+      - 其餘（success>0 且 failed==0）→ 寫 done。
+    """
+    if stats.get("failed", 0) > 0:
+        return False
+    if stats.get("success", 0) <= 0:
+        return False
+    return True
+
+
 def main():
     if len(sys.argv) < 3:
         print("Usage: python cloud_embed.py <tsv_dir> <output_dir>")
@@ -374,8 +394,17 @@ def main():
             for k in grand:
                 grand[k] += stats[k]
 
-            with open(done_file, 'a') as f:
-                f.write(basename + "\n")
+            # .done gate（IT-1 對稱化，比照 bulk_load errors==0）：只有真的 embed
+            # 到文章且無失敗才寫 done。全 skip / 有失敗 → 不寫，讓下輪重試。
+            if _should_mark_done(stats):
+                with open(done_file, 'a') as f:
+                    f.write(basename + "\n")
+            else:
+                logger.warning(
+                    f"  SKIP done-mark: {basename} success={stats['success']} "
+                    f"failed={stats['failed']} skipped={stats['skipped']} "
+                    f"— 未寫入 .done（下輪重試，避免暫時性失敗被永久 checkpoint）"
+                )
 
         except Exception as e:
             logger.error(f"  ERROR: {e}")

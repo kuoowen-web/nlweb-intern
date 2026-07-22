@@ -4,7 +4,7 @@
 
 三機協作分散爬取負載。筆電負責中量任務（UDN sitemap gap fill + MOEA backfill）。
 筆電只負責爬取（crawler-only），不跑 indexing pipeline。
-TSV 收集後回桌機跑 indexing → PostgreSQL。
+TSV 收集後由 GCP 增量鏈處理（cloud_embed.py → bulk_load.py → VPS PG，見 indexing-spec 架構流程段）；原「回桌機跑 `python -m indexing.pipeline`」流程已隨路徑 A 移除 2026-07-16（🪦 回溯 `1d150e49`）。
 
 ---
 
@@ -301,9 +301,9 @@ Invoke-RestMethod -Method POST -Uri "http://localhost:8001/api/indexing/crawler/
 # 3. 在桌機合併 registry
 python crawler/remote/merge_registry.py laptop-registry.db data/crawler/crawled_registry.db
 
-# 4. 桌機跑 indexing
-cd code/python
-python -m indexing.pipeline --tsv-dir <laptop-articles-dir>
+# 4. indexing：TSV 積壓由 GCP 增量鏈處理（cloud_embed.py → bulk_load.py → VPS PG，
+#    見 indexing-spec 架構流程段）；原桌機 `python -m indexing.pipeline` 流程
+#    已隨路徑 A 移除 2026-07-16（🪦 回溯 `1d150e49`）
 ```
 
 ---

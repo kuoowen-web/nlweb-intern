@@ -15,8 +15,18 @@ from typing import Dict, Any, List, Optional
 from aiohttp import web
 from misc.logger.logging_config_helper import get_configured_logger
 from core.analytics_db import AnalyticsDB
+from webserver.admin_gate import admin_only
 
 logger = get_configured_logger("ranking_analytics_handler")
+
+# ── 儀表板對外前 checklist（W-1 / D-2026-07-20 規則 2）─────────────────────
+# get_config / get_pipeline_details 已加 role==admin gate（@admin_only）。這些
+# 端點會曝露 ranking system prompt / model / pipeline trace，目前僅 CEO 自用。
+# 真開放給租戶客戶前必須補：
+#   1. org_id SQL 邊界：get_pipeline_details 以 query_id 查全域，需確認 owner/org。
+#   2. get_config 曝露 ranking prompt/model，判斷是否對租戶隱藏。
+#   3. W-7：error 回傳把 str(e) 外洩（:82/:154），對外前改泛用訊息。
+# ─────────────────────────────────────────────────────────────────────────
 
 
 class RankingAnalyticsHandler:
@@ -33,6 +43,7 @@ class RankingAnalyticsHandler:
         # Always use the shared singleton instance to avoid multiple connection pools
         self.db = AnalyticsDB.get_instance()
 
+    @admin_only  # W-1: 曝露 ranking prompt/model，限 admin
     async def get_config(self, request: web.Request) -> web.Response:
         """
         Get current system configuration ("Rules of the Game").
@@ -81,6 +92,7 @@ class RankingAnalyticsHandler:
             logger.error(f"Error getting ranking config: {e}", exc_info=True)
             return web.json_response({'error': str(e)}, status=500)
 
+    @admin_only  # W-1: pipeline trace 以 query_id 查全域，限 admin
     async def get_pipeline_details(self, request: web.Request) -> web.Response:
         """
         Get detailed pipeline trace for a specific query.

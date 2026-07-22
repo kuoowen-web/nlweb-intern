@@ -12,6 +12,7 @@ Backwards compatibility is not guaranteed at this time.
 from typing import Optional, Dict, Any, Literal
 from core.config import CONFIG
 import asyncio
+import re
 import threading
 import importlib
 import sentry_sdk
@@ -169,6 +170,101 @@ class LLMError(dict):
         return f"LLMError(kind={self.error_kind!r}, detail={self.detail!r})"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 數值欄位 coerce 單一收斂點（full-scan-2026-07 CORE-2 / AF-1 / MP-2 三層根解）
+#
+# 問題：ranking / DR associator 等 prompt 的 ans_struc 宣告 `"score": "0-100 整數"`，
+# 但那只是**文字指示**；弱模型（level=low）常回字串 `"70"`。三家 provider clean_response
+# 契約漂移——唯 gemini.py 有 ad-hoc coerce（且只治純數字字串），openai/anthropic 零 coerce。
+# preferred provider=openai/anthropic 時字串 score 直流入 consumer：
+#   - ranking.py:171 `'70'>59`（rankItem try 內 → 單件靜默丟）
+#   - ranking.py:388-389 `sorted(mixed)`（do() try 外 → 整批 TypeError 崩）
+#   - mmr / whoRanking / nlweb_client 同型比較/排序點
+# 逐點加 coerce 是治標；根在「provider 契約不一致」。故 coerce 上移到此單一收斂點
+# （ask_llm 回傳前），consumer 收到的數值欄位保證已 int/float 化。
+#
+# schema 聲明機制：真實 schema 欄位值是**文字描述**（`"0-100 整數"`）而非範例值（`70`），
+# 故無法「依範例值型別推斷」。改依描述字串裡工程師寫好的型別意圖（整數/integer/數值/
+# 浮點/float/number/小數）判定數值欄位——這是最小可行機制，不新增 schema 格式、不動
+# 任何 prompt 資產。布林欄位（`"True or False"`）不含數值關鍵詞，自然被排除（且顯式防護）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 數值型別意圖關鍵詞（涵蓋 repo 內既有 score/final_score/*_score 欄位的中英描述）。
+_NUMERIC_DESC_PATTERN = re.compile(
+    r"整數|數值|浮點|小數|\binteger\b|\bint\b|\bfloat\b|\bnumber\b|\bnumeric\b",
+    re.IGNORECASE,
+)
+# 布林意圖關鍵詞：即使描述含數值字樣也不得當數值欄位（防「True or False」等誤判）。
+_BOOL_DESC_PATTERN = re.compile(r"true\s+or\s+false|布林|boolean|\bbool\b", re.IGNORECASE)
+
+
+def _is_numeric_field_desc(desc: Any) -> bool:
+    """依 schema 欄位『描述字串』判斷該欄位是否宣告為數值欄位。
+
+    只有值為字串描述時才判定；布林描述（'True or False'）顯式排除，避免把布林欄位
+    的字串值誤轉成數字。
+    """
+    if not isinstance(desc, str):
+        return False
+    if _BOOL_DESC_PATTERN.search(desc):
+        return False
+    return bool(_NUMERIC_DESC_PATTERN.search(desc))
+
+
+def _coerce_numeric_fields(result: Dict[str, Any], schema: Dict[str, Any]) -> Dict[str, Any]:
+    """對 result 中被 schema 宣告為數值的欄位就地 coerce（int 優先，退 float）。
+
+    行為契約：
+      - schema 為空 / 非 dict → no-op（既有 `ask_llm(..., {})` 呼叫語義不破）。
+      - result 非 dict（含 LLMError falsy sentinel）→ 原樣回，不迭代污染。
+      - 欄位值已是 int/float/bool → 不動。
+      - 欄位值是字串：strip 後試 int（純整數字串）→ 退 float（含小數點）；
+        兩者皆失敗（'70分' / 全形 / '0.7abc'）→ **保留原值 + logger.warning**
+        （不 silent、不歸 0、不丟件——下游既有防禦處理原值）。
+      - 欄位值為 None / 缺席 → 保留（不試轉）。
+
+    作用域邊界（R1 #4 裁決，刻意設計）：
+      - 只治**扁平描述字串 schema**（ranking / router tools.xml / detector 家族——
+        欄位值為 `"0-100 整數"` 之類文字描述）。只掃 schema 頂層；欄位值為 dict/list
+        的巢狀節點 `_is_numeric_field_desc` 回 False 自然跳過，**不做巢狀遞迴**。
+      - JSON Schema 格式呼叫點（reasoning 家族 `{"type": "integer"}` 之類）由
+        Pydantic model_validate 層負責轉型（親驗字串數字可被 Pydantic coerce），
+        本 helper 對其 no-op 屬刻意分工，非涵蓋缺口。
+    """
+    if not isinstance(result, dict) or not isinstance(schema, dict) or not schema:
+        return result
+
+    for field, desc in schema.items():
+        if not _is_numeric_field_desc(desc):
+            continue
+        if field not in result:
+            continue
+        value = result[field]
+        # bool 是 int 子類，但語義上不是要轉的數字欄位值；已是 int/float 亦不動。
+        if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
+            continue
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        coerced = None
+        try:
+            coerced = int(stripped)
+        except (TypeError, ValueError):
+            try:
+                coerced = float(stripped)
+            except (TypeError, ValueError):
+                coerced = None
+        if coerced is None:
+            logger.warning(
+                "LLM numeric field '%s' returned non-coercible string %r "
+                "(schema desc %r); preserving original value for downstream defense.",
+                field, value, desc,
+            )
+        else:
+            result[field] = coerced
+    return result
+
+
 async def ask_llm(
     prompt: str,
     schema: Dict[str, Any],
@@ -270,8 +366,14 @@ async def ask_llm(
                 timeout=timeout
             )
         logger.debug(f"{provider_name} response received, size: {len(str(result))} chars")
+        # 數值欄位 coerce 單一收斂點（CORE-2 / AF-1 / MP-2 三層根解）：依 schema 宣告把
+        # 弱模型回的字串分數 int/float 化，字串永不流入 ranking/mmr/whoRanking sort。
+        # LLMError（provider 失敗 sentinel）不 coerce——其為錯誤而非合法結果，且空 dict
+        # 迭代無意義；跳過保住 falsy 契約與型別分辨。
+        if not isinstance(result, LLMError):
+            result = _coerce_numeric_fields(result, schema)
         return result
-        
+
     except asyncio.TimeoutError as e:
         timeout_msg = f"LLM call timed out after {timeout}s with provider {provider_name}"
         logger.error(timeout_msg)

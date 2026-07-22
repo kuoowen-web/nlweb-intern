@@ -855,7 +855,10 @@ class AuthDB:
             "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
             "CREATE INDEX IF NOT EXISTS idx_users_verification_token ON users(email_verification_token)",
             "CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(password_reset_token)",
-            "CREATE INDEX IF NOT EXISTS idx_org_memberships_user ON org_memberships(user_id)",
+            # W-3+W-4（D-2026-07-20 規則 3）：user_id 加 UNIQUE（一 email 一公司），
+            # 與 alembic migration bccf83d23bc2 一致 —— UNIQUE index 兼具查詢用途，
+            # 取代原非唯一 idx_org_memberships_user。
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_org_memberships_user ON org_memberships(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_org_memberships_org ON org_memberships(org_id)",
             "CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token)",
             "CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email)",

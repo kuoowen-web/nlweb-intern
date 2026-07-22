@@ -4,6 +4,12 @@ Qwen3-Embedding-4B local embedding provider (INT8/FP16 quantization).
 Uses sentence-transformers with Qwen3-Embedding-4B for local embedding generation.
 Singleton pattern: model loaded once, reused across all calls.
 Outputs 1024-dimensional embeddings.
+
+NOTE (2026-07-16): Dormant path under current production config —
+config_embedding.yaml prefers "openrouter" (fallback "deepinfra"); this local
+provider only runs if the provider is explicitly switched to "qwen3" (config or
+dev query-param override). Offline indexing (cloud_embed.py) loads
+SentenceTransformer directly and does NOT go through this module.
 """
 
 import asyncio

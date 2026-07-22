@@ -9,7 +9,7 @@ Characterization gate：抽前抽後 `context_map_to_summary` /
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 
 from reasoning.schemas_live import (  # noqa: E402
     ContextMap,

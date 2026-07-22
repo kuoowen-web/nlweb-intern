@@ -194,3 +194,15 @@ export function shouldSaveLRSnapshot(triggeringLRSid, loadedId, matchSessionId) 
     }
     return true;
 }
+
+/**
+ * Strip 繼承的 data-lr-content marker 再複製 dataset（replay / 回顧重建共用）。
+ * R8 BLOCKER 1 紀律：重建 wrapper 整包複製 dataset 會帶進繼承 marker，
+ * 需 strip 後由判定重打（replay 路徑）或不打（回顧唯讀路徑）。
+ * Pure function（無 DOM、無副作用）——node --test 可直測。
+ */
+export function stripLRContentDataset(persistedDataset) {
+    const copy = { ...(persistedDataset || {}) };
+    delete copy.lrContent;
+    return copy;
+}

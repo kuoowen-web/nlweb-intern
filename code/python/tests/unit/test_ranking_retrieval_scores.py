@@ -16,7 +16,7 @@ import asyncio
 import threading
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 import core.ranking as ranking_mod
 from core.ranking import Ranking

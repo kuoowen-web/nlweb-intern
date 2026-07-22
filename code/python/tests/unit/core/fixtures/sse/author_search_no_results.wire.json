@@ -1,0 +1,12 @@
+{
+  "message_type": "author_search_no_results",
+  "content": "找不到該作者的相關報導。",
+  "timestamp": 1721000000000,
+  "message_id": "h-abc#7",
+  "conversation_id": "conv-abc",
+  "sender_info": {
+    "id": "nlweb_assistant",
+    "name": "NLWeb Assistant"
+  },
+  "user_id": "user-uuid-x"
+}

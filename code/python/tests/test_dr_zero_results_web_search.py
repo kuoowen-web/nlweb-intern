@@ -21,7 +21,7 @@ import sys
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from reasoning.research_state import ResearchState
 from reasoning.orchestrator import DeepResearchOrchestrator

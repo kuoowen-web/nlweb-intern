@@ -1086,7 +1086,13 @@ class LiveResearchOrchestrator(OrchestratorBase):
             state = await self._run_stage_2(state)
         elif next_stage == 3:
             state = await self._handle_stage_2_response(state, user_message, auto_continue)
-            state = await self._run_stage_3(state)
+            if self._stage_2_has_incomplete_topics(state):
+                # 一致性暫停（pause_confirm）後 user 已在此 checkpoint 確認方向 → 回 Stage 2
+                # 把剩餘核心主題蒐集完，不硬推進 Stage 3（否則漂移暫停後剩餘主題被永久跳過）。
+                # suppress_consistency_pause=True：這一趟不再因漂移暫停，避免反覆 soft-lock。
+                state = await self._run_stage_2(state, suppress_consistency_pause=True)
+            else:
+                state = await self._run_stage_3(state)
         elif next_stage == 5:
             state = await self._handle_stage_4_response(state, user_message, auto_continue)
             if state.stage_status == "checkpoint":
@@ -1348,6 +1354,23 @@ class LiveResearchOrchestrator(OrchestratorBase):
         # 產出提案
         outline = self._context_map_to_outline(context_map)
         proposal = f"## 研究結構提案\n\n{outline}\n\n這是我整理的研究結構，你覺得如何？需要調整嗎？"
+
+        # Consistency Monitor 牙齒（pause_confirm）：BAB loop 偵測到研究方向漂移而提早
+        # 停下（loop_engine.py: paused_by_consistency=True）。此處把 checkpoint 提案標成
+        # 「漂移觸發的暫停」而非正常收斂，讓 user 知道要先確認方向再繼續，而不是把同一句
+        # 通用提案當成一切正常。dubao_voice_message 已在 loop 內 emit 過 narration，故
+        # checkpoint banner 優先用 drift_description（補「為什麼」），避免與旁白完全重複。
+        if engine.paused_by_consistency and engine.consistency_review is not None:
+            drift_note = (
+                engine.consistency_review.drift_description
+                or engine.consistency_review.dubao_voice_message
+                or "研究方向可能有些偏移。"
+            )
+            proposal = (
+                f"⚠️ 一致性檢查發現研究方向可能偏離了原本的問題：{drift_note}\n\n"
+                f"我先停下來跟你確認——下面這個研究結構，是要照這個方向繼續，"
+                f"還是需要調整回原本的重點？\n\n{proposal}"
+            )
 
         # 初始 query 格式 spec 抽取（傳輸層）：把 user 初始 prompt 內嵌的
         # 章節 / 字數 / 引用格式 / 特殊元素抽成結構化欄位、落進既有下游欄位，
@@ -2088,8 +2111,41 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
     # ──── Stage 2: Per-Section 資料策略 + 蒐集 ─────────────────
 
-    async def _run_stage_2(self, state: LiveResearchStageState) -> LiveResearchStageState:
-        """Stage 2: 對每個 section 執行 focused B->A->B' loop。"""
+    def _stage_2_has_incomplete_topics(self, state: LiveResearchStageState) -> bool:
+        """Stage 2 是否仍有核心主題未蒐集完。
+
+        用於一致性暫停後判斷：要回 Stage 2 續蒐集，還是進 Stage 3。
+        - 正常跑完 Stage 2 → 全部核心 topic 都在 completed_sections → False。
+        - 一致性 pause_confirm 提早停 → 尚有核心 topic 未完成 → True。
+        - context_map 缺失 / 解析失敗 → False（不阻擋既有推進，交回 Stage 3 既有邏輯）。
+        """
+        if not state.context_map_json:
+            return False
+        try:
+            cm = ContextMap.model_validate_json(state.context_map_json)
+        except Exception as e:
+            logger.warning(
+                f"[LIVE RESEARCH] _stage_2_has_incomplete_topics: context_map 解析失敗，"
+                f"視為無未完成主題（non-fatal）: {e}"
+            )
+            return False
+        return any(
+            t.topic_id not in state.completed_sections
+            for t in cm.topics
+            if t.relevance == "core"
+        )
+
+    async def _run_stage_2(
+        self,
+        state: LiveResearchStageState,
+        suppress_consistency_pause: bool = False,
+    ) -> LiveResearchStageState:
+        """Stage 2: 對每個 section 執行 focused B->A->B' loop。
+
+        suppress_consistency_pause：一致性暫停後 user 已確認方向、回頭續蒐集剩餘主題時
+        設 True——這一趟不再因一致性 pause_confirm 提早停，避免同一次 Stage 2 反覆卡在
+        漂移暫停（drift 若持續存在會每輪觸發）造成 soft-lock。首次進 Stage 2 為 False。
+        """
         self._maybe_reset_offline_counters(state)  # online substantive advance → reset（plan 3d）
         state.advance_to_stage(2)
         await self._emit_stage_change(2)
@@ -2135,6 +2191,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
         # engine 跑完後 merge 回 existing_pool，counter 跟著遞增（§6.3 選項 1）。
         existing_pool = deserialize_evidence_pool(state.evidence_pool_json)
         counter = max(existing_pool.keys()) if existing_pool else 0
+
+        # Consistency Monitor 牙齒（pause_confirm）：某主題偵測到方向漂移時，記下該次
+        # review 並提早跳出主題迴圈（見迴圈內 break），改成停在 checkpoint 問 user，
+        # 而非默默把剩餘主題全跑完。None = 全程無漂移暫停，走正常「蒐集完成」提案。
+        consistency_pause = None
 
         for topic in core_topics:
             if topic.topic_id in state.completed_sections:
@@ -2184,12 +2245,25 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
             await self._emit_narration(f"「{topic.name}」的資料蒐集完成。")
 
+            # Consistency Monitor 牙齒（pause_confirm）：本主題的 BAB loop 偵測到方向漂移。
+            # 本主題資料已蒐集完（上面已 append completed_sections），但剩下的主題「不」再
+            # 默默跑完——提早跳出、停在 checkpoint 讓 user 確認方向。未完成的主題不進
+            # completed_sections，user 確認後 resume 會自然從下一個未完成主題續跑。
+            if engine.paused_by_consistency and not suppress_consistency_pause:
+                consistency_pause = engine.consistency_review
+                logger.info(
+                    f"[LIVE RESEARCH] Stage 2 paused by consistency monitor "
+                    f"at topic '{topic.name}' — 提早停 checkpoint 等 user 確認方向"
+                )
+                break
+
         # Evidence Sufficiency Narration（模塊5 Task 2，通道 A）
         # BAB 全部 topic 跑完後評估 evidence pool 充分度，emit SSE narration 給 user
         # （純前端透明度，不進 writer prompt）。engine 為最後一輪 loop 的實例，其
         # evidence_pool 即跨 engine 累積 merge 後的完整 pool（line 1620 existing_pool = engine.evidence_pool）。
         # core_topics 為空時 engine 未綁定，跳過（與既有 existing_pool 取用一致）。
-        if core_topics:
+        # consistency_pause 時代表提早暫停、尚未蒐集完，不喊「充分度」（不謊報完成）。
+        if core_topics and consistency_pause is None:
             await engine.emit_evidence_sufficiency_narration()
 
         # 更新 state
@@ -2200,14 +2274,30 @@ class LiveResearchOrchestrator(OrchestratorBase):
             f"{len(existing_pool)} entries (max id={counter})"
         )
 
-        # FIX-7b (2026-05-29): Stage 2 完成後 emit consolidation summary。
-        # Cayenne #8 根因：Stage 2 結束缺「最終研究地圖」，user 只看到一坨碎念後反問
-        # 「所以現在的結構是啥」。這個 narration 是給 user 看的主訊息，格式化呈現：
-        #   - 核心主題列點 + 各主題 evidence 筆數
-        #   - 非 internal narration，用既有 _emit_narration 機制推送
-        await self._emit_stage2_consolidation(context_map, len(existing_pool))
+        if consistency_pause is not None:
+            # Consistency Monitor 牙齒（pause_confirm）：提早暫停 → 不喊「蒐集完成」，
+            # 改成明確告知漂移並請 user 確認方向。drift_description 補「為什麼」，
+            # dubao_voice_message 已在 loop 內 emit 過旁白，故此處優先用前者避免重複。
+            drift_note = (
+                consistency_pause.drift_description
+                or consistency_pause.dubao_voice_message
+                or "研究方向可能有些偏移。"
+            )
+            proposal = (
+                f"⚠️ 我在蒐集資料的過程中發現研究方向可能偏離了原本的問題："
+                f"{drift_note}\n\n我先暫停下來跟你確認——要照目前的方向繼續蒐集剩下的主題，"
+                f"還是需要先調整研究重點？"
+            )
+        else:
+            # FIX-7b (2026-05-29): Stage 2 完成後 emit consolidation summary。
+            # Cayenne #8 根因：Stage 2 結束缺「最終研究地圖」，user 只看到一坨碎念後反問
+            # 「所以現在的結構是啥」。這個 narration 是給 user 看的主訊息，格式化呈現：
+            #   - 核心主題列點 + 各主題 evidence 筆數
+            #   - 非 internal narration，用既有 _emit_narration 機制推送
+            await self._emit_stage2_consolidation(context_map, len(existing_pool))
 
-        proposal = "所有段落的資料都蒐集完了。需要補充哪個部分嗎？還是可以進入寫作準備？"
+            proposal = "所有段落的資料都蒐集完了。需要補充哪個部分嗎？還是可以進入寫作準備？"
+
         state.set_checkpoint(proposal)
 
         # P0 #5: build evidence_list from all topics using persisted evidence_pool

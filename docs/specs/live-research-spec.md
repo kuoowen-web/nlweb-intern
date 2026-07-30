@@ -1,7 +1,7 @@
 # Live 研究（Beta）技術規格
 
 > **狀態**：Beta — 6-Stage Dialog Loop + 前端 UI + DR-parity 三層防禦 land
-> **最後 code re-sync**：2026-07-10（`main`，Batch 2 docs review B4a 校正；先前 2026-06-23 §7.3.1）
+> **最後 code re-sync**：2026-07-28（`main`，C 線稽核補漏批：§4.3.2 drift-pause teeth + §4.11 backward navigation + §7.4.1 KG 拼接拔除 + §4.9.1 schema 補全；先前 2026-07-10 Batch 2 docs review）
 > **權威性**：本文定義「系統必須怎麼行為」的契約（state machine / schema / failure 紀律 / 測試 gate）。行號類事實交給 indexer，本文不存行號。新人導覽地圖見 `docs/reference/lr-onboarding.md`。
 > **關聯文件**：
 > - `docs/reference/lr-onboarding.md`（新人導覽 + 心智模型 + file:line 指路）
@@ -193,10 +193,10 @@ Frontend SSE handler 對 unknown `message_type` 預設 merge（避免 SSE 紀律
 |------|------|
 | Entry | `await self._emit_stage_change(stage_id)` |
 | 進行中 | per-phase `_emit_phase` / per-event `_emit_narration` |
-| Wait user | `_emit_checkpoint(checkpoint_type, payload)` + `await _save_state(state)` |
-| Exit | `complete_stage()` → `_save_state` → next stage entry |
+| Wait user | `_emit_checkpoint(checkpoint_type, payload)` + `await _persist_checkpoint_boundary(state)` |
+| Exit | `complete_stage()` → `_persist_checkpoint_boundary` → next stage entry |
 
-**Persistence rule**：每個 stage 邊界 + 每次 user reply 處理後**必須** `_save_state`。中途崩潰可由 `_load_state` 恢復。
+**Persistence rule（方法名層級）**：每個 durable boundary（set_checkpoint / complete_stage 後、return 前）**必須**呼叫 orchestrator 的 `_persist_checkpoint_boundary`。鏈路：`_persist_checkpoint_boundary`（離線跨 checkpoint 計數 + 判 cap，§7.3）→ `_persist_progress`（wrap 底層、save fail log + raise 不 silent）→ handler `_save_state`（DB 寫入）。mid-loop 落盤（Stage 2 per-topic / Stage 5 per-section）走 `_persist_progress`（不計離線 checkpoint 數）。中途崩潰可由 `_load_state` 恢復。
 
 #### 4.1.3 User Reply Contract
 
@@ -255,10 +255,39 @@ narration：
 #### 4.3.2 收斂條件 + Consistency Monitor
 
 - **is_stable**：`refine_context_map` output 含 `is_stable=true` → break
-- **Consistency Monitor**：`recommended_action="pause_confirm"` → set `paused_by_consistency=True` + break
+- **Consistency Monitor**：每輪 refine 後跑 `_run_consistency_check`，review 每輪 append `state.consistency_drift_log`（drift_level=none 也 append，audit trail 完整）；`recommended_action="pause_confirm"` → engine set `paused_by_consistency=True` + break。monitor 本身失敗 → 降級續跑 + per-run 一次降級旁白（不可 silent）
 - **Max iterations**：跑滿 `max_iterations=3` → 自然 exit
 
 每輪結束 emit `bab_phase4 completed` 給前端 progress。
+
+##### 漂移暫停 teeth（drift pause，2026-07-23 land）
+
+engine 的 `paused_by_consistency` 只是 break——「暫停要真的問到 user、user 的回答要真的改變流程」由 orchestrator 層 teeth 落實（plan: lr-consistency-pause-teeth）：
+
+**Stage 1 掛載點**（`_run_stage_1`）：BAB 結束後見 `engine.paused_by_consistency` → checkpoint proposal 換成 drift banner（`_build_drift_pause_proposal` = `lr_copy.DRIFT_PAUSE_BANNER`「方向可能偏了，要照目前方向繼續還是調整回原本重點？」+ 具體漂移描述，描述空則只出 banner 主體）。漂移暫停時**不做**初始格式抽取（結構未穩定，抽取無意義）。**不設 flag**——Stage 1 checkpoint 回覆本來就走 dialog loop 分流（confirm / adjust / clarify，§4.3.3-4.3.5），banner 只換提案文字。context_map + evidence_pool 照常先 persist（資料完整性無虞）。
+
+**Stage 2 掛載點**（`_run_stage_2` per-topic loop）：某 topic 的 engine 見 `paused_by_consistency` → 該 topic **不標 `completed_sections`**（與 offline `stopped_early` 共用「不標 completed + persist + return」資料完整性行為；兩 flag 語意正交——漂移不是離線，**不記 `offline_since`**，不污染 offline wall-clock cap）→ emit drift banner checkpoint（帶 evidence_list / evidence_total，user 一併看到已蒐集實況）+ set **`state.stage2_drift_paused = True`** + persist，停在 Stage 2 等 user。
+
+**Stage 2 checkpoint 回覆三路 dispatch**（`continue_from_checkpoint` 的 next_stage==3 分支，順序固定）：
+
+1. `pending_reframe_json` 非空 → `_handle_pending_reframe(target_stage=2)`（reframe confirm round）。**必須先於 drift flag 檢查**——drift adjust 分支 emit reframe proposal 時已清 drift flag、狀態改由 pending 接管；順序反了 user 的「OK」會被當 Stage 2 feedback 記下、reframe 永不 apply（AR R2 BLOCKER 1）。
+2. elif `stage2_drift_paused` → `_handle_drift_checkpoint_response` 分類意圖分流（不能只當 feedback 記下照原方向推進——那樣「調整方向」會被吞掉）。
+3. else → 既有正常路徑 `_handle_stage_2_response` → `_run_stage_3`。
+
+**`_handle_drift_checkpoint_response` 分流**：auto_continue / 空訊息視為 confirm；否則 `_classify_confirmation_intent`（confirm / cancel / adjust）：
+
+- **confirm / cancel** → 清 drift flag → `_has_incomplete_core_topics` 為真 → **回補未完成 core topic**：`_run_stage_2(suppress_consistency_pause=True)`；無未完成（防呆）→ 顯式進 `_run_stage_3` 閉環，不依賴 fall-through。
+- **adjust** → `_parse_stage_1_intent` 解 reframe op：解出 → 清 drift flag（狀態改由 `pending_reframe_json` 接管）+ emit reframe confirm proposal（target_stage=2）；解不出 → **不 silent advance**，narration 請 user 具體說明 + re-emit drift checkpoint（flag 保留，等下一輪）。
+
+**reframe confirm round 的 target_stage=2 收尾**（`_handle_pending_reframe`）：confirm → apply reframe + **清空 `completed_sections`**（全新結構所有 topic 未完成，防殘留舊 ID 誤跳過）+ `_run_stage_2(suppress_consistency_pause=True)` 重蒐；cancel → 語意=「不想這樣重組」=「照原方向繼續」→ 防禦性清 drift flag + 直接回補（**不 re-emit 原 drift banner**——flag 已清，re-emit 會變 dead banner：承諾分流但下一輪已走不進 drift 分支，AR R2 BLOCKER 2）。
+
+**`suppress_consistency_pause`**：`_run_stage_2` 的 per-call 函式參數（不寫 state、不持久化），回補趟 / reframe 重蒐趟強制關閉一致性監控，防「持續漂移每輪反覆暫停」soft-lock；作用域一次呼叫，全域 flag `live_research_consistency_monitor` 不受影響。
+
+**`_has_incomplete_core_topics`**：core topic ∉ `completed_sections` 即未查完；`context_map_json` 解析失敗＝資料毀損 → log + 回 True **不放行 Stage 3**（放行不是保守；交回補路徑，真毀損在 `_run_stage_2` fail-loud）。
+
+**flag 清除點窮舉**：drift 意圖處理完（confirm/cancel 回補、adjust 轉 reframe）即清；`advance_to_stage` / `reset_to_stage` / `reset_for_recollect`（`stage_state.py`）皆一律清 `stage2_drift_paused`（guard-type routing flag，不殘留跨 stage / 跨導航）。
+
+測試：`tests/unit/reasoning/test_lr_consistency_pause_teeth.py`。
 
 ##### SEARCH_REQUIRED 二次補搜（DR-parity Task 2）
 
@@ -403,7 +432,7 @@ Round 2: user 回覆
 
 Stage 1 ContextMap 定案後，Stage 2 對每個 `relevance == "core"` topic 跑 per-section BAB Loop（focus_topic_ids 注入）。Engine `seed_evidence_pool` + `seed_counter` 從 Stage 1 累積過繼（跨 engine 共用 evidence_id space）。
 
-完成後 emit checkpoint「章節 detail，需要調整嗎？」。
+完成後 emit checkpoint「章節 detail，需要調整嗎？」。若某 topic 觸發一致性漂移暫停 → 不標 completed、emit drift banner checkpoint + `stage2_drift_paused=True`，回覆走三路 dispatch（見 §4.3.2 漂移暫停 teeth）。
 
 **Stage 2 誠實 Narration**（OQ 1 拍板，原 §4.12.4）：
 - 繁中 user-friendly
@@ -726,7 +755,7 @@ VP-7 single-step flow 之後，每段完成即停在 per-section checkpoint 等 
 但注意：「斷線不取消」改版後，斷線 server **不再 `.cancel()` task**，
 而是把當前 stage 跑到下個 checkpoint 才停存檔（離線跨 checkpoint 計數 + 燒錢上限進 DB state，§7.3 / §4.9）。
 
-state 持久化：每段成功 `state.written_sections.append(...)` 同步 `last_completed_section_index = i` 並 `_save_state`。
+state 持久化：每段成功 `state.written_sections.append(...)` 同步 `last_completed_section_index = i` 並 `_persist_progress`（mid-loop 落盤；boundary 層見 §4.1.2 persist 鏈）。
 
 **State Schema（現況）**：
 ```python
@@ -888,33 +917,65 @@ Stage 6 組 H1 前呼叫 `_generate_report_title`（low-tier LLM，input=researc
 ```python
 @dataclass
 class LiveResearchStageState:
-    current_stage: int
+    # === Stage 追蹤 ===
+    current_stage: int               # 0=未開始, 1-6
+    stage_status: str                # pending / in_progress / checkpoint / completed
+    checkpoint_prompt: str           # 當前 checkpoint 的提案文字
+    failed_intent_parse_count: int   # Stage 1 intent parser 連續失敗計數（§4.3.5）
+    # === ContextMap ===
     context_map_json: str
-    initial_context_map_json: str
-    evidence_pool_json: str  # Dict[int, EvidencePoolEntry]
-    executed_searches: List[str]
+    initial_context_map_json: str    # Version 0 snapshot
+    # === Stage-specific 輸出 ===
     completed_sections: List[str]
-    last_completed_section_index: int
+    style_features_json: str
+    format_specs: Dict[str, Any]     # 含 chapters override（§4.6）
+    book_outline_json: str           # BookOutline JSON；空=尚未規劃（§4.7.5 idempotent guard 依此）
     written_sections: List[Dict]
+    final_report_markdown: str       # 路 3 P-回顧：Stage 6 後端組好的整份 full_report markdown
+                                     # （§7.4.1；不含 KG——2026-07-21 已拔 KG JSON 拼接）
+    generated_report_title: str      # 純標題值；只在「真生成」時存，降級/舊 session 一律 ""（§7.4.1）
+    # === Guard / routing 旗標（reset_to_stage / reset_for_recollect 一律清，§4.11）===
+    pending_format_confirmation: bool     # Stage 4 mixed path 等 confirm（§4.6.4）
+    pending_reframe_json: str             # reframe confirm round pending op（§4.3.4 D-1）
+    pending_reframe_proposal_markdown: str  # reframe proposal 獨立欄位，與 checkpoint_prompt 解耦
+    stage2_drift_paused: bool             # Stage 2 一致性漂移暫停 routing flag（§4.3.2 teeth）
+    pending_special_element_json: str     # R2 表格章節指涉澄清 pending（§4.6.3）
+    pending_recollect_confirmation: bool  # recollect informed-consent 兩段式旗標（§4.7.8）
+    pending_restart_confirmation: bool    # backward-nav restart 兩段式確認旗標（§4.11）
     # stage_5_stop_requested: bool  ← 已移除（placebo，停止按鈕機制廢棄，見 §4.7.3）
     stage_5_writer_running: bool
     stage5_waiting_for_user: bool
-    pending_reframe_json: Optional[str]
-    pending_format_confirmation: bool
-    format_specs: Dict[str, Any]
-    user_voice: UserVoice
-    style_features: Optional[Dict]
-    book_outline_json: Optional[str]
-    final_report_markdown: str        # 路 3 P-回顧：Stage 6 後端組好的整份 full_report markdown（§7.4）
-    recollect_count: int              # Stage 5 退回補搜累計次數，cap 計數（§4.7.8）
-    pending_recollect_confirmation: bool  # recollect informed-consent 兩段式 confirm 旗標（§4.7.8）
-    # offline_since / offline_capped / offline_cap_reason / offline_checkpoint_advances
-    # （既有離線防呆欄位，stage_state.py 實際定義，本精簡版 schema 表省略未列——
-    # plan: lr-disconnect-midstage-persist 未新增欄位，僅擴張既有欄位的寫入時機，見 D-4）
-    ...
+    last_completed_section_index: int
+    hallucination_corrected: bool    # Stage 6 據此 narration 提示檢視 Low 段落
+    # === Loop / evidence ===
+    executed_searches: List[str]
+    evidence_pool_json: str          # Dict[int, EvidencePoolEntry] serialized
+    # === Track A/D/E/F（DR-parity sprint）===
+    evidence_usage: Dict[int, List[Dict]]   # grounded claims；REJECT 也入庫標 critic_status（§4.3.2）
+    rejected_claims_log: List[Dict]         # append-only audit（REJECT batch trace）
+    schema_version: int                     # v1=sprint 前舊 session（缺欄位 fallback 1）；
+                                            # v2=現行。v1 被 continue/revise API 拒 409（§7.4.2）
+    time_constraint: Optional[TimeRange]    # Track E temporal binding；single source of truth
+    knowledge_graph: Optional[KnowledgeGraph]  # Track D；None=未啟用/無輸出 → pass-through
+    critic_section_reviews: Dict[int, Dict]    # F1 publish gate 結果（§6.8）
+    consistency_drift_log: List[Dict]          # F2 每輪 append-only audit（§4.3.2）
+    # === 離線防呆燒錢上限（§7.3）===
+    offline_since: Optional[float]
+    offline_capped: bool
+    offline_cap_reason: str          # "next_checkpoint" / "wall_seconds"
+    offline_checkpoint_advances: int
+    # === Recollect cap（§4.7.8）===
+    recollect_count: int             # cap 計數；reset_to_stage / reset_for_recollect 皆不清
+    # === User voice ===
+    user_voice: UserVoice            # §4.6.1
+    # === Metadata ===
+    created_at: str
+    last_updated_at: str
 ```
 
-每次 stage transition / user reply 處理後 `_save_state`。
+> **序列化紀律**：int-key dict（evidence_usage / critic_section_reviews / user_voice.revise_instructions）JSON 化時 key 轉 str、restore 轉回 int（容錯 skip）；Pydantic 欄位（time_constraint / knowledge_graph）invalid payload → log warning + fallback None。所有欄位有 default → 舊 session restore 自然兼容（guard 旗標 fallback False，絕不殘留誤觸）。
+
+每次 stage transition / user reply 處理後走 §4.1.2 persist 鏈（`_persist_checkpoint_boundary` → `_persist_progress` → handler `_save_state`）。
 
 #### 4.9.2 `lr_session_id` UUID Lifecycle
 
@@ -937,7 +998,7 @@ class LiveResearchStageState:
 | LLM TypeAgent retry × N 仍失敗 | skeleton fallback + emit narration 明示「降級為 X」 |
 | outline planner LLM call fail | skeleton fallback (chapter_source 衍生) + narration 明示降級 |
 | ~~state load fail in `_reload_stop_flag`~~ | ~~log + return False~~（`_reload_stop_flag` 隨停止按鈕移除，已不存在，§4.7.3）|
-| state save fail | log + `raise`（caller bubble up）|
+| state save fail（`_persist_progress` wrap handler `_save_state`）| log + `raise`（caller bubble up）|
 | Retrieval fail | narration 明示「資料來源蒐集降級」 |
 | **`_execute_search` per-seed 檢索例外**（如 embedding 雙 provider 同失敗，2026-07-05 `84288461`）| log + per-run 一次降級旁白 `lr_copy.RETRIEVAL_ERROR_DEGRADED_NARRATION`（與 SEARCH_REQUIRED「補搜**無結果**」語義分離：這裡是查詢**出錯**），跳過該 seed 續跑 |
 | **SEARCH_REQUIRED 二次補搜無結果 / re-run 仍非 DRAFT_READY**（§4.3.2）| forensic log + per-run 一次降級旁白 `lr_copy.SEARCH_REQUIRED_DEGRADED_NARRATION`，用原 analyst_output 續跑 |
@@ -948,6 +1009,52 @@ class LiveResearchStageState:
 | `_parse_stage_*_intent` LLM fail | retry / fallback intent + clarifying_question path (§4.3.5) |
 | Catch Exception silent pass | **禁止** — 任何 catch 必 log warning 且不吞錯 |
 | **Stage 2 BAB loop client 斷線**（plan: lr-disconnect-midstage-persist，D-7）| cooperative stop（`_check_connection` 回 "offline" 不 raise，設 `engine.stopped_early=True`）+ 每 topic 落盤；**`completed_sections` 只在 `stopped_early=False`（正常收斂）時 append**，中途被打斷的 topic 不標記完成、evidence 仍留供 resume 續跑；**禁** raise ResearchCancelledError 走 error 路徑蒸發進度 |
+
+### 4.11 In-dialog Backward Navigation（退回上一階段 / 重新規劃）
+
+跨 stage 導航子系統（plan: lr-backward-nav，2026-06-19 land；confirm modal U3 後補）。user 在對話中可**退一階**（back_one）或**回 Stage 1 重新規劃**（restart），不開新 session、不重蒐 evidence。
+
+#### 4.11.1 入口與傳輸
+
+- **前端按鈕**：checkpoint reply 區「退回上一階段」（`lrBtnNavBack`）+「重新規劃」（`lrBtnNavRestart`），僅 `navAllowed = (stage 2-5)` 顯示（Stage 1 無上一階段；Stage 6+/completed 不允許退已匯出）。legacy session（schema_version < 2）兩鈕視覺鎖定 → 點擊開唯讀 modal（§7.4.2）。
+- **傳輸**：POST `/api/live_research/continue` body `nav_action`（`"back_one"` / `"restart"`；正常前進不帶此欄位）。`continue_from_checkpoint` 在 forward 路由**之前**攔截 nav_action；再之前先消費 `pending_restart_confirmation`（見 §4.11.3）。
+
+#### 4.11.2 back_one（退一階）
+
+四個破壞性動作（restart / recollect / export / back_one）中**唯一無後端 consent gate** 者 → 前端補知情 confirm modal：動態警告清單 `lrBackNavClearedItems(currentStage)`（`static/js/features/lr-nav-confirm.js`）**鏡像 `reset_to_stage` 真值表**——改後端清除範圍必同步該表與其測試。**文案語意紅線**：back_one 純導航不燒 BAB，絕不可寫成「按下去就重新蒐集」；重算發生在之後 forward 重跑。
+
+後端 `_navigate_back_one`（不打 LLM）：
+- `current_stage <= 1` → 邊界：narration「已經在最開始的階段了」+ 維持原 checkpoint。
+- 否則 `reset_to_stage(current-1)` + emit `stage_change`（前端據此清更晚 stage 的 section cards）+ 通用通知 checkpoint（`lr_copy.NAV_BACK_NOTICE`）+ persist。
+
+#### 4.11.3 restart（重新規劃，兩段式 confirm）
+
+restart 會清已寫章節（不可逆）→ 後端兩段式 informed-consent：
+
+- **第一輪**（`_navigate_restart`）：set `pending_restart_confirmation=True` + emit `lr_copy.NAV_RESTART_CONFIRM_PROMPT` checkpoint（「會清空已寫章節、資料保留，確定嗎？」）。**章節此時未清**。
+- **第二輪**（`_consume_restart_confirmation`，在 `continue_from_checkpoint` 入口、nav/forward 路由之前消費；進場一律先清 pending flag）四段式路由：
+  1. 含確認 token 的 bounded affirmative → `_do_restart`（不打 LLM）。
+  2. meta-intent 分類回 `None`（LLM 故障）→ **fail-loud**：不清章節、重設 pending flag、re-emit confirm prompt + 系統端降級旁白——絕不因分類器死掉放行刪章、不怪 user。
+  3. `ABORT`（「算了/取消」）→ 取消、不動章節、回原 checkpoint。
+  4. 無 token 短肯定句兜底 → `_do_restart`；其餘 substantive（「改第 3 段」）→ 回 `None` 讓 caller fall through 正常 forward dispatch（「不漏使用者任何一句話」鐵律）。
+
+`_do_restart`：`reset_to_stage(1)` + emit `lr_copy.NAV_RESTART_NOTICE` checkpoint——**復用既有 evidence_pool / context_map，不重蒐集、不重跑 BAB**；文案內建提示「換方向差很多的新題目建議開新研究」。
+
+#### 4.11.4 `reset_to_stage(target)` 真值表（`stage_state.py`）
+
+清「stage > target 的輸出 + 全 guard」；保留「pool / context / time / append-only audit / infra / cap 計數」：
+
+| 範圍 | 欄位 |
+|------|------|
+| **一律清（guard，防 phantom routing / 誤續寫）** | `failed_intent_parse_count` / `pending_reframe_json` / `stage2_drift_paused` / `pending_special_element_json` / `pending_reframe_proposal_markdown` / `pending_format_confirmation` / `hallucination_corrected` / `stage_5_writer_running` / `stage5_waiting_for_user` / `pending_recollect_confirmation` |
+| **一律清（Stage 5 輸出 + 推理產物；target 必 < 5）** | `completed_sections` / `written_sections` / `last_completed_section_index` / `evidence_usage` / `knowledge_graph` / `critic_section_reviews` / `user_voice.revise_instructions` |
+| **target ≤ 4 清** | `book_outline_json` + `format_specs.chapters`（rebind 新 dict 非 in-place pop，防污染 to_dict 淺引用快照）|
+| **target ≤ 2 清** | `style_features_json` + `executed_searches`（target==3 保留供重確認）|
+| **保留** | `evidence_pool_json` / `context_map_json` / `initial_context_map_json` / `time_constraint` / `schema_version` / `offline_*` / `user_voice.{citation_style,target_word_count,stage2_feedback}` / `created_at` / `recollect_count`；append-only audit（`rejected_claims_log` / `consistency_drift_log`）|
+
+**與 `reset_for_recollect` 的語意切割（不可合併）**：recollect = 補搜語意（target 固定 1 + `recollect_count`+1 + seed pool 疊加**重跑 BAB**，§4.7.8）；backward nav = 純導航語意（不疊加 evidence、不動 recollect_count、**不重跑 BAB**，由之後 forward run 自然覆蓋）。
+
+測試：`tests/test_lr_reset_to_stage.py`（真值表）+ `static/js/features/__tests__/lr-nav-confirm.test.js`（前端鏡像表）。
 
 ---
 
@@ -1089,6 +1196,23 @@ LR 已有自造 / 衍生的專屬 prompt path（非「完全 reuse DR」）：As
 
 **Per-run 外部呼叫 cap**：`gap_routing.max_external_calls_per_run`（預設 `6`）。WIKIPEDIA + WEB_SEARCH 真打外部前計數，達上限跳過並 emit 一次 user-facing 旁白（`_narrate_gap_cap_once`，per-run dedup）。被 gate / 空 query / cap 跳過的 gap 不消耗額度。
 
+### 6.7b tier6 進池相關性 gate（票 2026-07-28-m，2026-07-29 land `96cf423e`）
+
+`loop_engine.py` 的 `_relevance_gate_evidence_pool`，判定核心委派 `reasoning/relevance_gate_core.judge_irrelevant_source_ids`（DR/LR 共用，**gate prompt 唯一權威在 core 檔**——改判定規則兩邊同步生效，見 reasoning-spec §2.9）。
+
+**觸發**：`run_loop` 主迴圈每輪 Phase 3（mini-reasoning，含尾端 gap routing）結束後、Phase 4 refine 前，**無條件**呼叫——不可掛在 gap_resolutions 條件路徑內（direct-web 批不依賴 gap routing；無 gap 輪也要掃）。單一插點涵蓋兩類 tier6：direct-web 批（Phase 2 `_execute_search` 進池；`source="web"` 標記同票補——修既存錯標 internal bug）與 gap 批（Phase 3 尾端進池）。
+
+**判定契約**：
+- 只判 `source in {web, wiki}` 且未判過的增量 eid（engine 屬性 `_relevance_gate_judged_ids`，生命週期 = engine、不隨 run reset）；`llm_knowledge` 與站內不判
+- seed 池（`seed_evidence_pool` 全部進入路徑：Stage 2 per-topic / offline resume 重入 / recollect 退回 Stage 1）於 `__init__` 預載為已判——**跨 engine 一律豁免重判**（seed 批可能已被前 topic 引用，重判刪除 = dangling citation；dangling 防護優先於 fail-open 重判完整性）
+- fail-open：core 回 `None`（LLM 失敗 / 無法解析）→ 全保留**且不標已判**，同 engine 內下輪重判
+- 部分不相關 → pop `evidence_pool` + 同步 `_url_to_id`（pool = 唯一真相；`evidence_usage` / `context_map.evidence_ids` 的 dangling 由既有 pool-lookup 容錯層兜）；剔除 emit 一次旁白（per-run dedup）；cancel 類例外放行冒泡、一般例外 non-fatal
+- 全 tier6 刪光且池空 → 下游 C-1 章級 gate 自然走誠實查無（LR 無 early_return 機制）
+
+**已知接受殘留**：direct-web 批入池輪的 `formatted_results` 文字流（mini 消費在 gate 前、refine 吃 gate 前組好的 stale 字串）——結構推導層噪音；Writer / 報告層由引用白名單 + grounding 三層守。徹底解（入池前判 + 文字流重建）另案。詳 plan 風險表 (c)（`docs/in progress/plans/lr-tier6-relevance-gate-port-plan.md`）。
+
+**成本**：每輪有新 tier6 才 +1 次 low-tier 批次 call（≤ max_iterations 次/run；無新 tier6 零成本 skip）。
+
 ### 6.8 Publish Gate（Track F：F1 critic + F3 CoV-lite）
 
 `orchestrator.py` 的 `_run_publish_gate`。三層防禦的**第三層**（L1 = citation-id 白名單 / L2 = per-section entity grounding §6.9 / L3 = 本 publish gate）。
@@ -1192,7 +1316,7 @@ KG 是 D3 圖、不在 markdown 字串裡，另走 KG 視覺重建。
 
 **全 stage 回顧**：載入 completed session（`classifyLRResumeState` 回 `'completed'`）時**不重跑 pipeline**（restore read-only invariant），把既有 6 stage dot 改為 toggle、點到才 lazy render 該 stage 對話原貌。對話快照存獨立 top-level 欄位 `lr_dialog_snapshot`（**非** nested 在 `live_research_state`，避開後端 `_save_state` 整欄覆蓋 + 自由對話 `chat_history` restore loop 污染，見 §4.9）。
 
-**後端配套**：Stage 6 在 emit `final_result` 前把 `state.final_report_markdown` 設為整份報告（**H1 = low-tier LLM 生成的報告標題 + 原始查詢 blockquote 副標** + sections + references + KG markdown），隨 checkpoint boundary 落 `live_research_state` JSONB，前端主路徑直讀，與 export 逐字一致。生標題失敗 / timeout / 空回應 → H1 降級退回 `research_question` 且 `logger.warning`（不 silent fail，plan: lr-report-title-generation）。純標題值另存 `generated_report_title` 欄位供前端 fallback / debug。
+**後端配套**：Stage 6 在 emit `final_result` 前把 `state.final_report_markdown` 設為整份報告（**H1 = low-tier LLM 生成的報告標題 + 原始查詢 blockquote 副標** + sections + references；**不含 KG**——KG 的 ```json fence 拼接已於 2026-07-21 拔除：raw JSON 使檔案體積雙倍且不可讀，待 KG overhaul 後再議；KG 僅走 export SSE `knowledge_graph` payload 供前端 D3 視覺化），隨 checkpoint boundary 落 `live_research_state` JSONB，前端主路徑直讀，與 export 逐字一致。生標題失敗 / timeout / 空回應 → H1 降級退回 `research_question` 且 `logger.warning`（不 silent fail，plan: lr-report-title-generation）。純標題值另存 `generated_report_title` 欄位供前端 fallback / debug。
 
 #### 7.4.2 Legacy session（schema_version < 2）唯讀 modal（契約）
 
@@ -1235,7 +1359,7 @@ DR-parity sprint 前的舊 session（`schema_version < 2`，§4.9.1）不可被�
 |----|------|------|------|--------------|
 | **Unit** | pytest + fixture | 演算法 / schema / parser / typed action 正確性 | 0 | ✅ 必過 |
 | **Fixture Replay** | `mock_bab=true` + 真 admin login + 真 PG + Stage 3-6 全跑（**Stage 1+2 BAB 被 fixture 跳過**）| 「給定凍結的 BAB 產物，Stage 3-6 pipeline（writer/critic/guard/組裝）工程品質對不對？」 | 低（省 BAB token） | ✅ 必過 |
-| **Real Persona E2E** | `mock_bab=false` + 真實 retrieval + 真實 BAB + 真實 persona reply | Cayenne persona 全程真實 | 高（~$5） | ✅ release 前 ≥ 1 次 |
+| **Real Persona E2E** | `mock_bab=false` + 真實 retrieval + 真實 BAB + 真實 persona reply | 研究者 persona 全程真實 | 高（~$5） | ✅ release 前 ≥ 1 次 |
 
 **mock_bab 契約**：`mock_bab=true` 時 **Stage 1+2 整段 BAB Loop 跳過**，直接載入 fixture ContextMap + evidence_pool；Stage 3-6 跑真實 LLM（real admin login + 真 PG write，不用 dev bypass、不繞 PG schema）。用法見 `mock-bab-playbook.md`。
 
@@ -1257,7 +1381,7 @@ DR-parity sprint 前的舊 session（`schema_version < 2`，§4.9.1）不可被�
 
 Persona：台綜院研究員，七月專題「台灣綠能發展衝突，如何從國外案例借鏡」。
 
-Fixture：`code/python/reasoning/live_research/fixtures/real_energy_policy_state.json`（+ `code/python/tests/fixtures/lr_mock_bab_real/`）——原規劃檔名 `cayenne_pre_focus_state.json` 未落地（repo 與 git 歷史均無此檔，2026-07-10 校正）
+Fixture（mock_bab 載入目錄，2026-07-28 校正）：`code/python/tests/fixtures/lr_mock_bab_cayenne_2026_07/`——orchestrator 常數 `_MOCK_BAB_FIXTURE_DIRNAME` 單點切換；2026-07-15 取代舊 `lr_mock_bab_real/`（舊目錄保留供 rollback）。內容 = Cayenne 綠能命題 prod session `8e1db658` 真語料（567 筆 evidence / 20 topics / 3 章 / 172 grounded claims）。另 `code/python/reasoning/live_research/fixtures/real_energy_policy_state.json` 仍在（前端 review-render test 對照用），**非** mock_bab 載入來源。原規劃檔名 `cayenne_pre_focus_state.json` 未落地（repo 與 git 歷史均無此檔，2026-07-10 校正）
 
 **user reply 序列**（fixture-mutation E2E）：
 1. Stage 1: reframe 為「前言 / 國內案例 / 國外案例 / 結果與討論 / 結論」5 章
@@ -1275,7 +1399,7 @@ Fixture：`code/python/reasoning/live_research/fixtures/real_energy_policy_state
 
 #### 8.4.2 後續 Persona Slot
 
-預留 vendor 訪談 persona / B2B 客戶 persona。
+預留 記者 persona / 其他 vendor 訪談 persona / B2B 客戶 persona。
 
 每 persona fixture 必須含：(a) 研究領域 raw evidence pool (b) 完整 user reply 序列 (c) acceptance criteria 含至少 1 個歷史 P0 防回歸點。
 
@@ -1337,9 +1461,11 @@ Chrome MCP tab 紀律：
 | 2026-05-19 | Spec v0.大 大重寫：§3.4 兩層聚焦模型 / §4 UX State Machine Contract（七個 fix doc 整併）/ §5 Auth Contract / §8 測試 Contract |
 | 2026-05-28~29 | **DR-parity sprint 全 7 Track land**：三層品質防禦（citation 白名單 / entity grounding / publish gate F1+F3 CoV）+ Citation / External APIs / KG / Temporal / Critic 擴充 / Frontend |
 | 2026-06-11~12 | 接線批次：web search / gap routing default-on、evidence sufficiency 改全 pool 判、`lr_copy.py` + `sse_emit.py` |
+| 2026-07-29 | tier6 進池相關性 gate（§6.7b，票 -m）：run_loop 每輪 Phase 3 後無條件濾 web/wiki 沾邊來源，判定核心 DR/LR 共用 `relevance_gate_core`；順修 direct-web `source` 錯標 internal |
 | 2026-06-16 | Citation text-fragment highlight（§7.5）+ SSE 斷線不取消 read-only 重連（§7.3）|
 | 2026-06-19 | cruft 體檢：移除 dead flag、WARN explanation 不截斷、citation 前後端 mirror 修正 |
 | 2026-06-23 | **SSE 522 連線釋放治本（§7.3.1）**：detach-aware await（斷線釋 fd、task 不 cancel）+ route finish_response + 路 A slot 綁 task 終態（修 Gemini C1 並行雙寫）+ 移除冗餘 trailing save。已 deploy；行為層 2026-07-06 prod 驗收 PASS（slot 佔用生效、fd 29/conn 1 無洩漏），嚴格版（429 顯式 + fd 鋸齒 + 落 DB）待下次真機批 |
+| 2026-07-28 | **spec 補漏批（C 線稽核）**：§4.3.2 drift-pause teeth 契約入 spec（2026-07-23 land：`stage2_drift_paused` + 三路 dispatch + Stage 1/2 drift banner）+ 新增 §4.11 backward navigation（2026-06-19 land）+ §7.4.1 校正 KG markdown 已拔（2026-07-21）+ §4.9.1 schema 補全 + persist 方法名層級（`_persist_checkpoint_boundary` 鏈）+ §8.4.1 fixture 目錄校正 |
 
 > 完整 commit 群與踩坑 lesson 見 `memory/lessons-live-research.md`。
 
@@ -1355,4 +1481,4 @@ Chrome MCP tab 紀律：
 
 ---
 
-*最後 code re-sync：2026-07-10（`main`，Batch 2 docs review：§4.3.6 修法收帳 `8025a3f47`、§10#4 recollect 按鈕收帳 `9e910fb2`、§8.4.1 fixture 路徑校正、§2 原則出處校正）。先前 re-sync：2026-06-23（新增 §7.3.1 連線層 fd 釋放）。本文已從歷史/未實作設計脂肪瘦身為純契約文件；新人導覽見 `docs/reference/lr-onboarding.md`。*
+*最後 code re-sync：2026-07-28（`main`，C 線稽核補漏批：§4.3.2 drift-pause teeth、§4.11 backward navigation、§7.4.1 KG 拼接拔除校正、§4.9.1 schema 補全、persist 方法名層級、§8.4.1 fixture 目錄校正）。先前 re-sync：2026-07-10（Batch 2 docs review）、2026-06-23（新增 §7.3.1 連線層 fd 釋放）。本文已從歷史/未實作設計脂肪瘦身為純契約文件；新人導覽見 `docs/reference/lr-onboarding.md`。*

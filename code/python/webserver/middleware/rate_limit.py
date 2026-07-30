@@ -29,6 +29,7 @@ RATE_LIMIT_RULES: dict = {
     ('/api/auth/forgot-password', 'POST'):        (3, 3600),   # 3/hr
     ('/api/auth/login', 'POST'):                  (10, 60),    # 10/min
     ('/api/admin/resend-activation', 'POST'):     (5, 3600),   # 5/hr per IP
+    ('/api/early-bird', 'POST'):                  (5, 3600),   # 5/hr — landing 早鳥表單
 }
 
 # Sliding-window store: key → deque of timestamps

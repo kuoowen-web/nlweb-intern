@@ -368,7 +368,8 @@ class TestGoogleCseRetry:
         return client
 
     @pytest.mark.asyncio
-    async def test_do_search_retries_on_429_then_succeeds(self):
+    async def test_do_search_retries_on_503_then_succeeds(self):
+        """5xx retry 行為維持不變（票 2026-07-28 只砍 429 的 retry）。"""
         client = self._make_client()
         calls = {"n": 0}
 
@@ -376,8 +377,8 @@ class TestGoogleCseRetry:
             calls["n"] += 1
             request = httpx.Request("GET", url)
             if calls["n"] == 1:
-                resp = httpx.Response(429, request=request)
-                raise httpx.HTTPStatusError("429", request=request, response=resp)
+                resp = httpx.Response(503, request=request)
+                raise httpx.HTTPStatusError("503", request=request, response=resp)
             return httpx.Response(200, request=request, json={"items": []})
 
         with patch("httpx.AsyncClient.get", new=fake_get), \
@@ -389,6 +390,28 @@ class TestGoogleCseRetry:
 
     @pytest.mark.asyncio
     async def test_do_search_retries_exhausted_reraises(self):
+        """5xx retry 耗盡後 re-raise（維持不變）。"""
+        client = self._make_client()
+        calls = {"n": 0}
+
+        async def always_500(self, url, params=None, **kw):
+            calls["n"] += 1
+            request = httpx.Request("GET", url)
+            resp = httpx.Response(500, request=request)
+            raise httpx.HTTPStatusError("500", request=request, response=resp)
+
+        with patch("httpx.AsyncClient.get", new=always_500), \
+             patch.object(retry_util.asyncio, "sleep", new=AsyncMock(return_value=None)):
+            with pytest.raises(httpx.HTTPStatusError):
+                await client._do_search("query", 5)
+
+        # 1 initial + 2 retries (Part C uses max_retries=2)
+        assert calls["n"] == 3
+
+    @pytest.mark.asyncio
+    async def test_do_search_429_not_retried_raises_immediately(self):
+        """票 2026-07-28：CSE 429 = daily quota 用罄，backoff 無意義且在外層
+        3s cap 下結構上跑不完 → 不重試、立即 raise 給上層降級路徑。"""
         client = self._make_client()
         calls = {"n": 0}
 
@@ -403,5 +426,4 @@ class TestGoogleCseRetry:
             with pytest.raises(httpx.HTTPStatusError):
                 await client._do_search("query", 5)
 
-        # 1 initial + 2 retries (Part C uses max_retries=2)
-        assert calls["n"] == 3
+        assert calls["n"] == 1  # no retry on 429

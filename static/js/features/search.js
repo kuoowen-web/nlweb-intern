@@ -1412,6 +1412,19 @@ export async function handlePostStreamingRequest(url, body, query, abortSignal =
 
 export async function performSearch() {
     const searchInput = document.getElementById('searchInput');
+    // Re-entry guard（2026-07-28）：processing 中重入直接 return，防同 query 二次
+    // pushConversationHistory → search_sessions.conversation_history 相鄰重複。
+    // 訊號與 Enter guard（news-search.js keydown，Bug #23）同源：dataset.processing
+    // 由 setProcessingState 統一 set/reset。上移到函式本體開頭讓 click（極速雙擊——
+    // setProcessingState(true) 只隱藏按鈕，第二個 click event 在隱藏前已 dispatch）、
+    // keydown Enter、程式化 searchBtn.click()（showInterruptedSearchNotice 重試鈕；
+    // 該鈕只在 loadSavedSession 後渲染，彼時 processing 已 reset 為 false，不受阻）
+    // 三條提交路徑走同一道 guard。必須在 cancelAllActiveRequests() 之前 return，
+    // 否則重入會先 abort 掉 in-flight 的第一次搜尋。
+    if (searchInput?.dataset.processing === 'true') {
+        console.log('[Search] performSearch re-entry ignored — request in flight (duplicate submit guard)');
+        return;
+    }
     const query = searchInput?.value?.trim() || '';
     if (!query) {
         // No-silent-fail: empty / whitespace-only query gets an inline hint instead

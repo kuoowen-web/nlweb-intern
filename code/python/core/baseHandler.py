@@ -448,9 +448,6 @@ class NLWebHandler:
             # Normal tool selection
             tasks.append(asyncio.create_task(router.ToolSelector(self).do()))
 
-     #   tasks.append(asyncio.create_task(analyze_query.DetectItemType(self).do()))
-     #   tasks.append(asyncio.create_task(analyze_query.DetectMultiItemTypeQuery(self).do()))
-     #   tasks.append(asyncio.create_task(analyze_query.DetectQueryType(self).do()))
         tasks.append(asyncio.create_task(relevance_detection.RelevanceDetection(self).do()))
         tasks.append(asyncio.create_task(prompt_guardrails.PromptGuardrails(self).do()))
         tasks.append(asyncio.create_task(memory.Memory(self).do()))

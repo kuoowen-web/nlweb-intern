@@ -197,6 +197,55 @@ class TestApplyContextMapRevisions:
         assert any(t.name == "國際案例" for t in cm2.topics)
         assert len(delta.added_topics) == 1
 
+    def test_add_topic_domain_not_placeholder(self):
+        """add_topic 新 topic 的 domain 不可是佔位符「(待補)」（會外洩給 user，見 §2352/2362 render 點）。"""
+        from reasoning.live_research.orchestrator import _apply_context_map_revisions
+        cm = _make_cm()
+        op = ContextMapRevisionOperation(
+            op_type="add_topic",
+            new_topic_name="國際案例",
+            new_topic_description="德國 Energiewende",
+            new_topic_relevance="core",
+        )
+        cm2, delta, w = _apply_context_map_revisions(cm, [op], "")
+        new_topic = next(t for t in cm2.topics if t.name == "國際案例")
+        assert new_topic.domain != "(待補)"
+
+    def test_add_topic_inherits_existing_domain(self):
+        """add_topic 新 topic 應繼承同一 context_map 裡既有 topic 的 domain（同一研究 session 同屬一個領域），
+        對齊 _op_split_topic 的 domain=src.domain 慣例。"""
+        from reasoning.live_research.orchestrator import _apply_context_map_revisions
+        cm = _make_cm()  # 既有 topics domain: 政策 / 治理 / 基建
+        op = ContextMapRevisionOperation(
+            op_type="add_topic",
+            new_topic_name="國際案例",
+            new_topic_description="德國 Energiewende",
+            new_topic_relevance="core",
+        )
+        cm2, delta, w = _apply_context_map_revisions(cm, [op], "")
+        new_topic = next(t for t in cm2.topics if t.name == "國際案例")
+        existing_domains = {"政策", "治理", "基建"}
+        assert new_topic.domain in existing_domains
+
+    def test_add_topic_falls_back_to_未分類_when_no_existing_domain(self):
+        """既有 topics 都無 domain（或都是殘留的「(待補)」）時，新 topic 誠實退到「未分類」。"""
+        from reasoning.live_research.orchestrator import _apply_context_map_revisions
+        cm = ContextMap(
+            research_question="測試",
+            topics=[
+                ContextMapTopic(topic_id="t1", name="既有議題", domain="", relevance="core"),
+            ],
+            version=0,
+        )
+        op = ContextMapRevisionOperation(
+            op_type="add_topic",
+            new_topic_name="新議題",
+            new_topic_relevance="core",
+        )
+        cm2, delta, w = _apply_context_map_revisions(cm, [op], "")
+        new_topic = next(t for t in cm2.topics if t.name == "新議題")
+        assert new_topic.domain == "未分類"
+
     def test_rename_topic(self):
         from reasoning.live_research.orchestrator import _apply_context_map_revisions
         cm = _make_cm()

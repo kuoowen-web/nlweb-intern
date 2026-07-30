@@ -53,7 +53,7 @@ import { initSessionManager } from './features/session-manager.js';
 import './features/mode.js';
 
 // v4.0 Commit 2 imports (2026-05-24) — search trio owner module.
-import './features/search.js?v=20260717a';
+import './features/search.js?v=20260728a';
 
 // v4.0 Commit 3 imports (2026-05-24) — chat owner module.
 import './features/chat.js?v=20260714a';

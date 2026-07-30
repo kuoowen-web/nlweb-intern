@@ -547,6 +547,34 @@ class QueryLogger:
                 except Exception:
                     pass
 
+    def update_query_conversation_id(self, query_id: str, conversation_id: str) -> None:
+        """Backfill conversation_id after the fact（同步 UPDATE，同 log_query_complete pattern）。
+
+        用途（票 2026-07-28-k）：LR 的 lr_session_id（跨 run 串聯 key）在 route 層
+        log_query_start 之後、runQuery 內才生成 → 生成後回填 initial row。
+        冪等：單欄 UPDATE，重複呼叫無害。
+        """
+        if not query_id or not conversation_id:
+            return
+        conn = None
+        try:
+            conn = self.db.connect()
+            cursor = conn.cursor()
+            placeholder = "%s" if self.db.db_type == 'postgres' else "?"
+            cursor.execute(
+                f"UPDATE queries SET conversation_id = {placeholder} WHERE query_id = {placeholder}",
+                (conversation_id, query_id),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error updating query conversation_id: {e}")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
     def log_retrieved_document(
         self,
         query_id: str,

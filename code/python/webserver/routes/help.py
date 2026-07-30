@@ -1,7 +1,7 @@
 """
 Help Center API routes: feedback submission only.
 
-POST /api/feedback — public, store user feedback
+POST /api/help/feedback — public, store user feedback
 """
 
 import os
@@ -39,7 +39,7 @@ def _get_db():
 # ── Feedback ──────────────────────────────────────────────────────
 
 async def post_feedback_handler(request: web.Request) -> web.Response:
-    """POST /api/feedback — store user feedback (public endpoint)."""
+    """POST /api/help/feedback — store user feedback (public endpoint)."""
     try:
         body = await request.json()
     except Exception:
@@ -109,9 +109,28 @@ async def post_feedback_handler(request: web.Request) -> web.Response:
     return web.json_response({'success': True, 'id': feedback_id}, status=201)
 
 
+# ── FAQ（public read-only）─────────────────────────────────────
+
+async def get_faqs_handler(request: web.Request) -> web.Response:
+    """GET /api/faq — 回傳已上架 FAQ 列表（公開 read-only）。
+
+    只回 is_published 為真的條目，按 sort_order, id 升序。
+    is_published 過濾用 param-bound Python bool（SQLite=1 / PG=boolean 皆安全），
+    禁硬編碼 `= 1` / `= TRUE` 字面值（跨 dialect 崩）。
+    """
+    db = _get_db()
+    rows = await db.fetchall(
+        "SELECT id, question, answer, category, sort_order "
+        "FROM faqs WHERE is_published = ? ORDER BY sort_order, id",
+        (True,)
+    )
+    return web.json_response({'faqs': rows})
+
+
 # ── Route Setup ───────────────────────────────────────────────────
 
 def setup_help_routes(app: web.Application):
     """Register help routes."""
     app.router.add_post('/api/help/feedback', post_feedback_handler)
+    app.router.add_get('/api/faq', get_faqs_handler)
     logger.info("Help routes registered")

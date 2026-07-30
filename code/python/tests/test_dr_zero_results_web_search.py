@@ -19,7 +19,7 @@ import os
 import sys
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -82,6 +82,14 @@ def make_orchestrator(format_research_result=("", {}), process_side_effect=None)
     )
 
     orch._emit_phase_event = AsyncMock()
+
+    # 票 2026-07-28-f Fix 1：β gap 的 search_query 改由 _extract_search_subject 供給。
+    # 預設 mock 回與 state.query 不同的固定主體詞，讓「helper 產物真的被用進 gap」可斷言。
+    orch._extract_search_subject = AsyncMock(return_value="抽取主體")
+
+    # 票 2026-07-28-f Fix 2：真 _phase_filter_and_prepare 會 await 此 gate；
+    # MagicMock 屬性不可 await，須顯式 AsyncMock（gate 行為由 test_dr_relevance_gate.py 專測）。
+    orch._relevance_gate_source_pool = AsyncMock()
 
     if process_side_effect is None:
         orch._process_gap_resolutions = AsyncMock()
@@ -187,6 +195,7 @@ class TestZeroResultsWebSearch:
         recovered = await _run_helper(orch, state)
         assert recovered is False
         orch._process_gap_resolutions.assert_not_awaited()
+        orch._extract_search_subject.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_t3_web_search_returns_nothing(self):
@@ -223,7 +232,11 @@ class TestZeroResultsWebSearch:
         assert len(response.gap_resolutions) == 1
         gap = response.gap_resolutions[0]
         assert gap.resolution == GapResolutionType.WEB_SEARCH
-        assert gap.search_query == state.query
+        # Fix 1（票 2026-07-28-f）：search_query 來自 _extract_search_subject 的產物，
+        # 不再是整句 state.query（整句餵 wiki 會 fuzzy match 沾邊條目）。
+        assert gap.search_query == "抽取主體"
+        assert gap.search_query != state.query
+        orch._extract_search_subject.assert_awaited_once()
         # Defensive: mode kwarg is wired from state.mode.
         assert captured["mode"] == state.mode
         assert captured["enable_web_search"] is True
@@ -308,6 +321,9 @@ class TestZeroResultsReachabilityRealPipeline:
         # 只 mock 最貴的 web 蒐集（raw data 層）；回 False 代表補不到。
         orch._attempt_zero_results_web_search = AsyncMock(return_value=False)
         orch._create_no_results_response = MagicMock(return_value=[{"name": "查無相關資料"}])
+        # 票 2026-07-28-f Fix 2：防禦性補 gate mock（AR R1 Codex SF：現況走 β 失敗 →
+        # early return 在 gate 之前不經 gate，但靠測試路徑偶然避開不可長久）。
+        orch._relevance_gate_source_pool = AsyncMock()
 
         state = make_state(items=[], source_map={})
 
@@ -337,6 +353,9 @@ class TestZeroResultsReachabilityRealPipeline:
         orch._emit_phase_event = AsyncMock()
         orch._attempt_zero_results_web_search = AsyncMock(return_value=False)
         orch._create_no_results_response = MagicMock(return_value=[{"name": "查無相關資料"}])
+        # 票 2026-07-28-f Fix 2：防禦性補 gate mock（AR R1 Codex SF：現況走 β 失敗 →
+        # early return 在 gate 之前不經 gate，但靠測試路徑偶然避開不可長久）。
+        orch._relevance_gate_source_pool = AsyncMock()
 
         state = make_state(items=[], source_map={})
 
@@ -367,3 +386,99 @@ class TestNoValidSourcesCopyTraditionalChinese:
         assert "沒有可用來源" in desc or "無法產出" in desc
         # 不假設 web 已實際搜過（不得宣稱「網路都找不到」等）
         assert "網路都找不到" not in desc and "網路搜尋都找不到" not in desc
+
+
+# === 票 2026-07-28-f Fix 1：查詢主體抽取 helper ===
+
+
+class TestExtractSearchSubject:
+    """_extract_search_subject 三層策略：QU 現成產物 → low-tier LLM → fail-open 整句。"""
+
+    def _orch(self, author_search=None):
+        orch = MagicMock()
+        orch.logger = MagicMock()
+        orch.handler = MagicMock()
+        orch.handler.author_search = author_search or {"is_author_search": False}
+        orch.handler.query_params = {}
+        orch._extract_search_subject = (
+            DeepResearchOrchestrator._extract_search_subject.__get__(orch)
+        )
+        return orch
+
+    @pytest.mark.asyncio
+    async def test_reuses_qu_author_name_zero_llm_cost(self):
+        """QU 已抽出人名 → 直接復用，ask_llm 不被呼叫（零成本層）。"""
+        orch = self._orch(
+            author_search={"is_author_search": True, "author_name": "邱啟新"}
+        )
+        state = make_state(query="請找出台大邱啟新副教授的公開發言")
+        with patch("core.llm.ask_llm", new=AsyncMock()) as mock_llm:
+            subject = await orch._extract_search_subject(state)
+        assert subject == "邱啟新"
+        mock_llm.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_author_false_with_residual_name_not_reused(self):
+        """兩票耦合 regression（AR R1 Codex SF）：is_author_search=False 時即使殘留
+        author_name 也不得復用——票 -e 收窄後「找出XX的發言」判 False，防殘值誤用。"""
+        orch = self._orch(
+            author_search={"is_author_search": False, "author_name": "邱啟新"}
+        )
+        state = make_state(query="請找出台大邱啟新副教授的公開發言")
+        with patch(
+            "core.llm.ask_llm",
+            new=AsyncMock(return_value={"search_subject": "邱啟新LLM"}),
+        ) as mock_llm:
+            subject = await orch._extract_search_subject(state)
+        assert subject == "邱啟新LLM"  # 來自 LLM 層，非殘留 author_name
+        mock_llm.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_llm_extraction_when_no_qu_product(self):
+        """無 QU 產物 → low-tier LLM 抽一次，用其 search_subject。"""
+        orch = self._orch()
+        state = make_state(query="請找出台大邱啟新副教授的公開發言")
+        with patch(
+            "core.llm.ask_llm",
+            new=AsyncMock(return_value={"search_subject": "邱啟新"}),
+        ):
+            subject = await orch._extract_search_subject(state)
+        assert subject == "邱啟新"
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_falls_back_to_full_query(self):
+        """LLM exception → fail-open 退回整句（不比現狀差）+ warning log。"""
+        orch = self._orch()
+        state = make_state(query="請找出台大邱啟新副教授的公開發言")
+        with patch("core.llm.ask_llm", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            subject = await orch._extract_search_subject(state)
+        assert subject == state.query
+        orch.logger.warning.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_llm_error_sentinel_falls_back(self):
+        """LLMError sentinel（falsy dict 子類）→ 顯式偵測、退回整句。
+        （沿 hallucination_guard 教訓：`(resp or {}).get` 會把 provider 故障吞成空。）"""
+        from core.llm import LLMError
+
+        orch = self._orch()
+        state = make_state()
+        with patch(
+            "core.llm.ask_llm",
+            new=AsyncMock(return_value=LLMError("provider_error", "x")),
+        ):
+            subject = await orch._extract_search_subject(state)
+        assert subject == state.query
+        orch.logger.warning.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_llm_empty_subject_falls_back(self):
+        """LLM 回空字串/空白 → 退回整句。"""
+        orch = self._orch()
+        state = make_state()
+        with patch(
+            "core.llm.ask_llm",
+            new=AsyncMock(return_value={"search_subject": "  "}),
+        ):
+            subject = await orch._extract_search_subject(state)
+        assert subject == state.query

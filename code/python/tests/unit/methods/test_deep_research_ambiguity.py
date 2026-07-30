@@ -12,7 +12,6 @@ error log 也消失）。修法：在 response.get 前加 isinstance(response, L
 """
 import os
 import sys
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -67,8 +66,18 @@ async def test_detect_ambiguities_llmerror_degrades_with_explicit_error(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_detect_ambiguities_success_returns_questions(monkeypatch, capfd):
-    """對照組：ask_llm 成功回問題 → 正常回 questions，不走降級分支。"""
+async def test_detect_ambiguities_success_returns_questions(monkeypatch):
+    """對照組：ask_llm 成功回問題 → 正常回 questions，不走降級分支。
+
+    ordering 免疫（CI run 30417606053 假紅收尾）：原用 capfd + sleep(0.2) 賭
+    fd flush，但同檔第一個測試（llmerror degrades）patch logger.error 時保留
+    orig_error 轉呼叫、真實 log 照發 → LazyLogger 背景 worker thread flush
+    時機不定，CI 慢時該 ERROR 遲到落進本測試的 capfd 捕捉窗（CI log 實證：
+    訊息出現在本測試 Captured log setup 段而非 call 段），造成 fd-capture
+    race 誤殺本對照組。改比照同檔第一個測試的作法，patch module
+    logger.error 直攔呼叫進本測試自己的 err_calls list，繞開背景 worker +
+    fd，對 ordering / 其他測試殘留免疫。行為斷言逐字不變（成功路徑不可誤
+    觸發降級訊息）。"""
     async def _fake_ask_llm(*a, **k):
         return {"questions": [{
             "clarification_type": "scope",
@@ -82,14 +91,19 @@ async def test_detect_ambiguities_success_returns_questions(monkeypatch, capfd):
 
     monkeypatch.setattr("core.llm.ask_llm", _fake_ask_llm)
 
+    import methods.deep_research as dr_mod
+    err_calls = []
+    monkeypatch.setattr(
+        dr_mod.logger, "error",
+        lambda msg, *a, **k: err_calls.append(str(msg)),
+    )
+
     handler = _bare_handler()
     result = await handler._detect_all_ambiguities()
 
     assert len(result) == 1
     assert result[0]["question_id"] == "q1"
 
-    time.sleep(0.2)
-    out, err = capfd.readouterr()
-    combined = out + err
+    combined = " ".join(err_calls)
     assert "[AMBIGUITY] Detection degraded" not in combined, \
         "成功路徑不可誤觸發降級訊息"

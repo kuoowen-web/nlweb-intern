@@ -14,6 +14,7 @@ logger = get_configured_logger("email_service")
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
 RESEND_FROM_EMAIL = os.environ.get('RESEND_FROM_EMAIL', 'noreply@localhost')
 BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8000')
+EARLY_BIRD_NOTIFY_EMAIL = os.environ.get('EARLY_BIRD_NOTIFY_EMAIL', 'support@twdubao.com')
 
 
 def _email_wrapper(title: str, body_html: str) -> str:
@@ -173,3 +174,34 @@ def send_lockout_notification(email: str, ip: str):
         )
     else:
         print(f"[DEV EMAIL] Lockout notification for {email} (IP: {masked_ip})", flush=True)
+
+
+def send_early_bird_notification(name: str, email: str, company: str | None,
+                                 job_title: str | None, purpose: str | None):
+    """Notify internal mailbox that a new early-bird signup arrived (landing form)."""
+    if RESEND_API_KEY:
+        rows = [
+            ('姓名', name), ('Email', email),
+            ('公司', company or '—'), ('職稱', job_title or '—'),
+            ('預計用途', purpose or '—'),
+        ]
+        cells = ''.join(
+            f"<tr><td style='padding:6px 12px;color:#B2BEC3;white-space:nowrap;'>{label}</td>"
+            f"<td style='padding:6px 12px;color:#2D3436;'>{_esc(value)}</td></tr>"
+            for label, value in rows
+        )
+        body = (
+            "<p>Landing page 早鳥名單有新報名：</p>"
+            f"<table role='presentation' cellspacing='0' cellpadding='0' "
+            f"style='margin:16px 0;background:#FBF5E6;border-radius:6px;width:100%;font-size:14px;'>"
+            f"{cells}</table>"
+            "<p style='font-size:13px;color:#B2BEC3;'>完整清單見 early_bird_signups 資料表。</p>"
+        )
+        _send_via_resend(
+            to=EARLY_BIRD_NOTIFY_EMAIL,
+            subject="早鳥名單新報名",
+            html=_email_wrapper("早鳥名單新報名", body)
+        )
+    else:
+        print(f"[DEV EMAIL] Early-bird signup: {name} <{email}> "
+              f"company={company} title={job_title}", flush=True)

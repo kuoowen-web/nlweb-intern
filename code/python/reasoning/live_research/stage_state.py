@@ -151,6 +151,12 @@ class LiveResearchStageState:
     # Set when LLM parses reframe_structure intent；下一輪 user confirm 才 apply。
     # 空字串 = 沒有 pending reframe。
     pending_reframe_json: str = ""
+    # plan: lr-consistency-pause-teeth（AR R1 blocker）——標記「當前 Stage 2 checkpoint
+    # 是一致性漂移暫停（drift pause）」，讓 continue_from_checkpoint 走 continue/adjust
+    # 分流（drift banner 問「繼續還是調整」，回覆要分類意圖）。正常 Stage 2 收斂
+    # checkpoint 不設此 flag（維持既有無條件推進）。user 意圖處理完（回補或轉 reframe）
+    # 即清除。
+    stage2_drift_paused: bool = False
     # R2 澄清機制（2026-07）：待 user 確認/回答的 special_element 完整 pending context。
     # 空字串 = 無 pending。JSON：{"kind":"confirm"|"clarify",
     #   "elements":[{"type","description","raw_target","resolved_title"}...],"chapter_names":[...]}
@@ -170,7 +176,9 @@ class LiveResearchStageState:
     written_sections: List[Dict] = field(default_factory=list)
 
     # 路 3 (P-回顧): Stage 6 後端組好的整份 full_report markdown 字串。
-    # 含 H1 研究問題標題 + sections + references + KG markdown section。
+    # 含 H1 報告標題（生成失敗降級 research_question）+ sections + references；
+    # 不含 KG——KG JSON 拼接已於 2026-07-21 拔除（raw JSON 使檔案體積雙倍且不可讀），
+    # KG 僅走 export SSE knowledge_graph payload。
     # 由 orchestrator._run_stage_6 在 emit_sse 前 assign（state.final_report_markdown = full_report），
     # 隨 _persist_checkpoint_boundary 落 live_research_state JSONB。
     # 空字串 = 尚未跑到 Stage 6，或欄位上線前已跑完的舊 session（from_dict fallback ""）。
@@ -322,6 +330,7 @@ class LiveResearchStageState:
             "format_specs": self.format_specs,
             "pending_format_confirmation": self.pending_format_confirmation,
             "pending_reframe_json": self.pending_reframe_json,
+            "stage2_drift_paused": self.stage2_drift_paused,
             "pending_special_element_json": self.pending_special_element_json,
             "pending_reframe_proposal_markdown": self.pending_reframe_proposal_markdown,
             "book_outline_json": self.book_outline_json,
@@ -477,6 +486,7 @@ class LiveResearchStageState:
             format_specs=d.get("format_specs", {}),
             pending_format_confirmation=d.get("pending_format_confirmation", False),
             pending_reframe_json=d.get("pending_reframe_json", ""),
+            stage2_drift_paused=d.get("stage2_drift_paused", False),
             pending_special_element_json=d.get("pending_special_element_json", ""),
             pending_reframe_proposal_markdown=d.get("pending_reframe_proposal_markdown", ""),
             book_outline_json=d.get("book_outline_json", ""),
@@ -523,6 +533,9 @@ class LiveResearchStageState:
         self.current_stage = stage
         self.stage_status = "in_progress"
         self.checkpoint_prompt = ""
+        # plan: lr-consistency-pause-teeth——前進新 stage 時清 drift pause flag，
+        # 不讓上個 stage 的漂移暫停 routing 殘留到下個 stage。
+        self.stage2_drift_paused = False
         self.last_updated_at = datetime.now().isoformat()
 
     def reset_to_stage(self, target_stage: int) -> None:
@@ -555,6 +568,9 @@ class LiveResearchStageState:
         # === guard 欄位：無論 target 一律清（防 phantom routing / 誤續寫）===
         self.failed_intent_parse_count = 0
         self.pending_reframe_json = ""
+        # plan: lr-consistency-pause-teeth——drift pause 是 guard-type routing flag，
+        # 退階段時一律清（同 pending_reframe_json）。
+        self.stage2_drift_paused = False
         self.pending_special_element_json = ""
         self.pending_reframe_proposal_markdown = ""
         self.pending_format_confirmation = False
@@ -627,6 +643,8 @@ class LiveResearchStageState:
             }
         # 幽靈 guard（不清 = phantom reframe / format confirm / 誤續寫 / 誤判 writer 在跑）
         self.pending_reframe_json = ""
+        # plan: lr-consistency-pause-teeth——drift pause routing flag 一併清（同 guard）。
+        self.stage2_drift_paused = False
         self.pending_special_element_json = ""
         self.pending_reframe_proposal_markdown = ""
         self.pending_format_confirmation = False

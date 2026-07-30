@@ -14,6 +14,7 @@ Two entry points:
 
 import asyncio
 import json
+import time
 import uuid
 from typing import Optional
 
@@ -74,6 +75,10 @@ class LiveResearchHandler(DeepResearchHandler):
         # 警告文案分流用：fallback 成因。"anonymous" = 未登入；"db_error" = 已登入但
         # create_session 失敗。Review S1：db_error 分支的 user 是登入的，文案不得稱「你未登入」。
         self._lr_persist_skip_reason: Optional[str] = None
+        # 票 2026-07-28-k：log_query_complete 冪等 flag——task done-callback 與
+        # except/早退分支可能都跑到（執行順序不定，同 event-loop thread 無並發 race），
+        # 先到者記、後到者 no-op。
+        self._lr_analytics_completed: bool = False
         logger.info(f"LiveResearchHandler initialized (session={self.session_id})")
 
     def _is_dry_run(self) -> bool:
@@ -135,9 +140,27 @@ class LiveResearchHandler(DeepResearchHandler):
         """Start new Live Research — enters Stage 1."""
         logger.info(f"[LIVE RESEARCH] Starting: {self.query}")
 
+        # AR R1：pre-task cancel 縫用 local flag 判斷（不可用 self._lr_research_task
+        # is None——finally 非 detach 路徑會清 ref）。task 建立前被 cancel（await 期間）
+        # → 無 done-callback 可記終態 → 由 except CancelledError 條件補記。
+        _task_created = False
         try:
             # Step 1: Create server-side session with proper UUID
             self.lr_session_id = await self._create_lr_session()
+
+            # 票 2026-07-28-k：把後端權威 lr_session_id 回填 queries.conversation_id
+            # （跨 run 串聯 key）。紅線（lessons-live-research 雙 PG row）：掛的是
+            # _create_lr_session 的權威 UUID，不是前端另建 row 的 id、不是 "sess_xxx"。
+            if getattr(self, 'query_id', None) and self.lr_session_id:
+                try:
+                    from core.query_logger import get_query_logger
+                    get_query_logger().update_query_conversation_id(
+                        self.query_id, self.lr_session_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[LIVE RESEARCH] Failed to backfill conversation_id (non-fatal): {e}"
+                    )
 
             # Step 2: Notify frontend of the server-generated session UUID via direct SSE
             if self.lr_session_id and self.http_handler is not None:
@@ -200,6 +223,8 @@ class LiveResearchHandler(DeepResearchHandler):
                 # Reuse parent's prepare() for retrieval
                 await self.prepare()
                 if self.query_done:
+                    # 早退（clarification / guardrail）也是終態——記 complete 再 return
+                    self._log_lr_query_complete()
                     return self.return_value
 
             # Create orchestrator
@@ -217,6 +242,7 @@ class LiveResearchHandler(DeepResearchHandler):
                 ),
                 name=f"lr_runQuery_{self.lr_session_id or 'unknown'}",
             )
+            _task_created = True  # task 已建立 → 終態歸 done-callback（見 except CancelledError）
             self._lr_research_task.add_done_callback(self._on_lr_research_complete)
             # Detach-aware await（plan: lr-sse-connection-release-fix, 2026-06-22）：
             # 同時等「task 完成」與「client 離線」。離線先到 → 提早 return，
@@ -281,9 +307,24 @@ class LiveResearchHandler(DeepResearchHandler):
             # disconnect 只標離線、不 cancel）。仍可能來自「使用者明確 stop」或防呆上限觸發
             # 的內部 cancel — 屬正當降級路徑：propagate 讓 routes/api.py 的
             # CancelledError handler 收尾 SSE response。Do not log as error.
+            # AR R1 三家同抓：coroutine 在 task 建立前被 cancel（_create_lr_session /
+            # prepare await 期間，server shutdown 類）→ 無 done-callback 可記終態，
+            # start row 懸掛。只在 task 未建立時補記；task 已建立則終態歸 done-callback
+            # （無條件補掛會在 detach 前強 cancel 時把「進行中」誤標）。
+            # 不可用 self._lr_research_task is None 判斷——finally 會清 ref。
+            if not _task_created:
+                self._log_lr_query_complete(
+                    error_occurred=False, error_message="cancelled: before task creation"
+                )
             raise
         except Exception as e:
             logger.error(f"[LIVE RESEARCH] Error: {e}", exc_info=True)
+            # task 建立前的失敗（_create_lr_session / prepare / orchestrator 建構）兜底；
+            # task 建立後 result() re-raise 時 done-callback 也會記——執行順序不保證
+            # （實測 done-callback 先跑），冪等 flag 保證單次，且**必走 from_exc 分類**
+            # （ResearchCancelledError 是 Exception subclass，兩掛點分類不一致會把
+            # cancel 誤標成 error）。
+            self._log_lr_query_complete_from_exc(e)
             raise
 
     async def continueResearch(self, user_message: str = "", auto_continue: bool = False, nav_action: str = ""):
@@ -299,6 +340,9 @@ class LiveResearchHandler(DeepResearchHandler):
             f"auto={auto_continue} msg='{user_message[:50]}...'"
         )
 
+        # AR R1/R2：pre-task cancel 縫（cancel 可能發生在 _load_state await 期間）。
+        # 見 runQuery 同段 local flag 說明。
+        _task_created = False
         try:
             # Load state from session
             state = await self._load_state()
@@ -351,6 +395,9 @@ class LiveResearchHandler(DeepResearchHandler):
                     "error": "state_not_found",
                     "message": narration_text,
                 })
+                self._log_lr_query_complete(
+                    error_occurred=True, error_message="state_not_found"
+                )
                 return self.return_value
 
             # addendum C-3 / D (Track A sprint 2026-05-28): legacy schema gate
@@ -395,6 +442,9 @@ class LiveResearchHandler(DeepResearchHandler):
                     "error": "legacy_schema_session",
                     "message": legacy_msg,
                 })
+                self._log_lr_query_complete(
+                    error_occurred=True, error_message="legacy_schema_session"
+                )
                 return self.return_value
 
             # Create orchestrator and continue
@@ -416,6 +466,7 @@ class LiveResearchHandler(DeepResearchHandler):
                 ),
                 name=f"lr_continueResearch_{self.lr_session_id or 'unknown'}",
             )
+            _task_created = True  # task 已建立 → 終態歸 done-callback（見 except CancelledError）
             self._lr_research_task.add_done_callback(self._on_lr_research_complete)
             # Detach-aware await（plan: lr-sse-connection-release-fix, 2026-06-22）。見 runQuery 同段註解。
             detach_waiter = asyncio.ensure_future(self._lr_detach_event.wait())
@@ -463,10 +514,66 @@ class LiveResearchHandler(DeepResearchHandler):
             return self.return_value
 
         except asyncio.CancelledError:
+            # AR R1/R2 3k：coroutine 在 task 建立前被 cancel（_load_state await 期間）→
+            # 無 done-callback 可記終態，start row 懸掛。只在 task 未建立時補記；
+            # task 已建立則終態歸 done-callback（見 runQuery 同段完整說明）。
+            if not _task_created:
+                self._log_lr_query_complete(
+                    error_occurred=False, error_message="cancelled: before task creation"
+                )
             raise
         except Exception as e:
             logger.error(f"[LIVE RESEARCH] Continue error: {e}", exc_info=True)
+            self._log_lr_query_complete_from_exc(e)  # 同 runQuery：必走分類（cancel 不誤標）
             raise
+
+    def _log_lr_query_complete(self, error_occurred: bool = False, error_message: str = "") -> None:
+        """LR run 終態單點記錄（票 2026-07-28-k）。冪等：同 handler instance 只記一次。
+
+        可從同步 context 呼叫（done-callback）：log_query_complete 是同步 DB UPDATE，
+        與 codebase 現況一致（baseHandler.py:394 亦在 async 流程內同步呼叫）。
+        cost_usd 刻意不填（獨立票 2026-07-28-l）。
+        """
+        # getattr 防禦：與下方 query_id / start_time / final_retrieved_items 防禦同風格
+        # ——涵蓋繞過 __init__ 的路徑（如 __new__ 建的 handler、未來子類），flag 缺失
+        # 視為「未完成」而非 AttributeError。
+        if getattr(self, '_lr_analytics_completed', False):
+            return
+        if not getattr(self, 'query_id', None):
+            # route 未打點（直接實例化 handler 的測試/內部路徑）→ 無 parent row，跳過
+            return
+        self._lr_analytics_completed = True
+        try:
+            from core.query_logger import get_query_logger
+            start = getattr(self, '_lr_analytics_query_start_time', None)
+            latency_ms = (time.time() - start) * 1000 if start else 0
+            get_query_logger().log_query_complete(
+                query_id=self.query_id,
+                latency_total_ms=latency_ms,
+                num_results_retrieved=len(getattr(self, 'final_retrieved_items', None) or []),
+                error_occurred=error_occurred,
+                error_message=(error_message or "")[:500],
+            )
+        except Exception as e:
+            logger.warning(f"[LIVE RESEARCH] Failed to log query complete (non-fatal): {e}")
+
+    def _log_lr_query_complete_from_exc(self, exc: BaseException) -> None:
+        """例外終態分類單點（票 2026-07-28-k）。
+
+        **必須**由 done-callback 與 runQuery/continueResearch 的 except Exception
+        兜底共用：ResearchCancelledError 繼承 Exception（orchestrator_base.py:15），
+        task re-raise 時兩掛點都會跑，**執行順序不保證**（實測 done-callback 先跑：
+        task 完成時 callbacks 依註冊序 call_soon，user callback 排在 awaiter wakeup
+        之前）——冪等 flag 讓先到者定終態，兩處分類不一致會把 cancel 誤記成
+        error 且修不回來。
+        """
+        from reasoning.orchestrator_base import ResearchCancelledError
+        if isinstance(exc, (ResearchCancelledError, asyncio.CancelledError)):
+            self._log_lr_query_complete(
+                error_occurred=False, error_message=f"cancelled: {exc}"
+            )
+        else:
+            self._log_lr_query_complete(error_occurred=True, error_message=str(exc))
 
     def _on_lr_research_complete(self, task: asyncio.Task):
         """Callback when background LR task completes / fails / is cancelled.
@@ -486,20 +593,26 @@ class LiveResearchHandler(DeepResearchHandler):
         try:
             exc = task.exception()
             if exc is None:
+                self._log_lr_query_complete()
                 return
             if isinstance(exc, ResearchCancelledError):
+                self._log_lr_query_complete_from_exc(exc)
                 logger.info(
                     f"[LIVE RESEARCH] Background task stopped by disconnect/interrupt "
                     f"(lr_session={getattr(self, 'lr_session_id', None)}): {exc}. "
                     f"進度已由 per-boundary persist 落盤（可從中途進度手動續跑）。"
                 )
                 return
+            self._log_lr_query_complete_from_exc(exc)
             logger.error(
                 f"[LIVE RESEARCH] Background task failed "
                 f"(lr_session={getattr(self, 'lr_session_id', None)}): {exc}",
                 exc_info=exc,
             )
         except asyncio.CancelledError:
+            self._log_lr_query_complete(
+                error_occurred=False, error_message="cancelled: task cancelled"
+            )
             logger.info(
                 f"[LIVE RESEARCH] Background task cancelled: {task.get_name()}"
             )

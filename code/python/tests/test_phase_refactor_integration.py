@@ -171,6 +171,9 @@ def make_orchestrator(analyst_responses=None, critic_responses=None):
     orch._format_error_result = MagicMock(return_value=[{"error": True}])
     orch._format_friendly_no_data_result = MagicMock(return_value=[{"no_data": True}])
     orch._emit_phase_event = AsyncMock()
+    # Awaited in the SEARCH_REQUIRED branch (orchestrator.py:1067); a bare MagicMock
+    # child is not awaitable. False = no web source merged, normal loop flow.
+    orch._resolve_web_search_gaps_in_loop = AsyncMock(return_value=False)
 
     return orch
 

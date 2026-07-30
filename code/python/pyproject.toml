@@ -87,6 +87,12 @@ dev = [
     # 兩段式 Agent E2E（two-stage-e2e-plan.md）：蒸餾段 Playwright 回歸腳本。
     "playwright>=1.45.0",
     "pytest-playwright>=0.5.0",
+    # aiohttp 3.14 移除了 pytest11 entrypoint，故 aiohttp.test_utils 的 `aiohttp_client`
+    # fixture 不再自動註冊——依賴它的 route 測試（test_help_routes / test_early_bird /
+    # test_landing_routes / test_faq_routes）在裸環境全 ERROR「fixture not found」。
+    # standalone pytest-aiohttp 套件重新提供該 fixture，且與 pytest-asyncio STRICT 模式
+    # 並存無衝突（實測 21 個受影響 test 全綠，無需動 conftest / loop policy）。
+    "pytest-aiohttp>=1.0",
 ]
 
 [tool.pytest.ini_options]

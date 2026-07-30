@@ -30,6 +30,10 @@ class RelevanceDetection(PromptRunner):
         self.handler.state.start_precheck_step(self.STEP_NAME)
 
     async def do(self):
+        # site=='all'/'nlws' 時 early return，不跑 DetectIrrelevantQueryPrompt。
+        # prompts.xml 的 all 版節點已刪（AF-8：本 early return 擋死不可達）。
+        # 若未來取消此 early return 讓 all 版可達，恢復前須先收斂判準漂移——
+        # 舊 all 版判準遠寬於 default 版（僅「completely nonsensical」才判無關）。
         if (self.handler.site == 'all' or self.handler.site == 'nlws'):
             await self.handler.state.precheck_step_done(self.STEP_NAME)
             return
@@ -50,7 +54,7 @@ class RelevanceDetection(PromptRunner):
                 )
                 self.handler.query_is_irrelevant = False
                 return
-            if (self.site_is_irrelevant_to_query == "True"):
+            if (str(self.site_is_irrelevant_to_query).lower() == "true"):
                 if RELEVANCE_DETECTION_MODE == 'enforce':
                     # G3 (SSE typed pipeline Task 2): reroute site_is_irrelevant_to_query ->
                     # empty_results so enforce mode surfaces a visible zh-TW notice instead of

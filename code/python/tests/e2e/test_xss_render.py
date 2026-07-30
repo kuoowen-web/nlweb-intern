@@ -23,11 +23,12 @@ _DR_MODULE = "/static/js/features/deep-research.js"
 
 
 def _load_dr_module(page: Page, base_url: str):
-    """page.goto base_url 後在頁面 context 動態 import deep-research module。
+    """page.goto 產品頁後在頁面 context 動態 import deep-research module。
 
     回傳 module 的 export 函式名 list（驗 import 成功）。import 失敗 → fail-loud。
+    landing cutover（2026-07-23）：驗的是產品前端 module——goto `/`→`/app`。
     """
-    page.goto(f"{base_url}/")
+    page.goto(f"{base_url}/app")
     # 等頁面 static 就緒（body 有內容即可，不等 networkidle：analytics beacon 常駐）
     page.wait_for_selector("body", timeout=15000)
 

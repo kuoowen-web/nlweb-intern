@@ -97,6 +97,10 @@ async def test_stage2_persists_after_each_topic(monkeypatch):
             self._current_stage = ""
             # D-7: 正常收斂完成，非 offline 打斷
             self.stopped_early = False
+            # plan: lr-consistency-pause-teeth——real BABLoopEngine 恆有此 flag
+            # （loop_engine.py:99），caller 新增 `or engine.paused_by_consistency`
+            # 分流會讀它；stub 補齊對齊真機屬性面（純 offline 路徑 → False）。
+            self.paused_by_consistency = False
         async def run_loop(self, **kw):
             from reasoning.schemas_live import ContextMap
             return ContextMap.model_validate_json(kw["existing_context_map"].model_dump_json()) \
@@ -163,6 +167,9 @@ async def test_stage2_midtopic_offline_break_does_not_mark_completed(monkeypatch
             self._current_stage = ""
             # 第一個 topic（t1）被打斷；第二個（若被呼叫，代表 bug：t1 未完成卻繼續跑 t2）
             self.stopped_early = (self._n == 1)
+            # plan: lr-consistency-pause-teeth——real BABLoopEngine 恆有此 flag
+            # （loop_engine.py:99），caller 新增分流會讀它；純 offline 路徑 → False。
+            self.paused_by_consistency = False
 
         async def run_loop(self, **kw):
             from reasoning.schemas_live import ContextMap

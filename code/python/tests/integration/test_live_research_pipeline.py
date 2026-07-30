@@ -151,6 +151,9 @@ def _make_handler() -> MagicMock:
     handler.query_params = {}
     handler.site = "all"
     handler.final_retrieved_items = []
+    # _save_state is awaited by orchestrator._persist_progress (orchestrator.py:5086);
+    # a bare MagicMock child is not awaitable → "MagicMock can't be used in 'await'".
+    handler._save_state = AsyncMock()
     return handler
 
 
@@ -429,6 +432,13 @@ class TestScenario2UserFeedback:
             engine_instance.run_loop = AsyncMock(side_effect=mock_bab_run_loop)
             engine_instance.initial_context_map = cm
             engine_instance.executed_searches = []
+            # _run_stage_2 branches on these after each topic (orchestrator.py:2351);
+            # bare MagicMock children are truthy → would early-return after topic 1.
+            engine_instance.stopped_early = False
+            engine_instance.paused_by_consistency = False
+            engine_instance.evidence_pool = {}
+            engine_instance._evidence_counter = 0
+            engine_instance.emit_evidence_sufficiency_narration = AsyncMock()
             MockEngine.return_value = engine_instance
 
             result = await orchestrator._run_stage_2(state)
@@ -465,7 +475,15 @@ class TestScenario3StyleAnalysis:
 
         mock_style = _make_style_output()
 
-        with patch.object(orchestrator, "_run_style_analysis", new=AsyncMock(return_value=mock_style)):
+        # _handle_stage_3_response calls the module-level _classify_meta_intent
+        # (orchestrator.py:2773) via ask_llm BEFORE _run_style_analysis; without a
+        # key it returns None → soft-fail → style analysis never runs. A writing
+        # sample classifies as "substantive", routing to the (already mocked)
+        # _run_style_analysis path — keeps the test hermetic per its docstring.
+        with patch(
+            "reasoning.live_research.orchestrator._classify_meta_intent",
+            new=AsyncMock(return_value="substantive"),
+        ), patch.object(orchestrator, "_run_style_analysis", new=AsyncMock(return_value=mock_style)):
             result = await orchestrator._handle_stage_3_response(
                 stage3_state,
                 user_message="台灣的能源政策正處於轉型的十字路口...",
@@ -587,7 +605,15 @@ class TestScenario4SectionRevision:
         """
         new_section = _make_writer_section("土地使用爭議（修改版）")
 
-        with patch.object(
+        with patch(
+            # _handle_stage_5_response calls module-level _classify_meta_intent
+            # (orchestrator.py:6725) via ask_llm before dispatching to
+            # _parse_revision_intent; without a key it returns None → soft-fail →
+            # revision never runs. A revision request classifies as "substantive",
+            # falling through to the (already mocked) _parse_revision_intent path.
+            "reasoning.live_research.orchestrator._classify_meta_intent",
+            new=AsyncMock(return_value="substantive"),
+        ), patch.object(
             orchestrator,
             "_parse_revision_intent",
             new=AsyncMock(return_value={

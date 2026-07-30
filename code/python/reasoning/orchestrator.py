@@ -21,6 +21,7 @@ from reasoning.filters.source_tier import SourceTierFilter, NoValidSourcesError
 from reasoning.schemas import WriterComposeOutput
 from reasoning.research_state import ResearchState
 from reasoning.orchestrator_base import OrchestratorBase, ResearchCancelledError, ProgressConfig  # noqa: F401
+from reasoning.relevance_gate_core import RELEVANCE_GATE_DIGEST_CHAR_BUDGET
 
 
 logger = get_configured_logger("reasoning.orchestrator")
@@ -472,6 +473,36 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
         return formatted_string, source_map
 
+    def _extract_item_fields(self, item) -> tuple:
+        """Shape-aware 抽 (title, source, description, url)——source_map item 有兩種形狀：
+        dict（tier6 web/wiki doc、私有檔）或 list/tuple（站內 6-element row，
+        description 藏在 item[1] schema_json 內）。原邏輯自 _build_critic_reference_sheet
+        平移集中（票 2026-07-28-f：相關性 gate 與 writer evidence_lookup 共用）。
+        """
+        if isinstance(item, dict):
+            title = item.get("title") or item.get("name", "No title")
+            source = item.get("site", "Unknown")
+            description = item.get("description") or item.get("articleBody", "")
+            url = item.get("url") or item.get("link", "") or ""
+        elif isinstance(item, (list, tuple)):
+            title = item[2] if len(item) > 2 else "No title"
+            source = item[3] if len(item) > 3 else "Unknown"
+            url = item[0] if len(item) > 0 else ""
+            try:
+                schema_json = item[1] if len(item) > 1 else "{}"
+                schema_obj = (
+                    json.loads(schema_json) if isinstance(schema_json, str) else schema_json
+                )
+                description = schema_obj.get("description") or schema_obj.get("articleBody", "")
+            except Exception as e:
+                self.logger.warning(
+                    f"_extract_item_fields: failed to parse description: {e}"
+                )
+                description = ""
+        else:
+            title, source, description, url = "No title", "Unknown", "", ""
+        return title, source, description, url
+
     def _build_critic_reference_sheet(self, citations_used: List[int]) -> str:
         """
         SEC-6: Build a compact reference sheet for Critic containing only cited sources.
@@ -495,24 +526,7 @@ class DeepResearchOrchestrator(OrchestratorBase):
                 self.logger.warning(f"SEC-6: citation [{cid}] not found in source_map")
                 continue
 
-            if isinstance(item, dict):
-                title = item.get("title") or item.get("name", "No title")
-                source = item.get("site", "Unknown")
-                description = item.get("description") or item.get("articleBody", "")
-            elif isinstance(item, (list, tuple)):
-                title = item[2] if len(item) > 2 else "No title"
-                source = item[3] if len(item) > 3 else "Unknown"
-                try:
-                    schema_json = item[1] if len(item) > 1 else "{}"
-                    schema_obj = json.loads(schema_json) if isinstance(schema_json, str) else schema_json
-                    description = schema_obj.get("description") or schema_obj.get("articleBody", "")
-                except Exception as e:
-                    self.logger.warning(f"SEC-6: Failed to parse description for citation [{cid}]: {e}")
-                    description = ""
-            else:
-                title = "No title"
-                source = "Unknown"
-                description = ""
+            title, source, description, _url = self._extract_item_fields(item)
 
             snippet = description[:snippet_length] + ("..." if len(description) > snippet_length else "")
             parts.append(f"[{cid}] {source} - {title}\n{snippet}\n")
@@ -586,6 +600,82 @@ class DeepResearchOrchestrator(OrchestratorBase):
             self.logger.warning(f"Failed to generate current time header: {e}")
             return ""
 
+    async def _extract_search_subject(self, state) -> str:
+        """β-path 補搜查詢構造（票 2026-07-28-f Fix 1）：抽「查詢主體」取代整句 user query。
+
+        整句問句（「找出台大邱啟新副教授的公開發言」）直接餵 Wikipedia/CSE 會
+        fuzzy match 出沾邊條目（李登輝/彭明敏/動漫頁，prod ccdb5ab6 實錘）。三層策略：
+        1. 現成產物零成本復用：QU 已抽出的人名（handler.author_search.author_name）。
+           （耦合註記：票 2026-07-28-e 正在重議 author 語意；此處以 getattr 防禦性讀取，
+           該票改 shape 時只需同步這一個讀取點。）
+        2. low-tier LLM 抽一次（僅 β-path 觸發且無現成產物時；成本 +1 次 low call）。
+        3. fail-open：LLM 失敗 / sentinel / 回空 → 退回整句 state.query（不比現狀差），
+           warning log（不可 silent fail）。
+        """
+        # 1. 現成產物（QU regex/LLM 已抽的人名——author 誤判情境下這正是查詢主體）
+        author = getattr(self.handler, "author_search", None) or {}
+        if author.get("is_author_search") and str(author.get("author_name") or "").strip():
+            subject = str(author["author_name"]).strip()
+            self.logger.info(
+                f"[ZERO-RESULTS] search subject from QU author_search: {subject!r}"
+            )
+            return subject
+
+        # 2. low-tier LLM 抽取（局部 import 對齊 hallucination_guard 慣例；
+        #    測試 patch core.llm.ask_llm）
+        from core.llm import ask_llm, LLMError
+
+        prompt = (
+            "你是搜尋查詢精煉助手。使用者的原始問句將被用於 Wikipedia 與 Google 搜尋；"
+            "整句問句會讓 Wikipedia fuzzy match 出無關條目。\n"
+            "請從問句抽出「查詢主體」——問句真正要查的具名實體"
+            "（人名 / 組織 / 公司 / 地名 / 事件名）；若無具名實體則抽核心主題詞（2-8 個字）。\n"
+            "規則：\n"
+            "- 只回主體本身，不含「找出」「請幫我」「的公開發言」等請求語與修飾\n"
+            "- 有具名實體優先實體（例：「找出台大邱啟新副教授的公開發言」→「邱啟新」）\n"
+            "- 多個實體時取最核心的一個，可帶必要的消歧義詞（例：「台大 邱啟新」）\n\n"
+            f"## 問句\n{state.query}\n\n"
+            '回傳 JSON：{"search_subject": "..."}'
+        )
+        schema = {
+            "type": "object",
+            "properties": {"search_subject": {"type": "string"}},
+            "required": ["search_subject"],
+        }
+        try:
+            resp = await ask_llm(
+                prompt,
+                schema,
+                level="low",
+                query_params=getattr(self.handler, "query_params", {}),
+                max_length=256,
+                timeout=15,
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"[ZERO-RESULTS] subject extraction LLM failed "
+                f"({type(e).__name__}: {e}); fallback to full query"
+            )
+            return state.query
+        # LLMError 是 falsy dict 子類——顯式偵測，不可用 truthiness 吞掉 provider 故障
+        if isinstance(resp, LLMError) or not isinstance(resp, dict):
+            self.logger.warning(
+                f"[ZERO-RESULTS] subject extraction unusable ({resp!r}); "
+                f"fallback to full query"
+            )
+            return state.query
+        subject = str(resp.get("search_subject") or "").strip()
+        if not subject:
+            self.logger.warning(
+                "[ZERO-RESULTS] subject extraction empty; fallback to full query"
+            )
+            return state.query
+        self.logger.info(
+            f"[ZERO-RESULTS] search subject extracted: {subject!r} "
+            f"(from query {state.query!r})"
+        )
+        return subject
+
     async def _attempt_zero_results_web_search(self, state) -> bool:
         """
         β path: when internal retrieval returned zero sources, run ONE Google web
@@ -608,10 +698,13 @@ class DeepResearchOrchestrator(OrchestratorBase):
             return False
 
         # 2. Build synthetic single-WEB_SEARCH-gap response (only .gap_resolutions is read).
+        #    Fix 1（票 2026-07-28-f）：search_query 不用整句 user query——整句餵 wiki 會
+        #    fuzzy match 沾邊條目進池；改抽「查詢主體」（QU 現成產物 → low-tier LLM → 整句 fail-open）。
+        search_subject = await self._extract_search_subject(state)
         gap = GapResolution(
             gap_type="zero_retrieved",
             resolution=GapResolutionType.WEB_SEARCH,
-            search_query=state.query,
+            search_query=search_subject,
             reason="zero internal sources retrieved",
             requires_web_search=True,
         )
@@ -778,6 +871,91 @@ class DeepResearchOrchestrator(OrchestratorBase):
             self.source_map = state.source_map
         return True
 
+    # 相關性 gate 的池 digest 字數上限：超出部分不送判、一律保留（fail-open）。
+    # 設計餘裕：每筆 title+150 字摘要 ~200 字 → 24000 涵蓋 ~117 筆（AR R1 in-house
+    # 獨立驗算），高於一般 DR 池量級；即使量級估錯，超出方向是 fail-open 不誤殺。
+    # 票 2026-07-28-m：權威值移至 relevance_gate_core（DR/LR 共用）；保 class attr 名
+    # 不變 → 既有測試 mock `orch._RELEVANCE_GATE_DIGEST_CHAR_BUDGET` 不破。
+    _RELEVANCE_GATE_DIGEST_CHAR_BUDGET = RELEVANCE_GATE_DIGEST_CHAR_BUDGET
+
+    async def _relevance_gate_source_pool(self, state) -> None:
+        """Phase 1 證據池相關性 gate（票 2026-07-28-f Fix 2：根治 empty ≠ irrelevant）。
+
+        進 Actor-Critic 前對整池（站內 + β-path 補進的 tier6）做一次批次語意判定：
+        - 全池不相關 → state.early_return = 既有 _create_no_results_response（誠實查無）
+        - 部分不相關 → 濾掉後全量重建 formatted_context / source_map（mirror β step 7）
+        - 判定失敗（exception / LLMError / 回傳無法解析）→ fail-open 全池保留 + warning。
+          與 LR hallucination_guard R1 fail-closed 反向：gate 誤殺真證據 = 使用者拿不到
+          報告，代價高於留噪音（噪音下游還有 Analyst 判讀 + Critic + SEC-5 兜底）。
+        成本：每 DR run +1 次 low-tier call（批次判全池，不逐 source call）。
+        """
+        if not state.source_map:
+            return  # 空池由既有 β-path / no-results 分支處理
+
+        # 1. 池 digest（shape-aware；字數上限內的 id 才送判，超出者保留 = fail-open）
+        digest_lines = []
+        judged_ids = []
+        used_chars = 0
+        for cid in sorted(state.source_map):
+            title, source, description, _url = self._extract_item_fields(
+                state.source_map[cid]
+            )
+            line = f"[{cid}] {source} - {title}：{(description or '')[:150]}"
+            if used_chars + len(line) > self._RELEVANCE_GATE_DIGEST_CHAR_BUDGET:
+                self.logger.warning(
+                    f"[RELEVANCE-GATE] digest 達字數上限，[{cid}] 起未送判"
+                    f"（fail-open 保留）"
+                )
+                break
+            digest_lines.append(line)
+            judged_ids.append(cid)
+            used_chars += len(line) + 1  # +1 = join 換行符（in-house nit：budget 誤差歸零）
+        digest = "\n".join(digest_lines)
+
+        # 2+3. 批次判 + clamp（委派共用核心；票 2026-07-28-m 抽出，DR/LR 同一份 prompt）
+        from reasoning.relevance_gate_core import judge_irrelevant_source_ids
+
+        irrelevant = await judge_irrelevant_source_ids(
+            query=state.query,
+            digest=digest,
+            judged_ids=judged_ids,
+            query_params=getattr(self.handler, "query_params", {}),
+            logger=self.logger,
+            log_prefix="RELEVANCE-GATE",
+        )
+        # 🔧 R1：fail-open（core 回 None，已在 core 印過 warning）→ 全池保留、直接 return。
+        # 對齊 DR 原 :948-962 語義（warning 後 return，不動池、不印「全相關」info）。
+        if irrelevant is None:
+            return
+
+        if not irrelevant:
+            self.logger.info(
+                f"[RELEVANCE-GATE] 全池 {len(state.source_map)} 筆判定相關，池不動"
+            )
+            return
+
+        kept_ids = [cid for cid in sorted(state.source_map) if cid not in irrelevant]
+        self.logger.warning(
+            f"[RELEVANCE-GATE] 剔除 {len(irrelevant)}/{len(state.source_map)} 筆"
+            f"不相關來源：{sorted(irrelevant)}"
+        )
+
+        # 4a. 零相關 → 誠實查無（復用既有 builder，不重寫）
+        if not kept_ids:
+            self.logger.warning(
+                "[RELEVANCE-GATE] 全池不相關——走誠實查無（防方法論自述長文）"
+            )
+            state.early_return = self._create_no_results_response(state.query)
+            return
+
+        # 4b. 部分相關：濾池 + 全量重建 + G2 sync（mirror β-path step 7 / :646-648）
+        state.current_context = [state.source_map[cid] for cid in kept_ids]
+        state.formatted_context, state.source_map = self._format_context_shared(
+            state.current_context
+        )
+        self.formatted_context = state.formatted_context
+        self.source_map = state.source_map
+
     async def _phase_filter_and_prepare(self, state: 'ResearchState') -> 'ResearchState':
         """
         Phase 1: Filter sources by tier + format context with citations.
@@ -831,6 +1009,13 @@ class DeepResearchOrchestrator(OrchestratorBase):
                 f"RSN-11/β: web search recovered {len(state.source_map)} sources; "
                 "proceeding to Actor-Critic with web-augmented context."
             )
+
+        # 票 2026-07-28-f Fix 2：empty ≠ irrelevant——非空池（含 β 補回的池）也要過
+        # 相關性 gate。零相關 → 誠實查無 early return；部分相關 → 池已濾好續跑。
+        await self._relevance_gate_source_pool(state)
+        if state.early_return is not None:
+            await self._emit_phase_event("filter_and_prepare", "completed")
+            return state
 
         await self._emit_phase_event("filter_and_prepare", "completed")
         return state
@@ -1599,6 +1784,26 @@ class DeepResearchOrchestrator(OrchestratorBase):
         await self._emit_phase_event("actor_critic_loop", "completed")
         return state
 
+    def _build_writer_evidence_lookup(self, state) -> Dict[int, Dict[str, str]]:
+        """SEC-5 白名單 ID → 真實來源明細，餵 Writer compose prompt（票 2026-07-28-f Fix 3）。
+
+        範圍限 analyst_citations（Writer 白名單；給全池會誘導引用白名單外 id →
+        被 :1724 guard 剝掉）。shape-aware 抽取復用 _extract_item_fields。
+        """
+        lookup: Dict[int, Dict[str, str]] = {}
+        for cid in sorted(set(state.analyst_citations)):
+            item = state.source_map.get(cid)
+            if item is None:
+                continue  # SEC-5 已濾 phantom；防禦性跳過
+            title, source, description, url = self._extract_item_fields(item)
+            lookup[cid] = {
+                "title": title,
+                "site": source,
+                "url": url,
+                "snippet": (description or "")[:200],
+            }
+        return lookup
+
     async def _phase_writer(self, state: 'ResearchState') -> 'ResearchState':
         """
         Phase 3: Writer compose + Hallucination Guard.
@@ -1659,21 +1864,14 @@ class DeepResearchOrchestrator(OrchestratorBase):
 
             self.logger.info("Writer composing final report")
 
-        # Build citation details for logging (show what citations Writer can use)
-        citation_details = {}
-        for cid in state.analyst_citations:
-            if cid in state.source_map:
-                item = state.source_map[cid]
-                if isinstance(item, dict):
-                    title = item.get("title") or item.get("name", "No title")
-                    url = item.get("url") or item.get("link", "")
-                elif isinstance(item, (list, tuple)) and len(item) > 0:
-                    title = item[2] if len(item) > 2 else "No title"
-                    url = item[0] if len(item) > 0 else ""
-                else:
-                    title = "Unknown"
-                    url = ""
-                citation_details[cid] = f"{title[:60]}... ({url[:40]}...)" if url else title[:60]
+        # Build citation lookup once: 供 compose prompt（Fix 3）+ logging 共用
+        evidence_lookup = self._build_writer_evidence_lookup(state)
+        citation_details = {
+            cid: (
+                f"{e['title'][:60]}... ({e['url'][:40]}...)" if e["url"] else e["title"][:60]
+            )
+            for cid, e in evidence_lookup.items()
+        }
 
         writer_input = {
             "analyst_draft": state.draft[:200] + "...",  # Show preview
@@ -1692,7 +1890,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
                     analyst_citations=state.analyst_citations,
                     mode=state.mode,
                     user_query=state.query,
-                    plan=plan  # Pass plan (None if not enabled)
+                    plan=plan,  # Pass plan (None if not enabled)
+                    evidence_lookup=evidence_lookup,
                 )
                 span.set_result(final_report)
         else:
@@ -1702,7 +1901,8 @@ class DeepResearchOrchestrator(OrchestratorBase):
                 analyst_citations=state.analyst_citations,
                 mode=state.mode,
                 user_query=state.query,
-                plan=plan  # Pass plan (None if not enabled)
+                plan=plan,  # Pass plan (None if not enabled)
+                evidence_lookup=evidence_lookup,
             )
 
         state.iteration_logger.log_agent_output(

@@ -147,7 +147,7 @@ async def test_bab_engine_evidence_pool_global_counter(monkeypatch):
     # Mock retriever_search to return distinct items per call
     call_count = {"n": 0}
 
-    async def fake_search(query, site, num_results, query_params):
+    async def fake_search(query, site, num_results, query_params, **kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
             return [
@@ -158,7 +158,7 @@ async def test_bab_engine_evidence_pool_global_counter(monkeypatch):
             ("https://b.com/3", '{"description":"d3"}', "Title B3", "src"),
         ]
 
-    monkeypatch.setattr("core.retriever.search", fake_search)
+    monkeypatch.setattr("reasoning.live_research.loop_engine.retriever_search", fake_search)
 
     engine = BABLoopEngine(
         associator=_FakeAssociator(),
@@ -187,13 +187,13 @@ async def test_bab_engine_dedup_by_url(monkeypatch):
     """同 URL 在不同 iteration 出現 → 只佔一個 evidence_id（不重複收錄）。"""
     from reasoning.live_research.loop_engine import BABLoopEngine
 
-    async def fake_search(query, site, num_results, query_params):
+    async def fake_search(query, site, num_results, query_params, **kwargs):
         # Always return the same item
         return [
             ("https://dup.com/1", '{"description":"same"}', "Same Title", "src"),
         ]
 
-    monkeypatch.setattr("core.retriever.search", fake_search)
+    monkeypatch.setattr("reasoning.live_research.loop_engine.retriever_search", fake_search)
 
     engine = BABLoopEngine(
         associator=_FakeAssociator(),
@@ -216,12 +216,12 @@ async def test_bab_engine_seed_evidence_pool(monkeypatch):
     """傳入 seed_evidence_pool → counter 從 max(seed_keys) 開始。"""
     from reasoning.live_research.loop_engine import BABLoopEngine
 
-    async def fake_search(query, site, num_results, query_params):
+    async def fake_search(query, site, num_results, query_params, **kwargs):
         return [
             ("https://new.com/x", '{"description":"d"}', "New", "src"),
         ]
 
-    monkeypatch.setattr("core.retriever.search", fake_search)
+    monkeypatch.setattr("reasoning.live_research.loop_engine.retriever_search", fake_search)
 
     seed_pool = {
         5: EvidencePoolEntry(evidence_id=5, title="Seed5", url="https://seed.com/5"),

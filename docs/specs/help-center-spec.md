@@ -1,8 +1,8 @@
 # Help Center 規格文件
 
 > **Owner**: 讀豹 Team
-> **Last Updated**: 2026-03-31
-> **Status**: 完成（Feedback POST + FAQ 靜態顯示 已上線）
+> **Last Updated**: 2026-07-25
+> **Status**: 完成（Feedback POST + FAQ 靜態顯示 已上線；`GET /api/faq` + faqs 表 seed + 公開 `/faq` 頁 2026-07-25 land main `8324b154`）
 
 ---
 
@@ -25,8 +25,11 @@ Help Center 是讀豹的使用者支援介面，提供三項功能：
 | Method | Path | 認證 | 說明 |
 |--------|------|------|------|
 | `POST` | `/api/help/feedback` | 公開（soft auth） | 提交意見回饋 |
+| `GET` | `/api/faq` | 公開（GET/HEAD，`PUBLIC_GET_ENDPOINTS`） | 讀 `faqs` 表：只回 `is_published` 為真、按 `sort_order, id` 升序；回應 shape `{faqs:[{id,question,answer,category,sort_order}]}`（2026-07-25 land） |
 
 路由在 `webserver/routes/__init__.py` 的 `setup_routes()` 中透過 `setup_help_routes(app)` 統一註冊。
+
+**消費者**：公開 `/faq` 頁（`static/landing/faq.html` + `faq.js`，landing 域、免登入）fetch 此 API 渲染 accordion。**產品內 help center（`static/help.html`）不吃此 API**——維持 `help.js` FAQ_DATA 硬編碼（CEO 2026-07-23 拍板不動；未來要切換再另案）。
 
 ### 認證說明
 
@@ -40,7 +43,7 @@ Help Center 是讀豹的使用者支援介面，提供三項功能：
 
 ### auth middleware 中的 FAQ 相關設定
 
-`PUBLIC_GET_ENDPOINTS` 包含 `/api/faq`（GET 公開；POST/PUT/DELETE 需 admin auth），但目前 `help.py` 並未實作 FAQ CRUD API（見「已知限制」）。
+`PUBLIC_GET_ENDPOINTS` 包含 `/api/faq`、`/faq`、`/blog`（GET/HEAD 公開；middleware 判定用 `_public_read` predicate 含 HEAD——aiohttp `add_get` 自動註冊 HEAD，見 `memory/lessons-auth.md`）。`GET /api/faq` **已實作**（`help.py` `get_faqs_handler`，2026-07-25）；POST/PUT/DELETE CRUD 仍未實作（見「未來擴充方向」）。
 
 ---
 
@@ -75,7 +78,7 @@ Help Center 是讀豹的使用者支援介面，提供三項功能：
 | `created_at` | REAL | Unix timestamp |
 | `updated_at` | REAL | Unix timestamp |
 
-**注意**：`faqs` 資料表已建立，但目前 FAQ 內容由前端 JavaScript 靜態管理（見「FAQ 內容管理方式」），未透過此資料表提供。
+**注意**：`faqs` 資料表已由 alembic `22bf360fdc0a_seed_faqs` seed 21 條（鏡射 `help.js` FAQ_DATA，2026-07-25）供公開 `GET /api/faq` 讀取；seed 有空表 guard（表非空即 no-op）+ no-op downgrade。**部署新環境前先查該環境 faqs 表現況**——歷史手動資料會讓 seed no-op（見 `memory/lessons-db.md`「code 層零寫入點≠表是空的」）。產品內 help center 的 FAQ 仍由前端 `FAQ_DATA` 靜態管理（見「FAQ 內容管理方式」），與 DB 雙軌並存。
 
 ---
 
@@ -147,13 +150,10 @@ Help Center 是讀豹的使用者支援介面，提供三項功能：
 
 ## FAQ 內容管理方式
 
-**目前實作**：FAQ 為靜態前端資料，定義在 `static/js/help.js` 的 `FAQ_DATA` 陣列。
-
-- 所有 22 個條目硬編碼於 JS 檔案中
-- 新增/修改 FAQ 需直接編輯 `static/js/help.js`
-- 無 admin UI、無 API 呼叫
-
-**資料庫 schema 已就緒**：`faqs` 資料表已在 `auth_db.py` 定義，但目前並未使用。未來可實作 `/api/faq` CRUD API 接替靜態資料。
+**雙軌並存（2026-07-25 起）**：
+- **產品內 help center**：靜態前端資料，`static/js/help.js` 的 `FAQ_DATA` 陣列（**21** 條硬編碼；舊記載「22」為誤數）。新增/修改需直接編輯該檔。
+- **公開 `/faq` 頁**：讀 DB `faqs` 表（經 `GET /api/faq`）。內容維護：admin 手動 SQL（`INSERT INTO faqs ...` / `UPDATE faqs SET is_published=...`）或未來 CRUD UI；改 DB 不需改前端。
+- 兩軌內容初始等值（seed 鏡射 FAQ_DATA）；日後若各自演進屬預期（help center 收斂到同一 API 為未來選項，非現行承諾）。
 
 ---
 
@@ -198,11 +198,11 @@ Content-Security-Policy:
 
 ### 已知限制
 
-1. **FAQ 無動態管理**：內容硬編碼於 JS；更新需重新部署前端
+1. **help center FAQ 無動態管理**：產品內內容硬編碼於 JS；更新需重新部署前端（公開 /faq 頁已走 DB，不受此限）
 2. ~~**截圖大小訊息不一致**：後端限制 5 MB，前端錯誤訊息顯示「1MB」~~ → 已修（commit `c9c7a45b`，2026-06-17）
 3. **截圖無存取控制**：上傳後可透過靜態路由公開存取，無需認證
 4. **feedbacks 無管理介面**：目前無法在後台瀏覽/處理回饋資料
-5. **`/api/faq` GET 端點**：`auth.py` 的 `PUBLIC_GET_ENDPOINTS` 已預留 `/api/faq`，但 `help.py` 尚未實作
+5. ~~**`/api/faq` GET 端點尚未實作**~~ → 已實作（2026-07-25，main `8324b154`：`get_faqs_handler` + faqs seed + 公開 /faq 頁）；POST/PUT/DELETE CRUD 仍未做
 
 ### 未來擴充方向
 

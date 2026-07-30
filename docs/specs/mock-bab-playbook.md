@@ -25,7 +25,7 @@
 
 ## Fixture 來源（現行：Cayenne 新命題 session 8e1db658，2026-07-15）
 
-> **2026-07-15 更新（Cayenne 專題方向調整）**：Cayenne 把她的專題真的寫出來了，方向調整為「國外案例出發、臺灣對應偏少」（原稿 `docs/2026年7月專題-能源轉型下再生能源設置之地方衝突與治理.docx`）。LR e2e 的 benchmark 命題隨之從舊版（候車亭/國內外對照五章）升級到此新專題。**benchmark = 接近 Cayenne 原文的「結構與品質水準」（案例可換臺灣），Cayenne 本人判滿意（human-judged）。** 完整體檢見 `docs/lr-e2e-2026-07-15-findings.md`。
+> **2026-07-15 更新（Cayenne 專題方向調整）**：參考 persona 的專題成稿方向調整為「國外案例出發、臺灣對應偏少」。LR e2e 的 benchmark 命題隨之從舊版（候車亭/國內外對照五章）升級到此新專題。**benchmark = 接近該專題原文的「結構與品質水準」（案例可換臺灣），由 persona 對應的真人評判滿意（human-judged）。**
 
 **現行 fixture** 來源 session：`8e1db658-3bac-4071-a4f3-cdcb53e8c162`（題「能源轉型下再生能源設置之地方衝突與治理」，2026-07-15 prod 真跑，三章結構：前言/國際案例分析/結論，567 筆 evidence）。
 

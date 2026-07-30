@@ -5,6 +5,7 @@ import logging
 import os
 import jwt
 import time
+import re
 from typing import Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 # Public endpoints that don't require authentication (all HTTP methods)
 PUBLIC_ENDPOINTS: Set[str] = {
     '/',
+    '/app',              # 產品頁（登入牆是前端 modal，同 '/' 舊行為）
     '/health',
     '/ready',
     '/who',
@@ -36,13 +38,32 @@ PUBLIC_ENDPOINTS: Set[str] = {
     '/api/analytics/event/batch',
     # Help Center — feedback is public
     '/api/help/feedback',
+    '/api/early-bird',   # landing 早鳥表單（public POST）
 }
 
 # Endpoints that are public for GET requests only; other methods require auth
 PUBLIC_GET_ENDPOINTS: Set[str] = {
     # FAQ list is public (read-only); POST/PUT/DELETE require admin auth
     '/api/faq',
+    # Landing 公開 subpage（免登入、只 GET；單篇 /blog/<slug> 走 _BLOG_PUBLIC_PATH_RE 放行）
+    '/faq',              # FAQ 公開頁
+    '/blog',             # Blog 列表頁
+    # tier6 error aggregate（僅 error_type 計數，無 query 內容）— daily-patrol
+    # 無憑證巡檢要能打；handler 層同一裁決見 analytics_handler.get_tier6_errors
+    '/api/analytics/tier6_errors',
 }
+
+
+# ── Blog slug 規則：單一權威點 ────────────────────────────────────
+# slug 字元類定義於此（middleware），route 層（static.py）import _BLOG_SLUG_RE 衍生
+# 自己的 slug 驗證 → 兩處同構、零漂移。middleware 用 path regex 放行、只 GET、
+# 與 route 白名單同構（不寬放所有 /blog/...）。
+# 🔧 R2（nit-1）：錨用 \Z 不用 $——Python `$` 匹配「尾端換行前」，`hello\n`（來自
+# /blog/hello%0A decode）會過 `^...$` 白名單（實測 match True）；`\Z` 只匹配字串真結尾，
+# 尾隨換行不過。無實害但語義乾淨、封死 %0A 縫。
+_BLOG_SLUG_CHARS = r'[a-z0-9-]+'
+_BLOG_SLUG_RE = re.compile(rf'^{_BLOG_SLUG_CHARS}\Z')          # static.py import 此個驗 slug
+_BLOG_PUBLIC_PATH_RE = re.compile(rf'^/blog/{_BLOG_SLUG_CHARS}\Z')  # middleware 放行 /blog/<slug>
 
 
 def _try_soft_auth(request: web.Request) -> None:
@@ -82,10 +103,24 @@ async def auth_middleware(request: web.Request, handler):
     # Check if path is public
     path = request.path
 
+    # /blog/ 前綴但 slug 非法（含 traversal / 大寫 / 底線 / 尾隨換行）→ middleware 層 404。
+    # 公開頁的非法 URL 語義是「找不到」，不是「請登入」——擋在 auth 檢查前，避免回 401。
+    # 🔧 land-diff R1（Codex SF-1）：不綁 method——任何 method 打非法 /blog/ path 都
+    # 該是「找不到」（POST /blog/Foo_Bar → 404，非 401）。合法 /blog/<slug> 續走下方
+    # is_public 的 _BLOG_PUBLIC_PATH_RE 分支放行。
+    if path.startswith('/blog/') and not _BLOG_PUBLIC_PATH_RE.match(path):
+        return web.Response(text="Not found", status=404)
+
     # Check exact matches and path prefixes
+    # 🔧 land-diff R1（Codex SF-1 + agy nit）：public read 放行 GET 也放行 HEAD——
+    # aiohttp add_get 預設一併註冊 HEAD route，公開頁對 crawler / link checker /
+    # uptime probe 的 HEAD 探測不該回 401。合法 path 的其他非 GET/HEAD method（如
+    # POST /blog/<slug>）仍落 auth 401（行為不變）。
+    _public_read = request.method in ('GET', 'HEAD')
     is_public = (
         path in PUBLIC_ENDPOINTS or
-        (request.method == 'GET' and path in PUBLIC_GET_ENDPOINTS) or
+        (_public_read and path in PUBLIC_GET_ENDPOINTS) or
+        (_public_read and bool(_BLOG_PUBLIC_PATH_RE.match(path))) or
         path.startswith('/static/') or
         path.startswith('/html/') or
         path == '/favicon.ico'

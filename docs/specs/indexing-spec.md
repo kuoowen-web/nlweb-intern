@@ -18,7 +18,7 @@ M0 Indexing Module 負責新聞文章的索引化處理，將原始 TSV 資料�
 
 > **Cloud Embedding（2026-03，已完成）**：全量 indexing 由 GCP L4 VM 執行完畢。`cloud_embed.py` 做 TSV → chunking → Qwen3-4B embedding → .jsonl+.npy 輸出，`bulk_load.py` 灌入 VPS PG。最終結果：1,725,488 articles / 5,271,712 chunks。教訓：超大 TSV 需先 `split -l 20000` 拆分（bitsandbytes INT8 有 VRAM leak）；bulk load 用 `np.load(mmap_mode='r')` 避免 RAM spike；已處理的結果檔要即時清理避免 disk 滿。GCP 資源已清理（指此次一次性全量批次的 on-demand VM + bucket 已刪除）。
 >
-> **現況補正（2026-06-26，first-hand 帳單實證）**：以上為 2026-03 一次性全量批次的歷史。現況：新文章 embedding 在 NVIDIA L4 GPU 上跑（比利時 europe-west1，**按需開機跑完即關，非常駐**；8 個月累計 ~200 GPU·hr），GPU 名目費用由 GCP credit 全額折抵、**實付趨近 $0**。GCP 上唯一常駐的是一台 E2 CPU VM（台灣 asia-east1-b）跑 daily 爬蟲（無 GPU、不跑 embedding），實付約 US$177/月。線上 query-time embedding 走 OpenRouter API（fallback DeepInfra）。（前一版本誤寫「daily embedding cron 常駐 ~$1K/月」，已校正。）
+> **現況補正（2026-07-28 帳單考古刷新；前版 2026-06-26）**：以上為 2026-03 一次性全量批次的歷史。現況：新文章 embedding 在 NVIDIA L4 GPU **按需開機跑完即刪（非常駐）**，由 orchestrator VM weekly timer 驅動（現於 asia-southeast1，每週 ~2h ≈ NT$300/月）。GCP 常駐兩台 E2 VM（台灣 asia-east1-b、e2-micro：crawler daily 爬蟲 + orchestrator weekly 編排），**GCP 穩態合計 ~NT$1,000/月**——Free Trial credits 已於 2026-07 用罄、全額實付（credits 期「GPU 實付≈$0」為歷史）。舊記錄「crawler VM 實付 ~US$177/月」（2026-06-26 帳單解讀）stale、成因未考古；現況見 `docs/in progress/gcp-cost-review-2026-07-28.md`。線上 query-time embedding 走 OpenRouter API（fallback DeepInfra）。
 
 ### 架構流程（2026-07-16 更新：寫入路徑現況，取代舊「單一管線」圖）
 

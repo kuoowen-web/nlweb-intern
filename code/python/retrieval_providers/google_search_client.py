@@ -22,10 +22,36 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import quote
 from core.config import CONFIG
-from core.retry_util import retry_async
+from core.retry_util import (
+    is_retryable_exception,
+    mask_sensitive_url_params,
+    retry_async,
+)
 from misc.logger.logging_config_helper import get_configured_logger
 
 logger = get_configured_logger("google_search_client")
+
+
+def _is_retryable_cse_exception(exc: BaseException) -> bool:
+    """
+    CSE 專用 retry predicate：429 不重試，其餘沿用共用預設。
+
+    CSE 的 429 主因是 free tier daily quota（100/day）用罄——1-2 秒 backoff
+    毫無意義，且在 search_all_sites 的 3 秒外層 cap 下 retry 結構上跑不完，
+    只會被砍斷偽裝成 timeout（prod 2026-07-28 實證：latency 恰 3002-3003ms、
+    真因 429 在 analytics 不可見）。429 立即 raise，走上層既有降級路徑。
+
+    注意：不動 retry_util 的全域預設——429-retryable 是 2026-06-19 prod
+    embedding 429 事故後的刻意設計（embedding 路徑依賴它），差異化只在
+    本 caller 層做。5xx / timeout / 網路錯誤照舊 retry。
+    """
+    if (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response is not None
+        and exc.response.status_code == 429
+    ):
+        return False
+    return is_retryable_exception(exc)
 
 
 class GoogleSearchClient:
@@ -49,10 +75,16 @@ class GoogleSearchClient:
 
     def __init__(self):
         """Initialize Google Search client."""
-        # Get API key from environment or config
+        # Google Search 憑證只從環境變數讀（secret，不入 config yaml）。
+        # 舊碼寫 `os.getenv(...) or CONFIG.get(...)`：AppConfig 無 .get() 方法、
+        # config 也無此 key，該 fallback 是死路——env 未設時必拋
+        # AttributeError('AppConfig' object has no attribute 'get')，被上游
+        # _execute_web_search 的 except 靜靜吞成「web search 失敗回空」。本地/prod
+        # 因 .env 有 GOOGLE_SEARCH_API_KEY 而 or 短路、從不觸發；CI 無此 env 才確定性
+        # 炸。移除死路 fallback，env 未設即為 None（下方已有 warning 提示未配置）。
         import os
-        self.api_key = os.getenv('GOOGLE_SEARCH_API_KEY') or CONFIG.get('google_search_api_key')
-        self.search_engine_id = os.getenv('GOOGLE_SEARCH_ENGINE_ID') or CONFIG.get('google_search_engine_id')
+        self.api_key = os.getenv('GOOGLE_SEARCH_API_KEY')
+        self.search_engine_id = os.getenv('GOOGLE_SEARCH_ENGINE_ID')
 
         if not self.api_key:
             logger.warning("Google Search API Key not configured. Set GOOGLE_SEARCH_API_KEY environment variable.")
@@ -117,6 +149,11 @@ class GoogleSearchClient:
         start_time = time.time()
         cache_hit = False
         timeout_occurred = False
+        # Error classification for analytics: None = 正常（含真零結果）；
+        # "timeout" = 外層 cap 砍斷；"http_<status>" = 上游 HTTP 錯誤；
+        # "exception" = 其他例外。讓 DB 端能區分三種空結果。
+        error_type = None
+        error_detail = None
         results = []
 
         try:
@@ -147,6 +184,7 @@ class GoogleSearchClient:
 
                 except asyncio.TimeoutError:
                     timeout_occurred = True
+                    error_type = "timeout"
                     logger.warning(f"Web search TIMEOUT after {timeout}s for query: '{query}'")
 
                     # Try to return stale cache as fallback
@@ -160,7 +198,19 @@ class GoogleSearchClient:
             return results
 
         except Exception as e:
-            logger.error(f"Error during Google search: {e}", exc_info=True)
+            # Classify for analytics: HTTP errors carry their status code (e.g.
+            # http_429 = CSE daily quota exhausted) so DB rows are distinguishable
+            # from real timeouts and genuine zero-result searches.
+            if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
+                error_type = f"http_{e.response.status_code}"
+            else:
+                error_type = "exception"
+            # httpx embeds the full request URL (incl. `key=AIzaSy...`) in its
+            # exception messages — mask before it reaches log or DB metadata
+            # (prod incident 2026-06-20). No exc_info=True here: the traceback
+            # would print the UNMASKED message again.
+            error_detail = mask_sensitive_url_params(f"{type(e).__name__}: {e}")
+            logger.error(f"Error during Google search: {error_detail}")
             return []
 
         finally:
@@ -170,6 +220,11 @@ class GoogleSearchClient:
                 try:
                     from core.query_logger import get_query_logger
                     query_logger = get_query_logger()
+                    metadata = {"query": query, "num_results": num_results}
+                    if error_type is not None:
+                        metadata["error_type"] = error_type
+                    if error_detail is not None:
+                        metadata["error_detail"] = error_detail
                     query_logger.log_tier_6_enrichment(
                         query_id=query_id,
                         source_type="google_search",
@@ -177,7 +232,7 @@ class GoogleSearchClient:
                         latency_ms=latency_ms,
                         timeout_occurred=timeout_occurred,
                         result_count=len(results),
-                        metadata={"query": query, "num_results": num_results}
+                        metadata=metadata
                     )
                 except Exception as e:
                     logger.debug(f"Failed to log analytics: {e}")
@@ -203,10 +258,13 @@ class GoogleSearchClient:
 
             logger.info(f"Google Search API call: '{query}' (num_results={num_results})")
 
-            # Short retry on transient faults (429/timeout/5xx) before the call's
+            # Short retry on transient faults (timeout/5xx) before the call's
             # cache+fallback degradation kicks in. retry_async re-raises once
             # exhausted, so the existing fallback path (stale cache / empty) still
             # applies — we only degrade after retries are spent.
+            # 429 is deliberately NOT retried (CSE-specific predicate): daily
+            # quota exhaustion doesn't recover in seconds, and the backoff would
+            # blow past the caller's 3s wait_for cap, masquerading as a timeout.
             async def _request():
                 response = await client.get(self.api_endpoint, params=params)
                 response.raise_for_status()
@@ -215,6 +273,7 @@ class GoogleSearchClient:
             data = await retry_async(
                 _request,
                 max_retries=2,
+                is_retryable=_is_retryable_cse_exception,
                 description="google_cse",
             )
 

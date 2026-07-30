@@ -122,6 +122,28 @@ class BABLoopEngine:
         # 當前 BAB iteration（_execute_search 寫進 evidence.iteration_origin 用，debug）
         self._current_iteration: int = 0
 
+        # 票 2026-07-28-m：tier6 進池相關性 gate 已判過的 eid（跨輪不重判，只判增量）。
+        # 🔧 R2（B-R2-2）：初始化 = seed 池的全部 eid 快照——Stage 2 per-topic 建新 engine
+        # 時 seed_evidence_pool 帶入前 stage/topic 舊池（orchestrator.py:2308 一帶），這批
+        # 在先前 engine 已判過（或屬 internal 本就不判）；不預載會讓每個 topic 把歷史
+        # tier6 全池重判一次（N topics = N 次重複燒 LLM），且前面 topic 已引用的 tier6
+        # 可能被後面 gate 刪掉（跨 engine dangling citation）。預載全 seed eid（不只
+        # web/wiki）行為等價且最簡——internal eid 本就不進 digest，多載無害。
+        # 🔧 R3（B-R3-1 裁決）：seed 批**一律**豁免重判——含前 engine gate fail-open
+        # 未判成的批。理由：seed 批可能已被前面 topic 引用（fail-open = 沒判成 ≠ 沒被
+        # 引用），本 engine 重判刪除 = dangling citation 照樣發生；dangling 防護優先於
+        # fail-open 重判完整性。fail-open 重判契約因此收窄為「同 engine 內」（Step 1.4）；
+        # 跨 engine 殘漏由下游 C-1 / grounding 三層 / publish gate 兜底（風險表 b2'）。
+        # 🔧 R4（SF-R4-1）：豁免契約是**通則**——涵蓋所有 seed_evidence_pool 進入路徑，
+        # 不限 Stage 2 per-topic。現行兩條 caller 鏈（R4 親驗）：①Stage 2 per-topic 迴圈
+        # 直建 engine（live_research/orchestrator.py:2308；Stage 2 offline resume 走同一
+        # 迴圈重入，無獨立 callsite）②recollect 退回 Stage 1（:4630 → _run_stage_1
+        # 簽名 :1256 → :1345 轉傳本建構子）。未來新增 seed caller 自動繼承同一豁免。
+        self._relevance_gate_judged_ids: set = set(self.evidence_pool.keys())
+        # 🔧 R1：gate query（run_loop 入口注入實值；__init__ 先給 None 供直呼 method 的
+        # unit test 不 AttributeError——接線 getattr 亦有 None default，此為雙保險）。
+        self._relevance_gate_query: Optional[str] = None
+
         # Track A (sprint 2026-05-28): caller (orchestrator) injects state for
         # evidence_usage indexing — Analyst argument_graph 索引進 state.evidence_usage。
         # 默認 None: caller 未注入 → 不索引（test code / dry-run 沿舊行為）。
@@ -165,6 +187,7 @@ class BABLoopEngine:
         # 外部來源無標題補標題 per-run cap 計數器（每 run 最多 TITLE_BACKFILL_CAP 次 LLM
         # call，超過用 source_domain）。per-run 重置 = engine 重用時下一輪重新配額。
         self._title_backfill_count = 0
+        self._relevance_gate_narrated = False   # 票 -m: tier6 剔除透明化旁白 per-run dedup
 
     def _setup_dry_run(self):
         """Override methods with fixtures for dry-run."""
@@ -228,6 +251,12 @@ class BABLoopEngine:
         # 是正確語意——engine instance 被重用（多次 run_loop）時，第二次 run 的降級旁白
         # 不會被永久靜音。見 _reset_per_run_dedup_flags docstring。
         self._reset_per_run_dedup_flags()
+        # 🔧 R1：gate query 唯一注入點——接線讀 self._relevance_gate_query。
+        # 不能靠 state.research_question（LiveResearchStageState 無此欄位，R1 已驗）。
+        # 🔧 R2（B-R2-2）：只注入 query，不 reset _relevance_gate_judged_ids——那會把
+        # __init__ 預載的 seed 快照清空（seed 重判問題復發）。judged 集合生命週期 =
+        # engine 生命週期（與 evidence_pool 一致，跨 run 保留）。
+        self._relevance_gate_query = query
 
         # Phase 0: 建立或複用 initial B
         if existing_context_map is not None:
@@ -313,6 +342,31 @@ class BABLoopEngine:
                 else:
                     # early-skip 輪：保留呼叫維持行為等價（內部 early return + 既有 log）
                     await self._run_mini_reasoning(context_map, formatted_results)
+
+                # 票 2026-07-28-m（🔧 R5 插點）：每輪 Phase 3 後、refine 前，無條件過
+                # tier6 相關性 gate——單一插點涵蓋兩類批：gap 批（本輪 mini 內尾端進池）
+                # 與 direct-web 批（Phase 2 進池）此刻都已在池、都未被 refine 消費。
+                # ⛔ 不可搬進 _run_gap_routing_phase（條件式：無 gap_resolutions 輪不跑）。
+                # 🔧 R1：query 讀 self._relevance_gate_query（run_loop 入口注入；
+                # LiveResearchStageState 無 research_question 欄位，R1 已驗）。
+                _gate_query = getattr(self, "_relevance_gate_query", None)
+                if _gate_query:
+                    # gate 自身例外不可炸掉 BAB 主迴圈；cancel 先放行（N1）。
+                    from reasoning.orchestrator_base import ResearchCancelledError
+                    try:
+                        await self._relevance_gate_evidence_pool(_gate_query)
+                    except ResearchCancelledError:
+                        raise  # soft-interrupt 立即停——穿迴圈 finally 冒泡出 run_loop
+                    except Exception as e:
+                        logger.warning(
+                            f"[LR RELEVANCE-GATE] gate 執行失敗（non-fatal，池不動）：{e}",
+                            exc_info=True,
+                        )
+                else:
+                    # 不可 silent skip（CLAUDE.md 紀律）：query 缺 = 接線未注入，明確告警。
+                    logger.warning(
+                        "[LR RELEVANCE-GATE] _relevance_gate_query 未注入，tier6 相關性 gate 跳過本輪"
+                    )
 
                 # Phase 4: 更新 B -> B'
                 await self._emit_phase("bab_phase4", "started")
@@ -490,6 +544,11 @@ class BABLoopEngine:
                 )
 
         all_items = []
+        # 🔧 票 2026-07-28-m Task 0.5：direct/fallback web items 的 URL 集合——入庫時據此
+        # 標 source="web"（修既存錯標 internal bug：web 與 internal 混 extend 進 all_items
+        # 後無法靠內容區分；_normalize_item 輸出的 'source' key 是 google 第 4 欄 site
+        # 網域名，與 EvidencePoolEntry.source 的來源分類同名不同義，不可拿來判定）。
+        web_urls: set = set()
         # Track C C3 (F-9 根解 2026-05-28): keyword white-list for intl/transnational queries.
         # 沿 C-AMB-3 / C-AMB-4 紀律段同一份 white-list（class-level constant），
         # 確保 Associator prompt 紀律與 fallback gate 同步。
@@ -531,6 +590,10 @@ class BABLoopEngine:
                 ):
                     web_items = await self._execute_web_search(seed.query)
                     seed_items_count += len(web_items)
+                    web_urls.update(  # 🔧 R1：記 web url，入庫時標 source="web"
+                        (it[0] if isinstance(it, (list, tuple)) else it.get("url", ""))
+                        for it in web_items
+                    )
                     all_items.extend(web_items)
 
             except Exception as e:
@@ -573,6 +636,10 @@ class BABLoopEngine:
                 )
                 try:
                     fallback_web_items = await self._execute_web_search(seed.query)
+                    web_urls.update(  # 🔧 R1：fallback web 同標
+                        (it[0] if isinstance(it, (list, tuple)) else it.get("url", ""))
+                        for it in fallback_web_items
+                    )
                     all_items.extend(fallback_web_items)
                 except Exception as e:
                     logger.warning(f"[BAB LOOP][Track C C3 fallback] web search failed: {e}")
@@ -646,6 +713,7 @@ class BABLoopEngine:
                     # FIX-3 (Cayenne #10): 填 author → APA inline 不再「來源不明」。
                     # year 由 render 從 published_at 取年份（避免重複 source-of-truth）。
                     author=item.get('author', '') or '',
+                    source="web" if url and url in web_urls else "internal",  # 🔧 R1
                 )
 
             formatted_lines.append(f"[{evidence_id}] {title}\n{desc[:500]}\nURL: {url}\n")
@@ -675,7 +743,14 @@ class BABLoopEngine:
             # LR 專屬 key，default 8，不 fallback 到共用 max_results（與 DR 解耦）
             num_results = web_config.get("max_results_lr", 8)
             client = GoogleSearchClient()
-            results = await client.search_all_sites(query, num_results=num_results)
+            # 票 2026-07-28-k：透傳 query_id → client 端既有 `if query_id:` gated
+            # tier_6_enrichment 落表（google_search_client.py:219-238）生效。
+            # detach 後背景 task 續跑時 handler（closure 持有）仍在，query_id 仍有效。
+            results = await client.search_all_sites(
+                query,
+                num_results=num_results,
+                query_id=getattr(self.handler, "query_id", None),
+            )
             logger.debug(f"[BAB LOOP] Web search '{query}': num_results={num_results}, got={len(results or [])}")
             return results or []
         except Exception as e:
@@ -932,7 +1007,9 @@ class BABLoopEngine:
                 logger.info("[LR gap routing] WIKIPEDIA gap has no query, skipping")
                 continue
             try:
-                results = await client.search(query)
+                results = await client.search(
+                    query, query_id=getattr(self.handler, "query_id", None)
+                )
             except Exception as e:
                 logger.warning(f"[LR gap routing] Wikipedia search failed for '{query}': {e}")
                 continue
@@ -947,6 +1024,95 @@ class BABLoopEngine:
                     "title": result.get("title", "Wikipedia"),
                     "snippet": f"[Tier 6 | encyclopedia] {result.get('snippet', '')}",
                 }, source="wiki")
+
+    async def _relevance_gate_evidence_pool(self, query: str) -> None:
+        """票 2026-07-28-m：tier6（web/wiki）進池相關性 gate。
+
+        挪用 DR gate（reasoning/orchestrator.py._relevance_gate_source_pool，票 -f）的
+        判定核心（reasoning.relevance_gate_core），適配 LR evidence_pool 形狀：
+        - 只判 tier6（source in {web, wiki}）且本輪新進、未判過的 eid（跨輪不重判；
+          🔧 R2 seed_evidence_pool 帶入的舊池 eid 已在 __init__ 預標已判——Stage 2
+          per-topic 新 engine 不重判、不刪前 stage/topic 舊池）。
+        - 部分不相關 → 從 evidence_pool 刪 eid + 同步 _url_to_id（LR 池 = 唯一真相）。
+        - 全不相關且刪光後池真空 → 下游 C-1 章級 gate（reasoning/live_research/orchestrator.py:5833
+          `not evidence_pool` 🔧 R1）自然走誠實查無（LR 不需 early_return 機制）。
+        - fail-open（🔧 R1 / 🔧 R3 收窄）：core 判定失敗回 None → 全保留 **且不標 judged**
+          （**同 engine 內**下輪重判，避免 transient failure 讓該批在本 engine 永久豁免；
+          誤殺真證據代價高於留噪音）。**跨 engine seed 邊界一律豁免不重判**——fail-open
+          批帶進下個 engine 後不再重判（可能已被前 topic 引用，重判刪除 = dangling；
+          裁決全文見 Step 1.3 __init__ 註解）。
+        - 剔除必 emit 旁白（CLAUDE.md 不可 silent fail；per-run dedup 防轟炸）。
+
+        成本：每輪 tier6 有新進才 +1 次 low-tier 批次 call；無新 tier6 → skip 零成本。
+        LR 是 CSE 大戶，故只判增量 + 批次判全批，不逐 source call。
+        """
+        from reasoning.relevance_gate_core import (
+            judge_irrelevant_source_ids,
+            RELEVANCE_GATE_DIGEST_CHAR_BUDGET,
+        )
+
+        # 1. 挑本輪待判的 tier6 eid（未判過的 web/wiki）
+        digest_lines = []
+        judged_ids = []
+        used_chars = 0
+        for eid in sorted(self.evidence_pool):
+            entry = self.evidence_pool[eid]
+            if entry.source not in ("web", "wiki"):
+                continue
+            if eid in self._relevance_gate_judged_ids:
+                continue
+            line = f"[{eid}] {entry.source_domain} - {entry.title}：{(entry.snippet or '')[:150]}"
+            if used_chars + len(line) > RELEVANCE_GATE_DIGEST_CHAR_BUDGET:
+                logger.warning(
+                    f"[LR RELEVANCE-GATE] digest 達字數上限，[{eid}] 起未送判（fail-open 保留）"
+                )
+                break
+            digest_lines.append(line)
+            judged_ids.append(eid)
+            used_chars += len(line) + 1
+
+        if not judged_ids:
+            return  # 無新 tier6 → skip（零成本）
+
+        # 2. 委派共用核心（DR/LR 同一份 prompt + clamp + fail-open）
+        irrelevant = await judge_irrelevant_source_ids(
+            query=query,
+            digest="\n".join(digest_lines),
+            judged_ids=judged_ids,
+            query_params=getattr(self.handler, "query_params", {}),
+            logger=logger,
+            log_prefix="LR RELEVANCE-GATE",
+        )
+        # 🔧 R1（SF1）：fail-open（core 回 None）→ 全保留且**不標 judged**，同 engine 內
+        # 下輪自動重判（🔧 R3：重判範圍限本 engine；跨 engine seed 邊界一律豁免，
+        # 裁決見 __init__ seed 預載註解）。core 已印 warning。
+        if irrelevant is None:
+            return
+
+        # 拿到正常判定（非 None）後才標記已判——本批確實被判過了，下輪不重判。
+        self._relevance_gate_judged_ids.update(judged_ids)
+
+        if not irrelevant:  # set() = 全相關（與 fail-open None 語義分明）
+            logger.info(
+                f"[LR RELEVANCE-GATE] {len(judged_ids)} 筆 tier6 判定相關，池不動"
+            )
+            return
+
+        # 3. 濾池：從 evidence_pool 刪 eid + 同步 _url_to_id
+        for eid in irrelevant:
+            entry = self.evidence_pool.pop(eid, None)
+            if entry is not None and entry.url in self._url_to_id:
+                del self._url_to_id[entry.url]
+        logger.warning(
+            f"[LR RELEVANCE-GATE] 剔除 {len(irrelevant)} 筆不相關 tier6 來源："
+            f"{sorted(irrelevant)}"
+        )
+
+        # 4. 透明化旁白（不可 silent fail；per-run 只提示一次）
+        await self._narrate_once(
+            "_relevance_gate_narrated",
+            "（部分外部補強來源與查詢主體關聯薄弱，已從證據中排除，研究照常繼續。）",
+        )
 
     async def _add_external_evidence(self, item: dict, source: str) -> None:
         """共用 helper：把外部來源 item (web / wiki) 寫進 evidence_pool (Track C C4).

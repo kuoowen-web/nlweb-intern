@@ -48,7 +48,7 @@ class Memory(PromptRunner):
                     "treating as non-memory request (fail-open)"
                 )
                 return
-            if (self.is_memory_request == "True"):
+            if (str(self.is_memory_request).lower() == "true"):
                 # this is where we would write to a database
                 logger.debug(f"writing memory request: {self.memory_request}")
                 message = {"message_type": "remember", "item_to_remember": self.memory_request, "content": "I'll remember that"}

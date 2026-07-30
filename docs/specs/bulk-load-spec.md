@@ -59,20 +59,43 @@ PostgreSQL（nlweb DB）
 ```
 `embedding_offset` 是該 chunk 在 `.npy` 陣列中的列索引。
 
-### 主流程
+### 主流程（批次寫入，2026-07-23 改造）
+
+跨洲寫入（GPU embed VM 新加坡 → prod PG 芬蘭 RTT ~200ms）逐篇 commit 每篇 ≥2 次
+round-trip。改為每 `COMMIT_BATCH_SIZE`（300，可調 200-500）篇一批：
 
 ```python
 1. 掃描 results_dir/ 下所有 .jsonl + .npy 配對
-2. 讀取 .bulk_load_done 跳過已完成的檔案
-3. 逐對處理（load_file_pair）：
-   a. np.load(npy_path, mmap_mode='r')  — memory-mapped，不一次載入 RAM
-   b. 逐行讀取 .jsonl
-   c. INSERT INTO articles ... ON CONFLICT (url) DO UPDATE
-   d. 組建 chunk_rows，每 500 筆一個 batch
-   e. INSERT INTO chunks ... ON CONFLICT (article_id, chunk_index) DO UPDATE
-   f. conn.commit()（每篇文章 article + chunks 一起 commit）
-4. 成功後追加檔名到 .bulk_load_done
+2. 讀取 .bulk_load_done 跳過已完成的檔案（load_file_pair）：
+   a. np.load(npy_path, mmap_mode='r')  — memory-mapped
+   b. 逐行讀取 .jsonl，parse 階段隔離壞資料（JSONDecodeError / 缺 url / zero-chunk
+      → errors+1、不進 batch，不毒化批次 transaction）
+   c. 累積至 COMMIT_BATCH_SIZE 篇 → _flush_batch（快路徑）：
+      - _dedup_batch：批次內 url 去重保留最後一筆（防 ON CONFLICT DO UPDATE
+        cardinality violation；快/降級路徑共用 helper 統一 stats 計數）
+      - 多列 INSERT INTO articles VALUES (...),(...) ON CONFLICT (url) DO UPDATE
+        RETURNING url, id → 建 url→id map（不依賴多列 RETURNING 順序）
+      - 批次 orphan 防護：DELETE FROM chunks WHERE article_id = ANY(ids) 再批次
+        INSERT chunks（executemany 每 500 分片）— 全在同一 transaction
+      - conn.commit()（整批一次），stats 累加必在 commit 後（errors gate 依賴）
+   d. 批次 DB 失敗 → rollback → 降級 _flush_batch_per_article 逐篇重試（隔離壞篇，
+      好篇 land、壞篇 errors+1）
+3. errors==0 才追加檔名到 .bulk_load_done（有 errors 不寫，下次重跑）
 ```
+
+**連線層防護（tunnel 逾時，2026-07-23）**：`psycopg.connect` 帶 `connect_timeout=15` +
+TCP keepalive（`keepalives_idle=30/interval=10/count=3`，~60s 判死半開連線）+
+`options="-c statement_timeout=300s"`（**必用連線層 options 非連上後 SQL SET**——後者
+綁隱式 transaction，rollback 會回滾成 0 使降級路徑防護失效）。
+
+**wall-clock 兜底（orchestrator 層，`indexing_orchestrator.sh`）**：`timeout
+--signal=TERM --kill-after=30 2400 python3 bulk_load.py`——不管內部卡在哪，超過
+`BULK_LOAD_TIMEOUT_SEC`（2400s）SIGTERM 掉 → rc=124 → 該檔不記 done、下次重跑。
+
+**效能現實**：批次化攤的是跨洲 RTT，但真瓶頸是 **PG 端 chunks 表（82GB/600萬行）的
+HNSW 向量索引逐筆寫入放大**（每 chunk 更新 HNSW 圖 ~100-200ms 物理成本，攤不掉）。
+indexing 寫入慢是這個 workload 的真實速度上限，接受慢 + wall-clock 兜底防無限卡。
+見 auto-memory `reference_postgres_scaling_lessons`。
 
 ---
 
@@ -93,7 +116,7 @@ cna_2025_02.jsonl
 - 啟動時讀取，建立 `done_set`
 - 每對檔案成功處理後，追加到檔案
 - 重新執行時，已在 `done_set` 的檔案直接跳過
-- 即使部分文章有 errors，只要 `load_file_pair` 未 raise，該批次視為完成
+- **只有 `stats["errors"]==0` 才寫 done**（2026-07-23 收緊；原本 errors>0 也寫→含壞資料的檔被永久跳過漏資料）。errors>0 或 load_file_pair raise（BulkLoadError / wall-clock 逾時 rc=124）→ 不寫 done、下次重跑
 
 ### .pg_indexing_done（舊機制，已棄用）
 

@@ -25,7 +25,7 @@
 | 狀態區域               | 主要檔案                                                       |
 | ------------------ | ---------------------------------------------------------- |
 | **Crawler**        | `crawler/core/engine.py`, `crawler/subprocess_runner.py`, `crawler/parsers/*.py` |
-| **Indexing**       | `indexing/pipeline.py`, `indexing/chunking_engine.py`      |
+| **Indexing**       | `indexing/cloud_embed.py`, `indexing/bulk_load.py`, `indexing/dashboard_api.py` |
 | Server Startup     | `webserver/aiohttp_server.py`                              |
 | Connection Layer   | `webserver/middleware/`                                     |
 | **Auth**           | `auth/auth_db.py`, `auth/auth_service.py`, `webserver/routes/auth.py` |
@@ -105,7 +105,7 @@
 3. 確認是否為已知問題或類似 pattern
 4. 若為新問題，才開始從程式碼調查
 
-**為什麼**：過去許多 bug 有重複 pattern（如 Windows pipe buffer、watermark skip、curl_cffi fallback）。先讀 memory 可避免重複踩坑，大幅加速 debug。
+**為什麼**：過去許多 bug 有重複 pattern（如 Windows pipe buffer、watermark skip、curl_cffi fallback）。先讀 memory 可避免重複踩坑、加速 debug。
 
 ### 以盡速debug為前提，不可以Silent Fail
 
@@ -119,7 +119,7 @@
 
 ### Smoke Test：修改程式碼後必跑
 
-**關鍵**：任何修改 Python 程式碼的操作完成後必須執行 `cd code/python && python tools/smoke_test.py`。FAILED 則立即修復，不可跳過。
+**關鍵**：任何修改 Python 程式碼的操作完成後必須執行 `bash scripts/smoke.sh`（等效 `cd code/python && uv run python tools/smoke_test.py`）。FAILED 則立即修復，不可跳過。
 
 **例外**：只修改 docs/、memory/、config YAML/JSON、static/ 前端檔案時不需要跑。
 

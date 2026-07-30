@@ -96,7 +96,7 @@ import {
     setAccumulatedArticles,
     cancelActiveSearch,
     clearCurrentConversationId
-} from './search.js?v=20260717a';
+} from './search.js?v=20260728a';
 import { setChatHistory, getChatHistory } from './chat.js?v=20260714a';
 import { setPinnedMessages, setPinnedNewsCards } from './pins.js';
 import { clearCurrentResearchQueryId } from './deep-research.js?v=20260717a';

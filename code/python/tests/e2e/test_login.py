@@ -24,8 +24,9 @@ def test_login_with_valid_credentials_succeeds(
     使用真實帳號登入，驗證成功後看到已登入狀態。
     判定標準：截圖可見 user menu / 已登入視覺元素。
     """
-    # 1. 前往首頁
-    page.goto(base_url)
+    # 1. 前往產品頁（landing cutover 2026-07-23：root 是 marketing landing、
+    #    登入 modal 在 /app——goto 目標 base_url → base_url/app）
+    page.goto(f"{base_url}/app")
     # networkidle 在本 app 不可靠（analytics beacon 常駐連線）——改等
     # 「可判定狀態」：已登入視覺元素或 login email input 任一可見。
     wait_login_decidable(page, login_selectors)

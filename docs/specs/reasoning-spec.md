@@ -327,6 +327,16 @@ gap-enrichment / revise 輪的 LLM 可能非決定性省略 optional graph 欄�
 
 ---
 
+### 2.9 證據池相關性 gate（票 2026-07-28-f land；判定核心 2026-07-29 抽共用 `96cf423e`）
+
+`orchestrator.py` 的 `_relevance_gate_source_pool`，在 `_phase_filter_and_prepare` 尾端（池組好、進 Actor-Critic 前）跑一次。治「empty ≠ irrelevant」縫：非空池也要過相關性判定，滿池沾邊來源（查具名人物回另一人物的百科頁）不再裸奔進推理。
+
+- **批次負面表列判定**：一次 low-tier call，digest（每筆 title + 摘要 150 字，budget 24000 字、超出部分不送判一律保留）點名「完全不相關」id；「不確定就保留」+「具名人物同機構≠相關」規則明寫於 prompt
+- **fail-open 全路徑**：LLM 例外 / LLMError sentinel / 回傳無法解析 → 全池保留 + warning（誤殺真證據代價高於留噪音；下游 Analyst/Critic/publish gate 兜底）
+- **clamp**：`irrelevant_ids` 與實際送判 id 交集（bool 為 int subclass 一併排除），防 LLM 幻覺編號
+- **零相關 → `state.early_return` 誠實查無**；部分相關 → 濾 `current_context` + `_format_context_shared` 全量重建
+- **判定核心共用（2026-07-29，票 2026-07-28-m）**：prompt / clamp / fail-open / budget 抽至 `reasoning/relevance_gate_core.judge_irrelevant_source_ids`（回傳 `Optional[set]`：`None`=fail-open / `set()`=全相關 / 非空=不相關 id），DR/LR 同一份 prompt——改判定規則（如票 2026-07-29-b 機構沾邊精度）此檔單點生效。DR 呼叫端保留組 digest 與 early_return / 濾池動作；LR 側契約見 live-research-spec §6.7b
+
 ## 3. Agent System Prompts (Soft Logic)
 
 > **mode 參數狀態（2026-06-17 re-sync）**：各 agent 簽章仍保留 `mode` 參數**作向後相容**，但 2026-04 起**無實際邏輯影響**——統一改用 discovery-based 規則。`critic.py:105` 與 `prompts/critic.py:249` docstring 均註「kept for signature compatibility, value ignored since 2026-04」；`prompts/critic.py:_build_mode_compliance_rules`（`:241-258`）docstring 註「strict/discovery/monitor modes have been removed (2026-04). All research now follows unified discovery-based rules.」`source_tier.py:filter_and_enrich` 的 `mode` 參數亦同（value ignored）。

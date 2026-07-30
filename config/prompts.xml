@@ -76,37 +76,6 @@
       </returnStruc>
     </Prompt>
 
-    <Prompt ref="DecontextualizeContextPrompt">
-      <promptString>
-        使用者提問：「{request.rawQuery}」
-        相關項目描述：{request.contextDescription}
-        先前回答：{request.prevAnswers}
-
-        改寫查詢，使其無須參照先前回答或項目描述即可獨立理解。
-      </promptString>
-      <returnStruc>
-        {
-          "decontextualized_query": "改寫後的獨立查詢"
-        }
-      </returnStruc>
-    </Prompt>
-
-    <Prompt ref="FullDecontextualizePrompt">
-      <promptString>
-        使用者提問：「{request.rawQuery}」
-        相關項目描述：{request.contextDescription}
-        先前查詢：{request.previousQueries}
-        先前回答：{request.prevAnswers}
-
-        改寫查詢，使其無須參照先前查詢、回答或項目描述即可獨立理解。
-      </promptString>
-      <returnStruc>
-        {
-          "decontextualized_query": "改寫後的獨立查詢"
-        }
-      </returnStruc>
-    </Prompt>
-
     <Prompt ref="DetectMemoryRequestPrompt">
       <promptString>
         分析以下使用者輸入。
@@ -121,87 +90,6 @@
         {
           "is_memory_request": "True or False",
           "memory_request": "記憶內容，若無則留空"
-        }
-      </returnStruc>
-    </Prompt>
-
-    <Prompt ref="QueryRewrite">
-      <promptString>
-        你是新聞研究助手。判斷查詢是否需要擴展，若需要則產生具體的新聞搜尋詞。
-
-        ## 步驟一：評估查詢
-
-        不需擴展（回傳空 list）：
-        - 查詢已指名具體事件、人物、機構 + 行為
-          （「台積電第四季財報」「張文案判決結果」）
-        - 查詢範圍明確，擴展反而稀釋結果
-          （「特斯拉降價原因」「fed 一月會議決議」）
-
-        需要擴展：
-        - 查詢為抽象概念或廣泛主題
-          （「治安問題」「AI 對就業的影響」「房價走勢」）
-        - 查詢使用籠統詞彙，新聞報導會拆分為具體事件、政策或數據
-
-        ## 步驟二：產生具體新聞用語
-
-        思考：「記者實際會用什麼標題或關鍵句報導此主題？」
-        產生 2-4 個使用新聞報導實際用語的搜尋詞。
-
-        規則：
-        - 使用具體新聞用語，不用抽象同義詞
-        - 與原始查詢相同語言
-        - 不可包含原始查詢本身
-
-        ## 範例
-
-        「治安問題」→ needs_expansion: true
-        queries: ["重大刑案 犯罪事件", "警政措施 巡邏部署", "犯罪率 治安統計"]
-        ✗ 錯誤：["社會安全", "公共秩序"] — 抽象同義詞，非新聞用語
-
-        「AI 對就業的影響」→ needs_expansion: true
-        queries: ["科技業裁員 人力縮減", "自動化取代 工作機會", "AI人才需求 薪資變化"]
-
-        「半導體供應鏈」→ needs_expansion: true
-        queries: ["晶片短缺 交期延誤", "台積電 先進製程", "半導體出口管制 禁令"]
-
-        「房價走勢」→ needs_expansion: true
-        queries: ["房市交易量 成交價", "央行升息 房貸利率", "建商推案 預售屋"]
-
-        「台積電第四季財報」→ needs_expansion: false
-        queries: []
-        （已具體，擴展會稀釋結果）
-
-        「特斯拉為什麼降價」→ needs_expansion: false
-        queries: []
-        （目標明確，使用者要的就是這個主題）
-
-        「張文案最新進展」→ needs_expansion: false
-        queries: []
-        （特定事件，直接搜尋）
-
-        原始查詢：{request.query}
-      </promptString>
-      <returnStruc>
-        {
-          "needs_expansion": "true or false，查詢是否需要擴展",
-          "rewritten_queries": ["query1", "query2", "query3"],
-          "query_count": "產生的查詢數量（0-4 整數）"
-        }
-      </returnStruc>
-    </Prompt>
-
-    <Prompt ref="DetectMultiItemTypeQueryPrompt">
-      <promptString>
-        分析以下使用者查詢。
-        使用者要找的是單一類型的項目，還是多種類型？
-        若為多種類型，為每種類型建立獨立查詢，以分號分隔。
-
-        使用者查詢：{request.query}
-      </promptString>
-      <returnStruc>
-        {
-          "single_item_type_query": "True or False",
-          "item_queries": "各類型的獨立查詢，以逗號分隔"
         }
       </returnStruc>
     </Prompt>
@@ -223,23 +111,6 @@
       <returnStruc>
         {
           "item_type": ""
-        }
-      </returnStruc>
-    </Prompt>
-
-    <Prompt ref="DetectQueryTypePrompt">
-      <promptString>
-        分析以下使用者查詢。
-        使用者要找的是符合描述的 {site.itemType} 列表，還是特定 {site.itemType} 的詳細資訊？
-        若為特定項目，指出該 {site.itemType} 名稱及使用者想知道的細節。
-
-        使用者查詢：{request.query}
-      </promptString>
-      <returnStruc>
-        {
-          "item_details_query": "True or False",
-          "item_title": "項目名稱，若有",
-          "details_being_asked": "使用者詢問的細節"
         }
       </returnStruc>
     </Prompt>
@@ -563,13 +434,36 @@
 - 純搜尋查詢 → display_instruction: null
 
 ## 3. 作者/記者偵測
-判斷使用者是否在搜尋特定記者或作者的文章。
-- 提到人名 + 記者/作者/編輯（任何順序、任何標點）→ 提取純名字
-- 提到人名 + 「的文章」「寫過」「報導」→ 提取純名字
-- 「媒體名 的 人名」→ 提取人名
-- 純名字只保留中文名 2-4 字，不帶職稱（記者、副總編輯等）
-- 英文名保留全名（First Last）
-- 如果不確定，回傳 detected: false
+判斷查詢中的人名是「內容的撰寫者」還是「內容談論的對象」。
+
+核心概念：資料庫的作者欄位存的是「撰寫報導的記者」。
+- 使用者要找「此人寫的文章」（authorship）→ detected: true——會啟動作者欄位過濾
+- 使用者要找「關於此人的內容」（此人被報導、被引述、被評論、被訪問）→ detected: false——此人不會出現在作者欄，過濾必然零命中
+判斷的關鍵不是句型字面，而是：這個人在使用者想找的內容裡，是執筆者、還是主角？
+
+判斷指引（訊號，非窮舉）：
+- 媒體工作者身分（記者、作者、編輯、主筆、專欄作家）→ 傾向撰寫者
+- 政治人物、學者、企業家、官員等公眾人物 → 幾乎都是被報導對象（除非明確表示要找他們親自執筆的內容）
+- 「寫的」「撰寫」「執筆」「發表的」等動詞指向撰寫者；「發言」「談話」「表態」「立場」「看法」「怎麼說」等詞指向被報導對象
+- 「對某人的…」「關於某人的…」——某人是對象，不是撰寫者
+- 「媒體名＋的＋人名」而無其他訊號——僅媒體歸屬，不構成撰寫者判定
+- 同一句混合言論類與著作類訊號（如「的發言或作品」）→ 主要意圖通常是找此人的言論 → false
+- 不確定時一律 detected: false——誤判成撰寫者會導致零結果（作者欄查無此人），代價遠大於當一般搜尋多撈幾篇
+
+範例（示意概念，非窮舉）：
+- 「記者王家瑜的報導」→ detected: true, name: 王家瑜（媒體職稱＝撰寫者）
+- 「王家瑜寫的文章」→ detected: true, name: 王家瑜（撰寫動詞）
+- 「王家瑜的文章」→ detected: true, name: 王家瑜（著作物指向撰寫者）
+- 「王家瑜的報導」→ detected: false（無職稱、無撰寫動詞，「報導」偏向關於此人）
+- 「請找出台大邱啟新副教授的公開發言」→ detected: false（「發言」＝此人是說話的主角，不是執筆者）
+- 「台灣大學邱啟新曾經的發言或作品」→ detected: false（混合句：主要意圖是找言論）
+- 「邱啟新副教授寫的文章」→ detected: true, name: 邱啟新（明確撰寫動詞優先於公眾人物身分）
+- 「媒體對賴清德的評論」→ detected: false（「對」字表明賴清德是被評論對象）
+- 「聯合報的王家瑜」→ detected: false（僅媒體歸屬，無撰寫者訊號）
+
+名字提取規則：
+- 純名字只保留中文名 2-4 字，不帶職稱（記者、副總編輯、副教授等）
+- 英文名保留全名（First Last）；英文句型 articles by 人名 / reports by 人名 → detected: true
 
 ## 4. 時間範圍偵測
 判斷查詢是否包含時間意圖，並解析為精確日期範圍。
@@ -680,21 +574,6 @@
   <!-- Site configuration for 'all' - searching across multiple sites -->
   <Site id="all">
     <Item>
-      <Prompt ref="DetectIrrelevantQueryPrompt">
-        <promptString>
-          The user is searching across ALL sites for: '{request.query}'
-          
-          Since we're searching across all sites, very few queries would be truly irrelevant.
-          Only mark as irrelevant if the query is completely nonsensical or impossible to search for.
-        </promptString>
-        <returnStruc>
-          {
-            "site_is_irrelevant_to_query": "True or False",
-            "explanation_for_irrelevance": "Explanation for why the query cannot be searched across sites"
-          }
-        </returnStruc>
-      </Prompt>
-
       <Prompt ref="RankingPrompt">
         <promptString>
           Assign a score between 0 and 100 to the following item from {item.source_site}
@@ -940,6 +819,12 @@
         </returnStruc>
       </Prompt>
 
+      <!-- DEFERRED（非 superseded）：此 prompt 目前不可達——消費 method
+           apply_diversity_reranking（methods/generate_answer.py）唯一 call site 被註解
+           （"OLD DIVERSITY CODE - COMMENTED OUT FOR A/B TESTING"）。依
+           decisions-archive.md「Deep Research MMR 整合」條為 deferred，未來
+           有足夠 indexed data 後 A/B 測試可能恢復，故保留不物理刪。
+           恢復方式：uncomment methods/generate_answer.py 的 apply_diversity_reranking call site。 -->
       <Prompt ref="DiversityReranking">
         <promptString>
           你是搜尋結果多元性最佳化助手。在維持相關性前提下，重新排序以提升多元性。

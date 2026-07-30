@@ -54,7 +54,7 @@ class RequiredInfo(PromptRunner):
                 self.handler.user_question = ""
                 await self.handler.state.precheck_step_done(self.STEP_NAME)
                 return
-            self.handler.required_info_found = _required_info_raw == "True"
+            self.handler.required_info_found = str(_required_info_raw).lower() == "true"
 
             if not self.handler.required_info_found:
                 logger.info("Required information not found, will ask user for more details")

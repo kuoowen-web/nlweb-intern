@@ -457,3 +457,108 @@ def test_summarize_runs_with_answers():
     h.message_sender.send_message.assert_awaited_once()
     sent = h.message_sender.send_message.call_args[0][0]
     assert sent["message_type"] == "summary" and sent["content"] == "正常摘要"
+
+
+# --- 票 2026-07-28-e：QU LLM 判定路徑（_set_handler_attributes author 分支）零覆蓋補洞 ---
+# 鎖住的 handler.author_search 值 = baseHandler.py:581 author-filter gate 的唯一輸入。
+
+
+def _qu():
+    qu = object.__new__(QueryUnderstanding)   # bypass __init__（沿用本檔 _regex_author 慣例）
+    qu.handler = SimpleNamespace()
+    return qu
+
+
+def _llm_resp(author):
+    """QueryUnderstanding returnStruc 形狀的最小 LLM 回應（prompts.xml:461-481）。"""
+    return {
+        "rewritten_queries": [],
+        "display_instruction": None,
+        "author": author,
+        "time_range": {"detected": "false"},
+        "domain": {"detected": "false"},
+    }
+
+
+def test_qu_llm_author_false_no_author_search():
+    """LLM 判 subject（detected:false）→ author_search falsy → 下游不加 author filter。"""
+    qu = _qu()
+    qu._set_handler_attributes(_llm_resp({"detected": "false", "name": None}),
+                               regex_time=None, regex_author=None)
+    assert qu.handler.author_search == {"is_author_search": False}
+    assert "AUTHOR FILTER" not in qu.handler.query_analysis_hints
+
+
+def test_qu_llm_author_true_sets_author_search():
+    qu = _qu()
+    qu._set_handler_attributes(_llm_resp({"detected": "true", "name": "王家瑜"}),
+                               regex_time=None, regex_author=None)
+    assert qu.handler.author_search == {
+        "is_author_search": True, "author_name": "王家瑜", "pattern_matched": "llm"}
+
+
+def test_qu_llm_author_true_bool_type():
+    """detected 回 JSON bool（非字串）也判 true（str().lower() 語義鎖，bool-compare 家族前例）。"""
+    qu = _qu()
+    qu._set_handler_attributes(_llm_resp({"detected": True, "name": "王家瑜"}),
+                               regex_time=None, regex_author=None)
+    assert qu.handler.author_search["is_author_search"] is True
+
+
+def test_qu_llm_author_true_null_name_guard():
+    """detected:true 但 name null → 不進 author 鏈（query_understanding.py:335 guard）。"""
+    qu = _qu()
+    qu._set_handler_attributes(_llm_resp({"detected": "true", "name": None}),
+                               regex_time=None, regex_author=None)
+    assert qu.handler.author_search == {"is_author_search": False}
+
+
+def test_qu_regex_wins_over_llm_false():
+    """regex 命中時 LLM 判 false 不覆蓋（query_understanding.py:330-331 regex-wins 回歸鎖）。"""
+    qu = _qu()
+    regex_author = {"is_author_search": True, "author_name": "王家瑜",
+                    "pattern_matched": "title_name_possessive_zh"}
+    qu._set_handler_attributes(_llm_resp({"detected": "false", "name": None}),
+                               regex_time=None, regex_author=regex_author)
+    assert qu.handler.author_search is regex_author
+
+
+# --- 票 2026-07-28-e：prompts.xml QueryUnderstanding 結構鎖（brace / returnStruc 防線）---
+
+
+def _load_qu_prompt_parts():
+    """鎖 Site id="default" 的 Item 節點（AR R1 Codex：結構鎖不可靠 XML 順序）。"""
+    import os
+    from xml.etree import ElementTree as ET
+    from core.config import CONFIG
+    ns = "{http://nlweb.ai/base}"
+    path = os.path.join(CONFIG.config_directory, "prompts.xml")
+    root = ET.parse(path).getroot()
+    for site in root.findall(f"{ns}Site"):
+        if site.get("id") != "default":
+            continue
+        for child in site:
+            if child.tag != f"{ns}Item":
+                continue
+            for pe in child.findall(f"{ns}Prompt"):
+                if pe.get("ref") == "QueryUnderstanding":
+                    return (pe.find(f"{ns}promptString").text,
+                            pe.find(f"{ns}returnStruc").text)
+    raise AssertionError("prompts.xml 找不到 Site=default/Item 的 QueryUnderstanding")
+
+
+def test_qu_prompt_variable_set_locked():
+    """promptString 變數集鎖死：fill_prompt 把任何 {...} 當變數、未知變數靜默替換空字串
+    （core/prompts.py:103-126, :210-232）——few-shot 例句帶大括號會被清空，此測試為結構防線。"""
+    from core.prompts import extract_variables_from_prompt
+    prompt_str, _ = _load_qu_prompt_parts()
+    assert extract_variables_from_prompt(prompt_str) == {
+        "system.current_date", "request.query", "system.query_analysis_hints"}
+
+
+def test_qu_return_struc_author_shape_locked():
+    """returnStruc author 鍵形狀不動（本票紅線：不新增 intent field）。"""
+    import json
+    _, struc_text = _load_qu_prompt_parts()
+    struc = json.loads(struc_text.strip())
+    assert set(struc["author"].keys()) == {"detected", "name"}

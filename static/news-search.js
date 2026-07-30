@@ -72,7 +72,7 @@ import {
     populateResultsFromAPI, showMemoryNotification, showTimeFilterRelaxedWarning,
     showLowRelevanceWarning, showLowKeywordMatchWarning,
     showSummaries, hideSummaries
-} from './js/features/search.js?v=20260717a';
+} from './js/features/search.js?v=20260728a';
 // v4.0 Commit 3 (2026-05-24) — chatHistory.
 // v4.0 Commit 17 (2026-05-25, Phase 8): 13 chat function bodies MIGRATED.
 //   - performFreeConversation (main entry — POST /ask streaming for free-chat with research context)
@@ -157,7 +157,7 @@ import {
     // LR #19 — session resume
     restoreLRCheckpointFromState,
     // B5 (2026-06-05) — session-switch stale restore guard
-    bumpLRSwitchToken,
+    bumpLRSwitchToken, getLRSwitchToken,
     // v3 LR dialog snapshot — feed loaded snapshot to restore for stage-toggle replay
     setLRLoadedSnapshot,
     // U3（plan: lr-ux-u1u2u3）— 退階段 confirm modal
@@ -2899,6 +2899,21 @@ window.__resetKGState = resetKGState;
                     if (researchTab) {
                         researchTab.click();
                     }
+                    // ── DR restore viewport bring-in（票 2026-07-28-d）──
+                    // loadSavedSession 開頭（pre-await 同步區）已 bumpLRSwitchToken() 作廢上一 session 的
+                    // stale restore。此處抓當下 token snapshot，deferred scroll fire 時比對：若期間又切了
+                    // session（token 已再 bump），本 scroll 屬 stale，直接 bail 不動視口（防捲到已切走的 DR）。
+                    const _drScrollToken = getLRSwitchToken();
+                    // 用 rAF 讓 researchTab.click() 觸發的 tab 顯示 / reflow 先 settle，再量位置捲動。
+                    requestAnimationFrame(() => {
+                        if (_drScrollToken !== getLRSwitchToken()) return;  // stale switch → 放棄
+                        const _rvNow = document.getElementById('researchView');
+                        if (_rvNow) {
+                            // 沿用姊妹函式 restoreSession 的 window-scroll + scrollIntoView 手法；目標容器
+                            // 刻意選 #researchView（貼「報告首屏」語意），非複製其 resultsSection 目標。
+                            _rvNow.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                    });
                 }
 
                 // Restore Knowledge Graph if available

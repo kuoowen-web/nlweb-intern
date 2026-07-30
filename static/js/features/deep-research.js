@@ -71,7 +71,7 @@ import {
     pushConversationHistory,
     setCurrentConversationId, getCurrentConversationId,
     setCurrentDeepResearchAbortController, getCurrentDeepResearchAbortController
-} from './search.js?v=20260717a';
+} from './search.js?v=20260728a';
 import {
     setResearchReport, getResearchReport,
     setArgumentGraph, getArgumentGraph,
@@ -86,7 +86,7 @@ import { getSelectedSitesParam, getIncludePrivateSources } from './source-filter
 import { markSessionDirty } from './session-manager.js';
 import { getCurrentMode } from './mode.js';
 import { getCurrentSessionId } from '../utils/analytics.js';
-import { getConversationHistory, isSafeUrl } from './search.js?v=20260717a';
+import { getConversationHistory, isSafeUrl } from './search.js?v=20260728a';
 import { classifyEnvelope } from './sse-dispatch.js';
 // FE-4（full-scan-2026-07 P1 批6）：citation href 等屬性 sink 需跳脫 `"`/`'`，
 // escapeHTML（textContent→innerHTML）不跳脫引號，屬性內須用 escapeHtmlAttr。

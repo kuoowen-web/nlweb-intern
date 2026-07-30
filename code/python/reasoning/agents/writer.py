@@ -84,7 +84,8 @@ class WriterAgent(BaseReasoningAgent):
         analyst_citations: List[int],
         mode: str,
         user_query: str,
-        plan = None  # Optional WriterPlanOutput from plan() method (Phase 3)
+        plan = None,  # Optional WriterPlanOutput from plan() method (Phase 3)
+        evidence_lookup: Optional[Dict[int, Dict[str, str]]] = None,
     ) -> WriterComposeOutput:
         """
         Compose final report, optionally using pre-generated plan.
@@ -96,6 +97,9 @@ class WriterAgent(BaseReasoningAgent):
             mode: Research mode (strict, discovery, monitor)
             user_query: Original user query
             plan: Optional WriterPlanOutput from plan() method (Phase 3)
+            evidence_lookup: 白名單 ID → 真實來源明細（title/site/url/snippet）。
+                Writer prompt 看到 [N] 的真實內容，防內文與引用脫鉤（票 2026-07-28-f）。
+                None 時 fallback 現狀（只看白名單範圍）。
 
         Returns:
             WriterComposeOutput with validated schema
@@ -108,7 +112,8 @@ class WriterAgent(BaseReasoningAgent):
             compose_prompt = self.prompt_builder.build_compose_prompt_with_plan(
                 analyst_draft=analyst_draft,
                 analyst_citations=analyst_citations,
-                plan=plan
+                plan=plan,
+                evidence_lookup=evidence_lookup,
             )
         else:
             # Standard mode (existing prompt)
@@ -118,7 +123,8 @@ class WriterAgent(BaseReasoningAgent):
                 analyst_citations=analyst_citations,
                 mode=mode,
                 user_query=user_query,
-                suggested_confidence=suggested_confidence
+                suggested_confidence=suggested_confidence,
+                evidence_lookup=evidence_lookup,
             )
 
         # Call LLM with validation

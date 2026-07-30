@@ -25,8 +25,11 @@ import re
 
 
 def test_news_search_version_consistent(page, base_url):
-    """頁面上所有 news-search.js 引用版本唯一（FE-1：無 module instance 分裂）。"""
-    page.goto(f"{base_url}/")
+    """頁面上所有 news-search.js 引用版本唯一（FE-1：無 module instance 分裂）。
+
+    landing cutover（2026-07-23）：產品頁在 /app（root 是 marketing landing，
+    無 news-search.js）——goto 目標 `/`→`/app`。"""
+    page.goto(f"{base_url}/app")
     page.wait_for_selector("body", timeout=15000)
 
     # 抓完整 DOM 裡所有 news-search.js?v= 指紋（含動態 import wire）
@@ -50,8 +53,10 @@ def test_deep_research_import_version_consistent_across_importers(page, base_url
     import，HTML 掃不到），而是 news-search.js 與 knowledge-graph.js 原始碼**內部**
     import deep-research.js 的 ?v=。修復前 news-search.js:309 用 715b、
     knowledge-graph.js:78 用 717a → 兩份 instance → query_id 分裂。驗兩者一致。
+
+    landing cutover（2026-07-23）：驗的是產品前端資產——goto `/`→`/app`。
     """
-    page.goto(f"{base_url}/")
+    page.goto(f"{base_url}/app")
     page.wait_for_selector("body", timeout=15000)
 
     # 抓 prod 上兩個 importer 的原始碼，比對它們 import deep-research.js 的版本

@@ -276,6 +276,10 @@ class TestRunStage1Wiring:
         mock_engine.initial_context_map = cm
         mock_engine.executed_searches = []
         mock_engine.evidence_pool = {}
+        # plan: lr-consistency-pause-teeth——real BABLoopEngine 恆有此 flag（False 預設）；
+        # _run_stage_1 新增 `if engine.paused_by_consistency:` 分流會讀它。MagicMock()
+        # 預設回 truthy Mock 會誤入 drift banner 分支，明設 False 對齊真機（非漂移路徑）。
+        mock_engine.paused_by_consistency = False
 
         state = LiveResearchStageState()
         with patch(
@@ -324,6 +328,10 @@ class TestRunStage1Wiring:
         mock_engine.initial_context_map = cm
         mock_engine.executed_searches = []
         mock_engine.evidence_pool = {}
+        # plan: lr-consistency-pause-teeth——real BABLoopEngine 恆有此 flag（False 預設）；
+        # _run_stage_1 新增 `if engine.paused_by_consistency:` 分流會讀它。MagicMock()
+        # 預設回 truthy Mock 會誤入 drift banner 分支，明設 False 對齊真機（非漂移路徑）。
+        mock_engine.paused_by_consistency = False
 
         state = LiveResearchStageState()
         with patch(
@@ -366,6 +374,10 @@ class TestRunStage1Wiring:
         mock_engine.initial_context_map = cm
         mock_engine.executed_searches = []
         mock_engine.evidence_pool = {}
+        # plan: lr-consistency-pause-teeth——real BABLoopEngine 恆有此 flag（False 預設）；
+        # _run_stage_1 新增 `if engine.paused_by_consistency:` 分流會讀它。MagicMock()
+        # 預設回 truthy Mock 會誤入 drift banner 分支，明設 False 對齊真機（非漂移路徑）。
+        mock_engine.paused_by_consistency = False
 
         state = LiveResearchStageState()
         with patch(
@@ -409,6 +421,10 @@ class TestRunStage1Wiring:
         mock_engine.initial_context_map = cm
         mock_engine.executed_searches = []
         mock_engine.evidence_pool = {}
+        # plan: lr-consistency-pause-teeth——real BABLoopEngine 恆有此 flag（False 預設）；
+        # _run_stage_1 新增 `if engine.paused_by_consistency:` 分流會讀它。MagicMock()
+        # 預設回 truthy Mock 會誤入 drift banner 分支，明設 False 對齊真機（非漂移路徑）。
+        mock_engine.paused_by_consistency = False
 
         state = LiveResearchStageState()
         with patch(

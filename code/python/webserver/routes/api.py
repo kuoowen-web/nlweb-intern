@@ -1398,6 +1398,33 @@ async def live_research_start_handler(request: web.Request) -> web.Response:
 
     wrapper.set_on_disconnect(_on_lr_disconnect)
 
+    # 票 2026-07-28-k：LR analytics 打點（對稱 DR pattern :840-857）。
+    # query_id 帶 uuid 後綴防同毫秒碰撞（AR R1）；parent row 同步寫成功後才把
+    # query_id 掛上 handler（AR R1：start 失敗不殘留 query_id → 下游
+    # hasattr(handler,'query_id') gate 全自然關閉，優雅降級回現況全盲，
+    # 不產生「子表帶孤兒 query_id → FK retry 噪音」）。
+    # conversation_id 此刻留空——lr_session_id 在 runQuery 內才生成，
+    # 由 handler 的 update_query_conversation_id 回填（後端權威 UUID）。
+    try:
+        from core.query_logger import get_query_logger
+        import uuid as uuid_mod
+        _lr_qid = f"query_{int(time_mod.time() * 1000)}_{uuid_mod.uuid4().hex[:8]}"
+        ql = get_query_logger()
+        if ql:
+            ql.log_query_start(
+                query_id=_lr_qid,
+                user_id=getattr(handler, 'user_id', '') or 'anonymous',
+                query_text=query,
+                site=str(getattr(handler, 'site', 'all')),
+                mode='live_research',
+                session_id=getattr(handler, 'session_id', '') or '',
+                org_id=getattr(handler, 'org_id', None) or None,
+            )
+            handler.query_id = _lr_qid
+            handler._lr_analytics_query_start_time = time_mod.time()
+    except Exception as e:
+        logger.warning(f"[LIVE RESEARCH] Failed to pre-register query_id (non-fatal): {e}")
+
     # 路 A（plan: lr-sse-connection-release-fix, 2026-06-22, CEO-Locked #3 重議）。見 continue handler 同段。
     _start_slot_release_deferred = False
 
@@ -1633,6 +1660,32 @@ async def live_research_continue_handler(request: web.Request) -> web.Response:
         _lr_mark_client_disconnected(handler)
 
     wrapper.set_on_disconnect(_on_lr_disconnect)
+
+    # 票 2026-07-28-k：LR analytics 打點（continue 每次 invocation 各一 row，見 start handler 同段；
+    # uuid 後綴防碰撞 + 成功才掛 handler 的理由同 start）。
+    # conversation_id 直接掛 body 的 lr_session_id（後端權威 UUID）——串聯同一場研究的
+    # initial + 所有 continue rows。紅線（lessons-live-research 雙 PG row）：不可用前端
+    # session_id（"sess_xxx"）冒充。
+    try:
+        from core.query_logger import get_query_logger
+        import uuid as uuid_mod
+        _lr_qid = f"query_{int(time_mod.time() * 1000)}_{uuid_mod.uuid4().hex[:8]}"
+        ql = get_query_logger()
+        if ql:
+            ql.log_query_start(
+                query_id=_lr_qid,
+                user_id=getattr(handler, 'user_id', '') or 'anonymous',
+                query_text=(user_message or ("[LR continue] auto" if auto_continue else "[LR continue]"))[:500],
+                site=str(getattr(handler, 'site', 'all')),
+                mode='live_research',
+                session_id=getattr(handler, 'session_id', '') or '',
+                conversation_id=body.get('lr_session_id', '') or '',
+                org_id=getattr(handler, 'org_id', None) or None,
+            )
+            handler.query_id = _lr_qid
+            handler._lr_analytics_query_start_time = time_mod.time()
+    except Exception as e:
+        logger.warning(f"[LIVE RESEARCH] Failed to pre-register continue query_id (non-fatal): {e}")
 
     # 路 A（plan: lr-sse-connection-release-fix, 2026-06-22, CEO-Locked #3 重議）：
     # slot release 綁背景 task 終態，不綁 HTTP 連線。detach 後 task 仍跑，slot 須跟 task。

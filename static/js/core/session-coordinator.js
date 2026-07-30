@@ -42,7 +42,7 @@ import {
     getConversationHistory,
     getAccumulatedArticles,
     getCurrentConversationId,
-} from '../features/search.js?v=20260717a';
+} from '../features/search.js?v=20260728a';
 import { getChatHistory } from '../features/chat.js?v=20260714a';
 import { getPinnedMessages, getPinnedNewsCards } from '../features/pins.js';
 import {

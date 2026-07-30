@@ -1,7 +1,7 @@
 # Session System Specification
 
 > **Owner**: NLWeb Team
-> **Last Updated**: 2026-07-10（見文末 changelog）
+> **Last Updated**: 2026-07-28（見文末 changelog）
 > **Status**: Active（B2B 已上線；2026-05-13 完成 Frontend Init Sync Refactor — `UserStateSync` 取代過去 9 個 case-by-case patch；2026-05-01 完成 cross-user 隔離 + 三層 _serverId hydration + dirty flag 為 defense-in-depth 殘留）
 > **Source of Truth**: 本檔。原散落於 `frontend-spec.md` / `login-spec.md` / `docs/in progress/plans/` 的 session 段落以本檔為準。
 
@@ -123,6 +123,7 @@ Trigger E（session click）與 Trigger F（page reload / tab visible）是 7 �
 - 點 shared session：直接 fetch `/api/sessions/{sharedId}` → hydrated 物件帶 `_isShared: true` + `_ownerUserId` → `loadSavedSession`（§11.4）
 - **invariant 檢查**：點 session 後若觸發 SSE stream，下一個 envelope 走 trigger G 比對 `data.user_id ≠ authManager._user.id` → mismatch 走 trigger F 整套 reset
 - **Y-1 guard 殘留**：shared session click 不 spawn 自己 row（§11.5），由 `_isShared` tag + `saveCurrentSession` early return 守住（defense-in-depth，**不取代** Init Sync 主流）
+- **DR restore viewport bring-in（2026-07-28，票 2026-07-28-d）**：`loadSavedSession` 的 DR restore 分支（`_rrRestore && _rrRestore.report`）render 報告進 `#researchView` + `researchTab.click()` 後，補 `requestAnimationFrame` + `researchView.scrollIntoView({behavior:'smooth', block:'start'})` 把視口帶到報告首屏——歷史上此分支從不 scroll（自引入起如此，非 regression），報告 top 停在視口下方兩屏外、體感「點開 DR 空」。scroll 過 LR switch-token stale guard（snapshot `getLRSwitchToken()`，rAF fire 時 token 已變 = 已切走 → bail），不對 stale session 生效。**呈現語意（AR 三席裁定 + CEO 拍板）**：DR session 的 `chat_history` replay 進 `#chatMessages` 是**本 session 合法資料還原**（`savedMode==='deep_research'` mode-setup 本就設 chatContainer active），顯示於報告上方、上捲可見＝預期 UX，**不得清除**（清除＝data loss；歷史上曾被誤框為「殘影」，見 `docs/archive/plans/` 對應 plan R1/R2 修訂紀錄）。回歸鎖：`tests/e2e/test_dr_restore_viewport.py`（seed DR session fixture，AC=reportInView + chatDataIntact）。
 
 #### 1.4.2 Trigger F — Page Reload / Tab Visible
 
@@ -1374,4 +1375,4 @@ if (session.interruptedSearch) {
 
 ---
 
-*最後更新：2026-07-10（spec drift reconcile — §1.2 cross-user 隔離指向 `core/state-sync.js` fullReset + `core/auth-manager.js`；§8.2 `USER_SCOPED_KEYS` 定位 `core/auth-manager.js`；§8.3 標 `_clearUserScopedStorageIfUserChanged` 已 Task 13 移除（不再「保留 backward-compat」）；§8.4 舊 `_handleAuthFailure` code block 標歷史 + 指向現況 `UserStateSync.fullReset()`；§8.5 UserStateSync 路徑 `news-search.js`→`core/state-sync.js`）。先前更新：2026-06-17（spec drift audit A3 — §4 SessionManager 重定向至 `static/js/features/session-manager.js`（ES module，v4.0 Commit 10/30 遷出）；§4.2 method 行號改 grep marker + ~行號；§4.3 改寫為 per-session debounce `_pendingSaves` Map（取代全局 timer，v4.0 Commit 30 regression fix）；新增 §4.3a session-switch token race 通用守則（commit `0218fbda`，LR-專屬 token 細節歸 LR spec）；§14.2/§14.4 同步檔案位置與 commits。先前更新 2026-05-15：D-2026-05-13 Frontend Init Sync Refactor — `UserStateSync` 7 trigger 架構納入主流。spec 整合自 frontend-spec / login-spec / 多個 plan 檔；以本檔為 single source of truth）*
+*最後更新：2026-07-28（§1.4.1 新增 DR restore viewport bring-in 行為 + chat 合法資料呈現語意裁定——票 2026-07-28-d scroll-only 修復 land `ca36edf8`，AR 三席裁定 chat replay 不得清除 + CEO 拍板現況 UX、回歸鎖 `test_dr_restore_viewport.py`）。先前更新：2026-07-10（spec drift reconcile — §1.2 cross-user 隔離指向 `core/state-sync.js` fullReset + `core/auth-manager.js`；§8.2 `USER_SCOPED_KEYS` 定位 `core/auth-manager.js`；§8.3 標 `_clearUserScopedStorageIfUserChanged` 已 Task 13 移除（不再「保留 backward-compat」）；§8.4 舊 `_handleAuthFailure` code block 標歷史 + 指向現況 `UserStateSync.fullReset()`；§8.5 UserStateSync 路徑 `news-search.js`→`core/state-sync.js`）。先前更新：2026-06-17（spec drift audit A3 — §4 SessionManager 重定向至 `static/js/features/session-manager.js`（ES module，v4.0 Commit 10/30 遷出）；§4.2 method 行號改 grep marker + ~行號；§4.3 改寫為 per-session debounce `_pendingSaves` Map（取代全局 timer，v4.0 Commit 30 regression fix）；新增 §4.3a session-switch token race 通用守則（commit `0218fbda`，LR-專屬 token 細節歸 LR spec）；§14.2/§14.4 同步檔案位置與 commits。先前更新 2026-05-15：D-2026-05-13 Frontend Init Sync Refactor — `UserStateSync` 7 trigger 架構納入主流。spec 整合自 frontend-spec / login-spec / 多個 plan 檔；以本檔為 single source of truth）*

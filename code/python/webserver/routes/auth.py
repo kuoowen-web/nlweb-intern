@@ -615,7 +615,7 @@ async def activate_page_handler(request: web.Request) -> web.Response:
         return web.Response(
             text=_render_activation_info_page(
                 title='連結已失效',
-                message='此啟用連結已失效。如果您之前已設定過密碼，請從首頁登入；若忘記密碼，請聯絡管理員。',
+                message='此啟用連結已失效。如果您之前已設定過密碼，請點下方按鈕登入；若忘記密碼，請聯絡管理員。',
                 show_login_btn=True,
             ),
             content_type='text/html',
@@ -656,7 +656,7 @@ async def activate_page_handler(request: web.Request) -> web.Response:
         return web.Response(
             text=_render_activation_info_page(
                 title='帳號已啟用',
-                message='您的帳號已啟用，請從首頁登入。',
+                message='您的帳號已啟用，請點下方按鈕登入。',
                 show_login_btn=True,
             ),
             content_type='text/html',
@@ -824,7 +824,7 @@ async function go(){{
       successEl.innerHTML='<h2 style="margin-bottom:12px;color:#2D3436;">帳號已啟用!</h2>'
         +'<p style="color:#2D3436;">即將進入您的工作區...</p>';
       successEl.style.display='block';
-      window.location.replace('/');
+      window.location.replace('/app');
       return;
     }} else {{
       errEl.textContent=d.error||'啟用失敗';
@@ -1069,10 +1069,10 @@ async function handleReset() {{
     if (data.success) {{
       document.getElementById('resetForm').style.display = 'none';
       successEl.innerHTML = '<h2 style="margin-bottom:12px;color:#2D3436;">密碼已重設!</h2>'
-        + '<p style="color:#2D3436;">您的密碼已成功更新。即將跳轉至首頁...</p>'
-        + '<p style="margin-top:16px;"><a href="/" style="color:#2D3436;background:#FDCB6E;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">前往登入</a></p>';
+        + '<p style="color:#2D3436;">您的密碼已成功更新。即將進入您的工作區...</p>'
+        + '<p style="margin-top:16px;"><a href="/app" style="color:#2D3436;background:#FDCB6E;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">前往登入</a></p>';
       successEl.style.display = 'block';
-      setTimeout(() => {{ window.location.href = '/'; }}, 2000);
+      setTimeout(() => {{ window.location.href = '/app'; }}, 2000);
     }} else {{
       errEl.textContent = data.error || '重設失敗';
       errEl.style.display = 'block';
@@ -1299,7 +1299,7 @@ async function handleSetup() {{
       successEl.innerHTML = '<h2 style="margin-bottom:12px;color:#059669;">組織建立成功!</h2>'
         + '<p style="color:#2D3436;">即將進入您的工作區...</p>';
       successEl.style.display = 'block';
-      window.location.replace('/');
+      window.location.replace('/app');
       return;
     }} else {{
       errEl.textContent = data.error || '建立失敗';
@@ -1380,7 +1380,7 @@ def _render_activation_info_page(title: str, message: str, show_login_btn: bool 
     safe_message = _html_escape(message)
     login_btn = (
         '<p style="margin-top:20px;">'
-        '<a href="/" style="color:#2D3436;background:#FDCB6E;padding:10px 24px;'
+        '<a href="/app" style="color:#2D3436;background:#FDCB6E;padding:10px 24px;'
         'border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">'
         '前往登入</a></p>'
     ) if show_login_btn else ''

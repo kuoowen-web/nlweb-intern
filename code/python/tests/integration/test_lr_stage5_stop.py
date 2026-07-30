@@ -148,8 +148,13 @@ class TestStage5Disconnect:
         assert len(state.written_sections) <= 1
 
     @pytest.mark.asyncio
-    async def test_alive_event_false_skips_write(self):
-        """connection_alive_event.is_set()==False 進場 → return early，不寫、不 emit。"""
+    async def test_alive_event_false_uncapped_writes_one_section(self):
+        """離線但未達 cap → bounded burn：照常寫這一段到 per-section checkpoint 才停。
+
+        契約出處：lr-sse-reconnect-resume plan（2026-06-15 改語意，orchestrator.py
+        Stage 5 離線檢查段註解）——舊「斷線就 abort return」與「斷線不取消、跑到
+        checkpoint 才停」矛盾故移除。本測試原編舊契約（0 寫入），2026-07-25 對齊。
+        """
         lr_id = "int-disc-2"
         _seed_state(lr_id, n_sections=3)
         handler = _make_handler(lr_id)
@@ -160,9 +165,35 @@ class TestStage5Disconnect:
         state = LiveResearchStageState.from_dict(_DRY_RUN_STATE_STORE[lr_id])
         result = await orch._run_stage_5(state)
 
-        # 不寫
+        # 未達 cap → 寫這一段（bounded burn），checkpoint boundary 記一次離線推進
+        assert len(result.written_sections) == 1
+        assert result.last_completed_section_index == 0
+        assert result.offline_since is not None
+        assert result.offline_checkpoint_advances == 1
+        # 預設 offline_max_checkpoint_advances=1 → 這次推進即達上限標 capped
+        assert result.offline_capped is True
+
+    @pytest.mark.asyncio
+    async def test_alive_event_false_capped_stops_without_write(self):
+        """離線且已達 checkpoint cap → 不寫、標 capped、persist 停（防呆上限生效）。"""
+        lr_id = "int-disc-3"
+        _seed_state(lr_id, n_sections=3)
+        # seed 已達上限（預設 offline_max_checkpoint_advances=1）
+        seeded = LiveResearchStageState.from_dict(_DRY_RUN_STATE_STORE[lr_id])
+        seeded.offline_checkpoint_advances = 1
+        _DRY_RUN_STATE_STORE[lr_id] = seeded.to_dict()
+        handler = _make_handler(lr_id)
+
+        handler.connection_alive_event.is_set = MagicMock(return_value=False)
+
+        orch = LiveResearchOrchestrator(handler=handler, dry_run=True)
+        state = LiveResearchStageState.from_dict(_DRY_RUN_STATE_STORE[lr_id])
+        result = await orch._run_stage_5(state)
+
+        # 達 cap → 不寫
         assert len(result.written_sections) == 0
         assert result.last_completed_section_index == -1
+        assert result.offline_capped is True
         # 不 emit writer_status started / section_done
         emits = [
             c.args[0]

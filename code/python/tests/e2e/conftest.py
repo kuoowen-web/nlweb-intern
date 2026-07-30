@@ -176,8 +176,11 @@ def _perform_real_login(
     🔧 fix（登入 rate-limit，2026-07-22）：從舊版 logged_in_page fixture 原樣抽出，
     供 _login_storage_state（session 僅呼叫一次）與（未來若需要）其他呼叫點共用。
     邏輯本身不變，只是从「每個 test 都跑一次」改成「session 內只跑一次」。
+
+    🔧 fix（landing cutover，2026-07-23）：goto 目標 `/`→`/app`——root 已切給
+    marketing landing（無登入 modal / #btnSettings），產品頁與登入動線移至 /app。
     """
-    page.goto(f"{base_url}/")
+    page.goto(f"{base_url}/app")
     _wait_login_decidable(page, login_selectors)
 
     # 已登入（已登入視覺元素「可見」，不只存在——AR R2 殘留 1 採納）→ 直接返回
@@ -221,8 +224,9 @@ def _login_storage_state(
     立刻關閉這個臨時 context/page（不再需要），回傳 storage_state dict 供
     `logged_in_page` 在每個 test 的獨立 context 中注入複用。
 
-    storage_state 綁定 origin：本 fixture 與 `logged_in_page` 都用 `page.goto(f"{base_url}/")`
-    走訪同一個 `base_url` fixture 值，cookie domain 一致（此處 `browser.new_context()` 故意
+    storage_state 綁定 origin：本 fixture 與 `logged_in_page` 都用 `page.goto(f"{base_url}/app")`
+    （landing cutover 後產品頁在 /app；同 origin、cookie domain 一致）走訪同一個
+    `base_url` fixture 值（此處 `browser.new_context()` 故意
     不傳 `base_url` kwarg——避免與 `page.goto` 的完整 URL 重複定義同一資訊產生漂移風險）。
     """
     context = browser.new_context()
@@ -261,7 +265,8 @@ def logged_in_page(
     """
     context = new_context(storage_state=_login_storage_state)
     page = context.new_page()
-    page.goto(f"{base_url}/")
+    # landing cutover（2026-07-23）：產品頁在 /app（root 是 marketing landing）
+    page.goto(f"{base_url}/app")
     _wait_login_decidable(page, login_selectors)
 
     if not page.locator(login_selectors.success).first.is_visible():

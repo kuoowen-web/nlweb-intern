@@ -332,6 +332,15 @@ RECOLLECT_CANCELLED_NARRATION = (
 # user-facing 文案，禁開發術語（test_lr_user_facing_strings_have_no_dev_jargon 掃描：
 # 禁 BAB / grounding / evidence / LLM / Analyst / query / entity 等）。
 
+# 一致性監控偵測到研究方向漂移時，checkpoint 顯示的 drift banner 主體文案
+# （plan: lr-consistency-pause-teeth）。具體漂移描述由 orchestrator 拼在後面。
+DRIFT_PAUSE_BANNER = (
+    "我在蒐集資料時發現，研究的方向可能跟你一開始設定的重點有些偏離。"
+    "在繼續往下之前，想先跟你確認一下："
+    "要照目前的方向繼續，還是要調整回原本的重點？"
+)
+
+
 # #2 退回上一階段通用通知（不打 LLM；接既有 showLRCheckpoint render path）。
 # {stage_label} 由 orchestrator 帶入該 stage 的中文名稱（如「文筆設定」）。
 NAV_BACK_NOTICE = (

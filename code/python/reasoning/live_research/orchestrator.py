@@ -1091,8 +1091,40 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 return state
             state = await self._run_stage_2(state)
         elif next_stage == 3:
-            state = await self._handle_stage_2_response(state, user_message, auto_continue)
-            state = await self._run_stage_3(state)
+            # plan: lr-consistency-pause-teeth（AR R2 BLOCKER 1）——pending_reframe
+            # confirm round dispatch。Stage 2 drift adjust（下方 drift 分流的 adjust
+            # 分支）emit reframe proposal 時已設 pending_reframe_json + 清 stage2_drift_paused，
+            # 下一輪 user 確認 reframe 時 current_stage=2/next_stage==3。這裡必須先接
+            # pending_reframe（與 _handle_stage_1_response 的 Step 0 dispatch 同款），
+            # 否則會掉進下方 else 走 _handle_stage_2_response，把 user 的「OK」當 Stage 2
+            # feedback 記下、reframe 永不 apply（R2 BLOCKER 1 根因）。此檢查必須在
+            # stage2_drift_paused 檢查之前（adjust 已清 drift flag、狀態改由 pending 接管）。
+            # Python 語意：if 命中則同塊 elif/else 絕不執行——pending_reframe 分支自己
+            # 處理後續（回 checkpoint 就 persist+return；否則離開 if/elif/else block 依
+            # 後續既有程式碼處理，不執行同塊 else）。
+            if state.pending_reframe_json:
+                state = await self._handle_pending_reframe(
+                    state, user_message, target_stage=2
+                )
+                if state.stage_status == "checkpoint":
+                    await self._persist_checkpoint_boundary(state)
+                    return state
+            # plan: lr-consistency-pause-teeth（AR R1 blocker）——drift checkpoint 分流。
+            # stage2_drift_paused=True 代表本 Stage 2 checkpoint 是一致性漂移暫停，
+            # banner 問了 user「繼續還是調整」，回覆要分類意圖後分流（不能只當 feedback
+            # 記下來走 _handle_stage_2_response，那樣「調整方向」會被吞掉照原方向推進）。
+            elif state.stage2_drift_paused:
+                state = await self._handle_drift_checkpoint_response(
+                    state, user_message, auto_continue
+                )
+                # drift 分流內部決定是否推進 / 回補 / 轉 reframe。若仍在 checkpoint
+                # （adjust 轉 reframe pending，或解不出 reframe re-prompt），return 等下一輪。
+                if state.stage_status == "checkpoint":
+                    await self._persist_checkpoint_boundary(state)
+                    return state
+            else:
+                state = await self._handle_stage_2_response(state, user_message, auto_continue)
+                state = await self._run_stage_3(state)
         elif next_stage == 5:
             state = await self._handle_stage_4_response(state, user_message, auto_continue)
             if state.stage_status == "checkpoint":
@@ -1352,18 +1384,28 @@ class LiveResearchOrchestrator(OrchestratorBase):
         )
 
         # 產出提案
-        outline = self._context_map_to_outline(context_map)
-        proposal = f"## 研究結構提案\n\n{outline}\n\n這是我整理的研究結構，你覺得如何？需要調整嗎？"
-
-        # 初始 query 格式 spec 抽取（傳輸層）：把 user 初始 prompt 內嵌的
-        # 章節 / 字數 / 引用格式 / 特殊元素抽成結構化欄位、落進既有下游欄位，
-        # 並在此 checkpoint 跟 user 確認一次。抽不到 → 零變化（不問、不落庫）。
-        # dry_run 不打真 LLM（associator method 內 call_llm_validated 會真呼叫，
-        # 故 dry_run 下 skip 整段）。
-        if not self.dry_run:
-            proposal = await self._maybe_extract_initial_format(
-                query, state, proposal
+        # plan: lr-consistency-pause-teeth（掛載點 B，Stage 1）——BAB 若因研究方向漂移
+        # 暫停（engine.paused_by_consistency），proposal 換成 drift banner 明說方向可能
+        # 偏了、問要繼續還是調整，而非把半穩定 context_map 當正常「研究結構提案」端給
+        # user（context_map + evidence_pool 已在上方 :1330-1348 persist，資料完整性無虞）。
+        if engine.paused_by_consistency:
+            proposal = self._build_drift_pause_proposal(engine.consistency_review)
+            logger.info(
+                "[LIVE RESEARCH] Stage 1 paused by Consistency Monitor "
+                "(drift_level=%s); emitting drift banner checkpoint",
+                getattr(engine.consistency_review, "drift_level", "?"),
             )
+        else:
+            outline = self._context_map_to_outline(context_map)
+            proposal = f"## 研究結構提案\n\n{outline}\n\n這是我整理的研究結構，你覺得如何？需要調整嗎？"
+            # 初始 query 格式 spec 抽取（傳輸層）：把 user 初始 prompt 內嵌的
+            # 章節 / 字數 / 引用格式 / 特殊元素抽成結構化欄位、落進既有下游欄位，
+            # 並在此 checkpoint 跟 user 確認一次。抽不到 → 零變化（不問、不落庫）。
+            # dry_run 不打真 LLM。漂移暫停不做格式抽取（結構尚未穩定，抽取無意義）。
+            if not self.dry_run:
+                proposal = await self._maybe_extract_initial_format(
+                    query, state, proposal
+                )
 
         state.set_checkpoint(proposal)
 
@@ -1924,6 +1966,9 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 await self._emit_checkpoint(
                     stage=target_stage, proposal=state.checkpoint_prompt
                 )
+                # plan: lr-pending-reframe-persist — apply 被拒後已清 pending，
+                # boundary persist 落地（同型漏，ts=1·4 無 caller 兜底）。
+                await self._persist_checkpoint_boundary(state)
                 return state
 
             state.context_map_json = mutated_cm.model_dump_json()
@@ -1969,6 +2014,27 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 await self._persist_checkpoint_boundary(state)  # plan: durable boundary persist + offline-count
                 return state
 
+            if target_stage == 2:
+                # plan: lr-consistency-pause-teeth（AR R1 blocker）——Stage 2 drift adjust
+                # 確認 reframe：reframe 後全新 core topics 全未 completed → 回 Stage 2
+                # 重跑蒐集。suppress_consistency_pause=True 防 reframe 後立刻又漂移暫停
+                # soft-lock（作用域＝這一趟）。
+                chapter_names = [
+                    c.get("name", "") for c in reframe_op.new_chapters if c.get("name")
+                ]
+                await self._emit_narration(
+                    f"好，就用這 {len(chapter_names)} 章結構（{'、'.join(chapter_names)}）"
+                    f"重新蒐集資料。"
+                )
+                state.stage2_drift_paused = False
+                # AR R2 NIT：reframe apply 後是全新研究結構、所有 topic 未完成。
+                # ContextMapTopic.topic_id 用 UUID 預設，新 topic 大概率不撞舊
+                # completed_sections 的 ID，但為明確計清空——避免任何殘留舊 ID 讓
+                # _run_stage_2 的 `if topic.topic_id in completed_sections: continue`
+                # 誤跳過新結構的 topic。
+                state.completed_sections = []
+                return await self._run_stage_2(state, suppress_consistency_pause=True)
+
             # Stage 4 entry：reframe 套完，保持 Stage 4 等格式 reply
             # re-emit 原 Stage 4 checkpoint（user 繼續處理格式偏好）
             outline = self._context_map_to_outline(mutated_cm)
@@ -1988,6 +2054,9 @@ class LiveResearchOrchestrator(OrchestratorBase):
             await self._emit_checkpoint(
                 stage=4, proposal=state.checkpoint_prompt
             )
+            # plan: lr-pending-reframe-persist — confirm target_stage=4 套 reframe 後
+            # 清 pending + 換 context_map，boundary persist 落地（幽靈 pending 根解）。
+            await self._persist_checkpoint_boundary(state)
             return state
 
         # === Cancel path ===
@@ -1998,6 +2067,35 @@ class LiveResearchOrchestrator(OrchestratorBase):
             )
             state.pending_reframe_json = ""
             state.pending_reframe_proposal_markdown = ""
+
+            if target_stage == 2:
+                # plan: lr-consistency-pause-teeth（AR R2 BLOCKER 2）——Stage 2 drift adjust
+                # 走到 reframe proposal 後 user 選 cancel。**不 re-emit 原 drift banner**：
+                # adjust 分支已把 stage2_drift_paused 清成 False，若照既有 cancel path
+                # re-emit state.checkpoint_prompt（＝原 drift banner），下一輪 user 回覆會
+                # 走 next_stage==3 的 else 分支（drift flag 已 False、pending 已清）→
+                # _handle_stage_2_response，banner 承諾「繼續或調整」但分流已丟＝dead banner。
+                # 修法：drift 情境對 reframe 選 cancel 語意＝「不想這樣重組」＝「照原方向
+                # 繼續」→ 直接回補未完成 core topic（與 continue 分支 cancel→繼續映射一致），
+                # 閉環、不留 dead banner。suppress 防 reframe/回補反覆 soft-lock。
+                # AR R3 SHOULD-FIX 2：防禦性清 stage2_drift_paused。正常路徑 adjust 分支
+                # emit reframe 前已清此 flag，但萬一持久化 / 舊 state 讓 pending_reframe_json
+                # 與 stage2_drift_paused 同時為 True（pending 在 caller 三層分流贏、被 cancel
+                # 清掉），下方防呆 fallback 若帶著 stale drift flag return，下一輪同一
+                # checkpoint 回覆又會誤走 drift 分流。此處在 narration / 回補前顯式清成 False，
+                # 消滅這修復本要根除的 routing flag 殘留（低機率、但正是靶心）。
+                state.stage2_drift_paused = False
+                await self._emit_narration(
+                    "好的，保留目前的研究方向，繼續補齊還沒查完的資料。"
+                )
+                if self._has_incomplete_core_topics(state):
+                    return await self._run_stage_2(state, suppress_consistency_pause=True)
+                # plan: lr-pending-reframe-persist — 防呆 return（無未完成 topic）自身
+                # 補 persist（caller 有兜底、此為防禦；idempotent，不依賴 incoming stage_status）。
+                await self._persist_checkpoint_boundary(state)
+                return state   # 防呆：無未完成 topic → 讓 caller 走正常推進（drift flag 已清）
+
+            # 既有：其他 target_stage（1 / 4）維持 re-emit 原 stage checkpoint（不動）
             await self._emit_narration(
                 "好的，已取消整體重組，先保留目前結構。"
                 "你可以給更具體的小修建議（例如「合併第 1 章和第 3 章」），"
@@ -2007,6 +2105,9 @@ class LiveResearchOrchestrator(OrchestratorBase):
             await self._emit_checkpoint(
                 stage=target_stage, proposal=state.checkpoint_prompt
             )
+            # plan: lr-pending-reframe-persist — cancel target_stage 1/4 清 pending 後
+            # boundary persist 落地（否則下一輪 confirm 把已取消 reframe apply 進去）。
+            await self._persist_checkpoint_boundary(state)
             return state
 
         # === Per-chapter edit path（FIX-4 / Cayenne #4）====================
@@ -2094,8 +2195,19 @@ class LiveResearchOrchestrator(OrchestratorBase):
 
     # ──── Stage 2: Per-Section 資料策略 + 蒐集 ─────────────────
 
-    async def _run_stage_2(self, state: LiveResearchStageState) -> LiveResearchStageState:
-        """Stage 2: 對每個 section 執行 focused B->A->B' loop。"""
+    async def _run_stage_2(
+        self, state: LiveResearchStageState, *, suppress_consistency_pause: bool = False
+    ) -> LiveResearchStageState:
+        """Stage 2: 對每個 section 執行 focused B->A->B' loop。
+
+        suppress_consistency_pause: True 時本趟關閉一致性監控（回補未完成 topic 那一趟用，
+        防持續漂移每輪反覆暫停 soft-lock）。作用域＝這一次呼叫（函式參數、不寫 state、
+        不持久化），下次任何 forward 進 Stage 2 恢復預設 False。全域 feature flag
+        live_research_consistency_monitor 不受影響。（plan: lr-consistency-pause-teeth）
+
+        engine constructor 的 enable_consistency_monitor 接線於本函式建 BABLoopEngine 處
+        （suppress → False；否則沿全域 flag）。
+        """
         self._maybe_reset_offline_counters(state)  # online substantive advance → reset（plan 3d）
         state.advance_to_stage(2)
         await self._emit_stage_change(2)
@@ -2186,8 +2298,11 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 associator=self.associator,
                 handler=self.handler,
                 max_iterations=2,  # Per-section 迴圈較短
-                enable_consistency_monitor=self.features.get(
-                    "live_research_consistency_monitor", True
+                # suppress_consistency_pause=True（回補趟）→ 強制關閉一致性監控，防
+                # 持續漂移 soft-lock；否則沿全域 feature flag（plan: lr-consistency-pause-teeth）。
+                enable_consistency_monitor=(
+                    False if suppress_consistency_pause
+                    else self.features.get("live_research_consistency_monitor", True)
                 ),
                 dry_run=self.dry_run,
                 seed_evidence_pool=existing_pool,
@@ -2238,7 +2353,56 @@ class LiveResearchOrchestrator(OrchestratorBase):
             state.context_map_json = context_map.model_dump_json()
             state.evidence_pool_json = serialize_evidence_pool(existing_pool)
 
-            if engine.stopped_early:
+            # plan: lr-consistency-pause-teeth（選項乙）——offline 中斷（stopped_early）
+            # 與一致性漂移暫停（paused_by_consistency）共用同一套「不標 completed + persist
+            # + return」中斷生命週期。兩 flag 語意正交：stopped_early=純 offline、
+            # paused_by_consistency=純漂移，此處 or 只共用資料完整性行為；下游處置
+            # （offline 靜默 bounded-burn vs 漂移彈 drift banner 問 user）在 return 前按
+            # 各自 flag 分流（Task 3 加 drift banner emit）。不設 stopped_early=True（不走
+            # 選項甲）避免漂移借用 offline 的 _mark_offline_since wall-clock 副作用。
+            if engine.stopped_early or engine.paused_by_consistency:
+                if engine.paused_by_consistency:
+                    # plan: lr-consistency-pause-teeth（掛載點 B）——漂移暫停：不是離線，
+                    # 不記 offline_since（避免污染 offline wall-clock cap）。emit drift
+                    # banner checkpoint + set_checkpoint 停在 Stage 2 等 user 確認方向。
+                    # user 回覆由 continue_from_checkpoint next_stage==3 分支分流：
+                    # continue → 回補未完成 core topic（Task 7）；adjust → 走 reframe
+                    # 重設研究方向（Task 6，AR R1 blocker 消化）。stage2_drift_paused
+                    # flag 讓 continue 分支知道「這是 drift checkpoint、要先分類 user 意圖」，
+                    # 與正常 Stage 2 收斂 checkpoint 區分（後者不需 continue/adjust 分流）。
+                    logger.warning(
+                        f"[LIVE RESEARCH] Stage 2 topic '{topic.topic_id}' paused by "
+                        f"Consistency Monitor (drift_level="
+                        f"{getattr(engine.consistency_review, 'drift_level', '?')}); "
+                        f"persisting accumulated evidence WITHOUT marking completed, "
+                        f"emitting drift banner checkpoint"
+                    )
+                    await self._persist_progress(state)
+                    proposal = self._build_drift_pause_proposal(engine.consistency_review)
+                    state.set_checkpoint(proposal)
+                    # AR R1 blocker 消化：標記本 checkpoint 為 drift pause，讓
+                    # continue_from_checkpoint 走 continue/adjust 分流（Task 6）。
+                    state.stage2_drift_paused = True
+                    # AR R1 nit 消化：drift checkpoint 帶 evidence metadata，對齊正常
+                    # Stage 2 checkpoint（:2317 附近）——沿用 _build_topic_evidence_list
+                    # 逐 topic 建 evidence_list + evidence_total=len(existing_pool)。
+                    # user 在 drift banner 上一併看到「已蒐集到 N 筆」的實況。
+                    _drift_evidence: list = []
+                    if state.evidence_pool_json:
+                        _drift_pool = deserialize_evidence_pool(state.evidence_pool_json)
+                        for _t in context_map.topics:
+                            _drift_evidence.extend(
+                                self._build_topic_evidence_list(_t, _drift_pool)
+                            )
+                    await self._emit_checkpoint(
+                        stage=2, proposal=proposal,
+                        evidence_list=_drift_evidence,
+                        evidence_total=len(existing_pool),
+                    )
+                    await self._persist_checkpoint_boundary(state)
+                    return state
+
+                # 純 offline 中斷（既有 D-7 / SF-1 行為，不改）
                 logger.warning(
                     f"[LIVE RESEARCH] Stage 2 topic '{topic.topic_id}' interrupted "
                     f"mid-execution by offline cooperative stop; persisting "
@@ -2375,6 +2539,92 @@ class LiveResearchOrchestrator(OrchestratorBase):
             f"{len(core_topics)} core topics, {len(supporting_topics)} supporting topics, "
             f"{total_evidence} total evidence"
         )
+
+    def _has_incomplete_core_topics(self, state: LiveResearchStageState) -> bool:
+        """Stage 2 是否還有未完成的 core topic（漂移暫停 / 中途中斷留下的）。
+
+        core topic 不在 completed_sections = 未查完。
+
+        AR R1 SHOULD-FIX 2（no silent fail）：context_map_json 解析失敗**不放行 Stage 3**。
+        Stage 2 checkpoint 必有合法 context_map，解析失敗＝資料毀損，靜默回 False 會讓壞
+        context_map 放行進 Stage 3（放行不是保守）。改成 logger.exception 記錄 + 回 True，
+        讓流程走回補分支不推 Stage 3；回補的 _run_stage_2 會再讀 context_map，真毀損會在
+        那裡 fail-loud（不吞掉錯誤）。（plan: lr-consistency-pause-teeth）
+        """
+        from reasoning.schemas_live import ContextMap
+        try:
+            cm = ContextMap.model_validate_json(state.context_map_json)
+        except Exception:
+            logger.exception(
+                "[LIVE RESEARCH] _has_incomplete_core_topics: context_map_json "
+                "解析失敗（資料毀損）— 回 True 不放行 Stage 3，交回補路徑處理"
+            )
+            return True
+        core_ids = [t.topic_id for t in cm.topics if t.relevance == "core"]
+        return any(tid not in state.completed_sections for tid in core_ids)
+
+    async def _handle_drift_checkpoint_response(
+        self, state: LiveResearchStageState, user_message: str, auto_continue: bool
+    ) -> LiveResearchStageState:
+        """AR R1 blocker：Stage 2 drift banner checkpoint 的 user 回覆分流。
+
+        banner 問「要照目前方向繼續，還是要調整回原本的重點？」——分類 user 意圖：
+        - confirm / cancel（「繼續」「就這樣」「不要調整」）→ 清 drift flag、回補未完成
+          core topic（_run_stage_2 suppress，防 soft-lock）；補齊後 _run_stage_2 走正常
+          收斂設 checkpoint，下一輪才進 Stage 3。
+        - adjust（帶新方向訴求）→ 解 reframe op 走既有 reframe confirm round（target_stage=2）。
+          解不出 reframe op → 不 silent advance，re-emit drift checkpoint 請 user 更明確。
+        - auto_continue / 空訊息 → 視為 confirm（user 選「你決定就好」= 照現況繼續回補）。
+
+        （plan: lr-consistency-pause-teeth）
+        """
+        if auto_continue or not user_message.strip():
+            intent = "confirm"
+        else:
+            intent = await self._classify_confirmation_intent(user_message)
+
+        # === adjust：走 reframe 重設研究方向 ===
+        if intent == "adjust":
+            context_map = ContextMap.model_validate_json(state.context_map_json)
+            parsed = await self._parse_stage_1_intent(user_message, context_map)
+            reframe_ops = (
+                [op for op in parsed.operations if op.op_type == "reframe_structure"]
+                if parsed is not None else []
+            )
+            if reframe_ops:
+                logger.info(
+                    "[LIVE RESEARCH] Stage 2 drift adjust → reframe "
+                    f"({len(reframe_ops[0].new_chapters)} chapters)"
+                )
+                state.stage2_drift_paused = False  # 改由 pending_reframe_json 接管狀態
+                return await self._emit_reframe_proposal(
+                    state, reframe_ops[0], context_map,
+                    summary="使用者於漂移暫停要求調整研究方向",
+                    target_stage=2,
+                )
+            # 解不出明確 reframe 訴求 → 不 silent advance（no silent fail）
+            logger.info(
+                "[LIVE RESEARCH] Stage 2 drift adjust 但未解出 reframe op — re-prompt"
+            )
+            await self._emit_narration(
+                "了解你想調整方向。可以具體說明要調整成什麼重點嗎？"
+                "例如想聚焦哪些主題、或整體改成幾個章節。"
+            )
+            # 保留 stage2_drift_paused=True，re-emit drift checkpoint 等 user 再說
+            await self._emit_checkpoint(stage=2, proposal=state.checkpoint_prompt)
+            return state
+
+        # === confirm / cancel：照現況繼續、回補未完成 core topic ===
+        logger.info(
+            f"[LIVE RESEARCH] Stage 2 drift {intent} → continue, backfill incomplete topics"
+        )
+        state.stage2_drift_paused = False
+        if self._has_incomplete_core_topics(state):
+            return await self._run_stage_2(state, suppress_consistency_pause=True)
+        # 無未完成 topic（理論上 drift 必有，防呆）→ drift 分支內顯式推進 Stage 3
+        # 閉環，不依賴 fall-through（AR R3 SHOULD-FIX 1）。
+        state = await self._run_stage_3(state)
+        return state
 
     async def _handle_stage_2_response(self, state, user_message, auto_continue):
         """處理 Stage 2 checkpoint 的 user feedback。
@@ -3548,6 +3798,10 @@ class LiveResearchOrchestrator(OrchestratorBase):
                 f"已記下 {len(resolved_elements)} 個格式 element。確認其他格式偏好？"
             )
             await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
+            # plan: lr-special-element-persist — add_special_element 全命中 happy path
+            # 寫 special_elements + pending_format_confirmation 後補 persist
+            # （斷線/reload 遺失根解；confirm/clarify 分支已各自 persist，此為唯一漏的 terminal）。
+            await self._persist_checkpoint_boundary(state)
             return state
 
         if action in (
@@ -4090,6 +4344,10 @@ class LiveResearchOrchestrator(OrchestratorBase):
             )
             await self._emit_narration("目前結構讀取失敗，先繼續格式確認。")
             await self._emit_checkpoint(stage=4, proposal=state.checkpoint_prompt)
+            # plan: lr-special-element-persist — B-j caller 委派前寫入的格式偏好
+            # （citation_style/special_elements/word_count）在 parse-fail 路徑落盤
+            # （偏好與 reframe 成敗正交；對已自行 persist 的 caller 冪等無害）。
+            await self._persist_checkpoint_boundary(state)
             return state
 
         # Propagate format_content（含 special_elements / citation_style）
@@ -4402,7 +4660,9 @@ class LiveResearchOrchestrator(OrchestratorBase):
         - 首次進場（last_completed == -1）：跑 outline planner 一次（idempotent guard）。
         - Idempotent：若 last_completed == total-1 直接 emit final checkpoint，
           不重複寫 section。
-        - connection_alive=False → 直接 return，不寫、不 emit（保留 state for resume）。
+        - connection_alive=False → mark offline + cap 檢查：未達 cap 照常寫這一段
+          （bounded burn，到 per-section checkpoint 停存檔）；達 cap → 標 capped、
+          persist、停（lr-sse-reconnect-resume 2026-06-15 改語意，見下方離線檢查段）。
         - CancelledError 必須 re-raise（task wrap 才收得到 cancel 完成訊號）。
         - finally 清 `stage_5_writer_running` 確保不論何種退出都歸位。
 
@@ -7678,6 +7938,19 @@ class LiveResearchOrchestrator(OrchestratorBase):
             })
         return result
 
+    def _build_drift_pause_proposal(self, review) -> str:
+        """把 Consistency Monitor 的 drift banner + 具體漂移描述組成 checkpoint proposal。
+
+        review: ConsistencyReview（engine.consistency_review）。drift_description 可能為空
+        （LLM 沒填）→ 只出 banner 主體，不拼空描述（不對 user 顯示「（無描述）」這種噪音）。
+        """
+        from reasoning.live_research import lr_copy
+        banner = lr_copy.DRIFT_PAUSE_BANNER
+        desc = (getattr(review, "drift_description", "") or "").strip()
+        if desc:
+            return f"{banner}\n\n目前觀察到的偏移：{desc}"
+        return banner
+
     async def _emit_checkpoint(
         self,
         stage: int,
@@ -7815,13 +8088,19 @@ def _op_split_topic(cm, op, delta, warnings):
 
 
 def _op_add_topic(cm, op, delta, warnings):
-    """新增一個 topic。"""
+    """新增一個 topic。domain 繼承同一 context_map 裡既有 topic 的 domain
+    （同一研究 session 的 topic 同屬一個領域，對齊 _op_split_topic 的 domain=src.domain 慣例）；
+    跳過殘留的「(待補)」/空值，無可繼承時退到誠實的「未分類」（禁止佔位符外洩給 user）。"""
     if not op.new_topic_name:
         warnings.append("add_topic: new_topic_name 為空")
         return
+    inherited_domain = next(
+        (t.domain for t in cm.topics if t.domain and t.domain != "(待補)"),
+        "未分類",
+    )
     cm.topics.append(ContextMapTopic(
         name=op.new_topic_name,
-        domain="(待補)",
+        domain=inherited_domain,
         description=op.new_topic_description,
         relevance=op.new_topic_relevance,
         evidence_ids=op.new_topic_evidence_ids,

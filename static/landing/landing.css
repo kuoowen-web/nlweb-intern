@@ -1,0 +1,439 @@
+/* ============================================================
+   臺灣讀豹 Landing Page — v06 設計稿切版
+   視覺基準：docs 記錄之設計稿 v06（1920×7668，7 段切圖）
+   只放 landing 樣式；design token 來自 /static/css/tokens.css
+   ============================================================ */
+
+/* ── Landing 專用字體：jf-openhuninn 2.0（justfont 粉圓體）──────────────
+   設計稿 v06 PDF 全頁內嵌字型 = jf-openhuninn-2.0（圓潤手作黑體），與產品頁
+   tokens.css 的 Noto Sans TC（中性黑體）觀感全然不同 → landing 全局「不像」的主因。
+   授權：SIL Open Font License 1.1（可商用 + webfont 自架，僅禁單獨販售 / 改保留名）。
+   來源：github.com/justfont/open-huninn-font release v2.0（對齊設計稿 2.0 非最新 2.1）。
+   scope：只在 landing.css 定義並 override，**不動 tokens.css 全域** → /app 產品頁不受影響。 */
+@font-face {
+  font-family: 'jf-openhuninn';
+  font-style: normal;
+  font-weight: 400 700;                 /* 單一 weight 檔覆蓋 400–700 區間（landing 無專用粗體檔，靠合成/同檔） */
+  font-display: swap;                    /* 載入前先用 fallback 黑體，避免 FOIT 空白 */
+  src: url('/static/fonts/jf-openhuninn-2.0.woff2') format('woff2');
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  /* landing override：粉圓體優先，Noto Sans TC 為 swap 前 / 缺字 fallback（不改 tokens.css --font-family） */
+  font-family: 'jf-openhuninn', 'Noto Sans TC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft JhengHei', sans-serif;
+  color: var(--color-text);           /* #2D3436 */
+  background: #FBF5E6;                /* 米色底＝字面值。tokens.css --color-bg 是 #FFFFFF（非米色），禁引用 */
+  font-size: 16px;
+  line-height: 1.7;
+  overflow-x: hidden;
+}
+img { max-width: 100%; display: block; }
+a { color: inherit; text-decoration: none; }
+
+/* 內容欄：設計稿 1920 各 section 依紅字標註實際域寬（淘汰一刀切 1200 壓縮）
+   通用預設放寬到 1195（客群/報紙 feature 卡列域＝seg02「1195」標註）；
+   個別 section 於各自區塊再覆寫成自己的標註域寬（hero 1522 / 進度 1142 / 報紙裝飾 1600 / header 1720） */
+.container { width: 100%; max-width: 1195px; margin: 0 auto; padding: 0 24px; }
+
+/* section 底色圖層（各 section 詳細樣式見各 Phase）
+   Task 1.4 Step 2 取樣校正（source: scratchpad landing_v06_seg01/seg02/seg07 設計稿）：
+     - audience 底：實測 (255,234,167)=#FFEAA7（seg02 top-band 主色 266/971 樣本）
+       → 非 #FDCB6E ±2%，採實測值＝品牌 token var(--color-primary-light)
+     - contact 底：實測 (252,202,109)=#FCCA6D，落在 #FDCB6E ±2%（各通道差 ≤1）
+       → snap 回品牌 token var(--color-primary)
+     - 米色 #FBF5E6（seg01 hero 實測 (250,245,230)）非 token，字面值 */
+.hero      { background: #FBF5E6; }
+.audience  { background: var(--color-primary-light); position: relative; }  /* #FFEAA7 */
+.newspaper { background: #EDEDED; position: relative; overflow: hidden; }
+.team      { background: #D9D9D9; position: relative; }
+.contact   { background: var(--color-primary); position: relative; }        /* #FDCB6E（snap） */
+
+/* ── Header ───────────────────────────────────────────── */
+.site-header {
+  background: var(--color-text);          /* #2D3436 深色 bar */
+  position: sticky; top: 0; z-index: 100;
+}
+.header-inner {
+  width: 100%; max-width: 1720px; margin: 0 auto;   /* seg01 header 內距域 1720；width:100% 使 <1720 視窗收斂不溢出 */
+  padding: 29px clamp(16px, 2.5vw, 48px);           /* 內距隨視窗縮，避免 header 在 ~1396 溢出 */
+  display: flex; align-items: center; gap: clamp(16px, 2.1vw, 40px);
+}
+/* seg01 logo 203×68 → 以「高」為錨（68/1920≈3.542vw），寬 auto 保持原圖比；
+   1920 收斂到 68 高、<1920 等比縮，header 高不溢出。（PNG 原始比非精確 203:68，故錨高不錨寬） */
+.header-logo img { height: min(68px, 3.542vw); width: auto; }
+.header-nav { margin-left: auto; display: flex; gap: clamp(18px, 1.9vw, 36px); }
+.header-nav a {
+  color: #FFFFFF; font-size: 16px; letter-spacing: 0.35em; font-weight: 500;
+}
+.header-nav a:hover { color: var(--color-primary); }
+.header-login {
+  color: var(--color-primary); font-size: 15px; font-weight: 500;
+  border: 1px solid var(--color-primary); border-radius: 10px; padding: 6px 18px;
+}
+.header-login:hover { background: var(--color-primary); color: var(--color-text); }
+
+/* ── Hero ─────────────────────────────────────────────── */
+.hero { padding: 96px 0 0; }   /* 藍框域高 1920×786 校準：內容 grid 上留白加大 */
+/* Hero 內容域比通用 .container 寬：對齊設計稿 seg01 左「814 膠囊」+ 右「684 吉祥物」
+   域（814+684+gap ≈ 1522），使 H1「把 AI 給不了的信任，寫進每份報告」在 1920 一行不斷。
+   通用 1200 container 的 58/42 split 只給 copy 636px（< 膠囊單行需 774px）會斷成兩行。 */
+.hero .container { max-width: 1570px; }  /* 814+684+24 gap + 48 padding = 1570，讓 copy 欄實得 814 */
+.hero-grid {
+  display: grid; grid-template-columns: minmax(0, 814px) minmax(0, 684px);
+  align-items: center; gap: 24px; justify-content: center;
+}
+.hero-kicker { font-size: 22px; letter-spacing: 0.5em; text-align: center; width: 100%; max-width: 814px; }  /* seg01 kicker 域 814（在 814 grid track 內，<1920 隨 track 縮） */
+.hero-subtitle {
+  display: inline-block; margin-top: 10px;
+  background: linear-gradient(180deg, #FFEAA7, #FDCB6E);
+  color: #FFFFFF; text-shadow: 0 1px 2px rgba(45,52,54,.25);
+  font-size: 28px; font-weight: 500; letter-spacing: 0.45em;
+  padding: 12px 48px; border-radius: 999px;
+}
+.hero-title {
+  margin-top: 28px;
+  border: 3px solid var(--color-primary); border-radius: 999px;
+  background: #FFFFFF;
+  padding: 40px 36px;
+  font-size: 40px; font-weight: 700; letter-spacing: 0.02em;
+  display: flex; align-items: center; gap: 14px; justify-content: center;
+  box-shadow: 0 4px 0 rgba(253,203,110,.45);
+}
+.hero-dot {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 3px solid var(--color-primary); flex: none;
+}
+.hero-body { margin-top: 30px; font-size: 20px; letter-spacing: 0.18em; width: 100%; max-width: 814px; }  /* 對齊 seg01 814 copy 域（隨 track 縮） */
+.hero-cta {
+  display: inline-flex; align-items: center; gap: 12px; justify-content: center;
+  margin-top: 34px;
+  width: 292px; max-width: 100%; height: 66px;   /* seg01 CTA 292×66（max-width 使窄視窗不溢出） */
+  background: linear-gradient(180deg, #FFEAA7, #FDCB6E);
+  border: 2px solid var(--color-text); border-radius: 14px;
+  padding: 0 28px; font-size: 24px; font-weight: 700;
+  box-shadow: 4px 4px 0 var(--color-text);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+.hero-cta:hover { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--color-text); }
+.hero-cta-arrow {
+  background: var(--color-text); color: var(--color-primary);
+  width: 34px; height: 34px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+/* seg01 吉祥物 684×532 → 寬 min(684px, 35.625vw)（684/1920），高 auto 保持原比；1920 收斂 684×532 */
+.hero-figure img { width: min(684px, 35.625vw); height: auto; max-width: 100%; }
+
+/* ── Hero→Audience 鋸齒過渡 ──────────────────────────── */
+.zigzag {
+  margin-top: 102px;   /* 藍框域高 1920×786 校準：copy→鋸齒過渡留白加大 */
+  height: 56px;
+  background: var(--color-primary-light);   /* #FFEAA7 — seg01 鋸齒齒色實測 (255,234,167)，與客群區同色無縫 */
+  clip-path: polygon(
+    0% 100%, 0% 55%,
+    2.5% 0%, 5% 55%, 7.5% 0%, 10% 55%, 12.5% 0%, 15% 55%, 17.5% 0%, 20% 55%,
+    22.5% 0%, 25% 55%, 27.5% 0%, 30% 55%, 32.5% 0%, 35% 55%, 37.5% 0%, 40% 55%,
+    42.5% 0%, 45% 55%, 47.5% 0%, 50% 55%, 52.5% 0%, 55% 55%, 57.5% 0%, 60% 55%,
+    62.5% 0%, 65% 55%, 67.5% 0%, 70% 55%, 72.5% 0%, 75% 55%, 77.5% 0%, 80% 55%,
+    82.5% 0%, 85% 55%, 87.5% 0%, 90% 55%, 92.5% 0%, 95% 55%, 97.5% 0%, 100% 55%,
+    100% 100%
+  );
+}
+
+/* ── Audience（黃底 tab 區）───────────────────────────── */
+.audience { padding: 72px 0 0; }   /* 藍框域高 1920×909 校準：tab 面板上留白加大 */
+.audience-inner { max-width: 1195px; }   /* seg02 tab 面板域 1195 */
+.audience-tabs { display: flex; }
+.audience-tab {
+  flex: 1; cursor: pointer;
+  font-family: inherit; font-size: 22px; font-weight: 500; color: var(--color-text);
+  background: #FFEAA7; border: 1px solid var(--color-border);  /* #B2BEC3（tokens.css 實名 --color-border，無 --color-gray） */
+  border-bottom: none; border-radius: 10px 10px 0 0;
+  padding: 16px 12px 12px; line-height: 1.4;
+}
+.audience-tab small { display: block; font-size: 15px; font-weight: 400; }
+.audience-tab.is-active {
+  background: #FFFFFF; border: 2px solid var(--color-text); border-bottom: none;
+  font-weight: 700;
+}
+.audience-panel {
+  width: 100%; max-width: 1149px; margin: 0 auto;   /* seg02 內容卡 1149（在 1195 audience-inner 內，窄視窗隨 inner 縮不溢出） */
+  background: #FFFFFF; border: 2px solid #E17055; border-radius: 0 14px 14px 14px;
+  padding: 36px 48px; text-align: center;
+}
+/* ↑ 面板描邊 seg02 呈橘紅細框；取樣校正（Task 1.4 Step 2 同法），非品牌 5 色時以取樣值為準並註記 */
+.audience-hook { font-size: 28px; font-weight: 700; letter-spacing: 0.12em; }
+.audience-benefits { list-style: none; margin-top: 22px; display: grid; gap: 12px; justify-content: center; }
+.audience-benefits li { font-size: 20px; letter-spacing: 0.14em; display: flex; align-items: baseline; gap: 10px; justify-content: center; }
+.audience-benefits b { font-weight: 700; min-width: 5em; text-align: right; }
+.benefit-arrow { color: var(--color-primary); }
+.audience-more { text-align: center; font-size: 24px; font-weight: 900; letter-spacing: 0.3em; margin-top: 141px; }  /* seg02「1195×141」panel→更多 留白域 */
+.audience-down {
+  display: flex; width: 60px; height: 63px; margin: 40px auto 0;   /* seg02 down-arrow 域垂直節奏 */
+  background: #FFEAA7; border-radius: 50%; border: 2px solid #FFFFFF;
+  align-items: center; justify-content: center; font-size: 30px; font-weight: 900;
+}
+/* 客群區 → 報紙區大圓弧過渡 */
+.audience::after {
+  content: ''; display: block; height: 180px; margin-top: 40px;   /* 藍框 1920×909 校準：圓弧過渡域加高，下留白足 */
+  background: radial-gradient(ellipse 120% 100% at 50% 0%, #FDCB6E 60%, transparent 60.5%);
+}
+
+/* ── 爪印裝飾（客群區散佈；位置對照 seg01 底部三顆 33.6×33.6 中央偏右垂直錯落）─ */
+.paw { position: absolute; width: 34px; height: auto; pointer-events: none; }
+.paw-a1 { top: 40px;  left: 50%; }
+.paw-a2 { top: 100px; left: 48.5%; }
+.paw-a3 { top: 160px; left: 50.5%; }
+
+/* ── Sticky 早鳥貼紙 ─────────────────────────────────── */
+.sticky-cta {
+  position: fixed; top: 140px; right: 28px; z-index: 90;
+  width: 157px; min-height: 189px; padding: 14px 12px 14px;  /* seg01 貼紙 157×189（padding 收至上下 14，實高貼 189 域） */
+  background: linear-gradient(180deg, #FFEAA7, #FDCB6E);
+  border-radius: 16px 16px 40px 16px;
+  box-shadow: 3px 4px 0 var(--color-text);
+  text-align: center;
+  transition: opacity .25s ease, transform .25s ease;
+}
+.sticky-cta[hidden] { display: none; }
+.sticky-cta:hover { transform: translateY(-2px); }
+.sticky-cta-icon { width: 44px; margin: 0 auto 4px; }
+.sticky-cta-kicker { display: block; font-size: 12px; letter-spacing: 0.15em; }
+.sticky-cta-label { display: block; font-size: 26px; font-weight: 700; line-height: 1.25; letter-spacing: 0.2em; }
+
+/* ── Newspaper 底盤（正式 BG 圖鋪底，CEO 拍板 supersede HTML 假文）──────
+   設計商正式報紙背景整圖 newspaper-bg.jpg（1920×4070：報頭/全部假文/灰底標題/
+   豹頭水印/爪印全部烘進圖內）。以 <img.np-bg> width:100% 鋪滿 section 寬（1920 下
+   1:1 native）、pin top:0；section 高由卡列/進度板 overlay flow 撐出（≈藍框 3436），
+   .newspaper overflow:hidden 裁掉圖底多出的社論欄尾（4070−3436≈634 對齊「裁切」）。
+   ── 疊層 z-index：np-bg(0) < np-features/progress(2) < np-label(3) */
+.newspaper { padding: 80px 0 60px; }
+.np-bg {
+  position: absolute; top: 0; left: 0; z-index: 0;
+  width: 100%; height: auto; pointer-events: none; user-select: none;
+}
+.np-label { position: relative; margin: -8px auto 48px; z-index: 3; }  /* 金標籤浮於報頭下方；上移對齊圖內報頭與首欄之間 */
+
+/* ── Feature cards ───────────────────────────────────── */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.np-features { position: relative; z-index: 2; display: grid; gap: 120px; }  /* 鋪圖後卡片間距重新分配：拉開讓圖內灰底標題在卡間露出（對照 seg02-05） */
+.feature-card { width: min(653px, 100%); position: relative; padding-top: 60px; }
+.feature-card-right { justify-self: end; }
+.feature-bubble {
+  position: absolute; top: 0; left: -20px; z-index: 3;
+  width: 198px; height: 185px;      /* seg02/03 對話泡 198×185 */
+  background: #FFFFFF; border: 3px solid var(--color-primary); border-radius: 50%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font-size: 26px; font-weight: 700; letter-spacing: 0.1em; text-align: center;
+  box-shadow: 3px 4px 0 rgba(45,52,54,.25);
+}
+.feature-bubble::after {       /* 泡泡尾巴 */
+  content: ''; position: absolute; bottom: -14px; right: 18px;
+  width: 34px; height: 26px; background: #FFFFFF;
+  border-right: 3px solid var(--color-primary); border-bottom: 3px solid var(--color-primary);
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+.feature-bubble i { font-style: normal; display: block; }
+.feature-bubble small { font-size: 15px; font-weight: 400; }
+.feature-video {
+  margin-left: 80px; width: 573px; max-width: calc(100% - 80px); aspect-ratio: 573 / 373;
+  background: var(--color-text); border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; position: relative;
+}
+.feature-play {
+  width: 110px; height: 110px; border: 7px solid #FFFFFF; border-radius: 50%; position: relative;
+}
+.feature-play::after {
+  content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-38%, -50%);
+  border-style: solid; border-width: 26px 0 26px 42px;
+  border-color: transparent transparent transparent #FFFFFF;
+}
+.feature-desc {
+  margin-left: 80px; width: 573px; max-width: calc(100% - 80px);
+  background: #FFFFFF; border: 1px solid var(--color-text);
+  padding: 16px 22px; font-size: 19px; letter-spacing: 0.1em; line-height: 1.9;  /* seg 說明框 573×142：padding 收至 16 貼域高 */
+}
+
+/* ── Progress board ──────────────────────────────────── */
+.progress-board { position: relative; z-index: 2; margin: 56px auto 0; width: min(1142px, 92%); }  /* 藍框 1920×3436 校準：卡列→進度板留白收斂 */
+.progress-inner {
+  background: #FBF5E6;
+  border-right: 14px solid var(--color-primary);
+  box-shadow: 0 10px 0 rgba(253,203,110,.9), 6px 6px 18px rgba(45,52,54,.18);
+  padding: 114px 48px 48px; text-align: center;
+  /* ↑ padding-top 114 = 標籤原流內佔位高：標籤移出本層（clip-path 會裁掉
+     translateY(-50%) 上移的上半，批次 2 驗收修正）改掛 .progress-board 絕對定位，
+     此處補回等高 padding 使三欄幾何不變 */
+}
+/* 右緣鋸齒緞帶效果 */
+.progress-inner { clip-path: polygon(0 0, 100% 0, 99% 4%, 100% 8%, 99% 12%, 100% 16%, 99% 20%, 100% 24%, 99% 28%, 100% 32%, 99% 36%, 100% 40%, 99% 44%, 100% 48%, 99% 52%, 100% 56%, 99% 60%, 100% 64%, 99% 68%, 100% 72%, 99% 76%, 100% 80%, 99% 84%, 100% 88%, 99% 92%, 100% 96%, 99% 100%, 0 100%); }
+.progress-label {
+  /* 掛在 .progress-board（無 clip-path）上，完整浮於面板上緣中央——
+     不放 .progress-inner 內是因其 clip-path 會裁掉上移的上半部 */
+  position: absolute; top: 0; left: 50%; transform: translate(-50%, -50%);
+  margin: 0; z-index: 3;
+}
+.progress-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 297px)); gap: 40px; margin-top: 8px; justify-content: center; }  /* seg05 三欄各 297；minmax(0,297) 使 768~960 檔位可收縮不溢出，1920 收斂 297 1:1 */
+.progress-col { min-width: 0; }   /* 允許 track 收縮時本欄一起縮，避免固定內容撐爆 */
+.progress-col h4 { font-size: 26px; font-weight: 700; letter-spacing: 0.25em; margin-bottom: 18px; }
+.progress-chip {
+  width: 100%; max-width: 297px; min-width: 0; height: 232px; min-height: 232px; display: flex; align-items: center; justify-content: center;  /* seg05 卡 297×232；width:100%+max-width 使收縮時隨 track 縮、1920 達 297 */
+  background: #FFFFFF;
+  clip-path: polygon(0 0, 88% 0, 100% 50%, 88% 100%, 0 100%);  /* 右向箭頭形（收縮時形狀比例不變） */
+  padding: 24px 48px 24px 28px;
+  font-size: 20px; letter-spacing: 0.12em; line-height: 2; text-align: left;
+}
+
+/* 報紙區金爪印已烘進 newspaper-bg.jpg，不再用 .paw-n* HTML 疊層（避免雙重） */
+
+/* ── 報紙 → 團隊灰 波浪過渡 ──────────────────────────── */
+.newspaper::after {
+  content: ''; display: block; position: relative; z-index: 1;
+  height: 96px; margin: 40px -0 -60px;
+  background: #D9D9D9;
+  clip-path: path('M0,80 C240,20 480,110 720,60 C960,10 1200,100 1440,50 C1680,10 1800,60 1920,40 L1920,120 L0,120 Z');
+}
+/* clip-path: path() 以 1920 座標繪製；瀏覽器不支援 path() 時 fallback：
+   border-radius: 50% 50% 0 0 / 100% 100% 0 0 的兩層橢圓疊加，目視近似 seg05 波浪即可 */
+
+/* ── Team ────────────────────────────────────────────── */
+.team { padding: 40px 0 60px; }   /* 藍框 1920×1616 校準：下留白收斂 */
+.team-label { margin: 0 auto 40px; transform: translateY(-50%); }
+/* 團隊三卡域比通用 1195 container 寬：3×448 + 2×48 gap = 1440 內容，+48 padding = 1488 域寬
+   （seg05/06 卡 448 並排）；width:100% 使 <1488 視窗收斂，grid track minmax 隨之縮不溢出 */
+.team .container { max-width: 1488px; }
+.team-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 448px));
+  gap: 48px; justify-content: center;
+}
+.member-card {
+  width: 100%; max-width: 448px; margin: 0 auto;   /* seg05/06 團隊卡 448×629（在 grid track 內隨視窗縮，1920 達 448） */
+  background: #FFEAA7; border-radius: 220px 220px 14px 14px;
+  padding: 22px 16px 10px; text-align: center;  /* 卡域 629 校準：bio 底貼卡底（padding-bottom 收至 10，對齊 PDF bio y1≈卡 y1） */
+}
+.member-photo {
+  display: block; width: 224px; height: 224px; margin: 0 auto;  /* seg06 頭像圓佔卡寬約半（PDF 頭像直徑 ~224，非 240） */
+  background: #FFFFFF; border-radius: 50%;
+}
+.member-name { font-size: 30px; font-weight: 700; letter-spacing: 0.2em; margin-top: 16px; }
+.member-name small { display: block; font-size: 19px; font-weight: 500; letter-spacing: 0.3em; margin-top: 2px; }
+.member-bio {
+  width: 100%; max-width: 416px; margin: 14px auto 0; min-height: 270px;   /* seg06 bio 卡 416×270（隨卡縮不溢出） */
+  background: #FBF5E6; border: 2px solid #E17055; border-radius: 8px;
+  padding: 20px 22px; text-align: left; font-size: 18px; line-height: 1.9; letter-spacing: 0.08em;
+}
+.member-bio p + p { margin-top: 14px; }
+
+/* ── Contact / 表單 ──────────────────────────────────── */
+.contact { padding: 60px 0 40px; }   /* 藍框 1920×777 校準：頂留白 64 + 底留白 68（PDF 域內 y 分佈：域頂→title 64、footer→域底 68） */
+.contact-grid { display: grid; grid-template-columns: 1fr minmax(0, 655px); gap: 48px; align-items: center; }
+.contact-bubble {
+  display: inline-block; position: relative;
+  width: 195px; background: #FFFFFF; border-radius: 50%;
+  padding: 40px 26px; text-align: center;
+  font-size: 19px; font-weight: 500; letter-spacing: 0.15em; line-height: 1.8;
+  color: #D63031;
+  box-shadow: 3px 4px 0 rgba(45,52,54,.3);
+}
+.contact-bubble::after {
+  content: ''; position: absolute; bottom: -12px; right: 30px;
+  width: 30px; height: 24px; background: #FFFFFF;
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+.contact-logo { margin-top: 64px; }
+.contact-title { font-size: 30px; font-weight: 900; letter-spacing: 0.2em; margin-bottom: 20px; }
+.contact-form {
+  background: #FFFFFF; border-radius: 14px; padding: 26px 40px 16px;  /* seg07 表單框 655×490：框頂→首列 26、末列→框底 16（PDF row y 分佈校準） */
+  box-shadow: 4px 5px 0 rgba(45,52,54,.25);
+  display: grid; gap: 18px;  /* seg07 表單框 490 內：6 真元素 5 間距，gap 18 貼框高 */
+}
+.form-row { display: flex; align-items: center; gap: 14px; }
+.form-row-textarea { align-items: flex-start; }
+.form-label { flex: none; font-size: 20px; font-weight: 700; letter-spacing: 0.2em; }
+.form-row input, .form-row textarea {
+  flex: 1; font-family: inherit; font-size: 16px;
+  height: 41px;                      /* seg07 input row 域高 41 */
+  background: #FBF0DC; border: none; border-radius: 999px;
+  padding: 8px 20px; box-shadow: inset 0 2px 3px rgba(45,52,54,.12);
+}
+.form-row textarea { height: 121px; border-radius: 18px; resize: vertical; }  /* seg07 textarea 域 600×121 */
+.form-row input:focus, .form-row textarea:focus { outline: 2px solid var(--color-primary); }
+.hp-field { position: absolute !important; left: -9999px !important; width: 1px; height: 1px; opacity: 0; }
+.form-msg { min-height: 0; margin: -6px 0; font-size: 15px; }  /* seg07 表單框內無獨立訊息列：預設不佔高（負 margin 抵 grid gap），有狀態文字才撐開 */
+.form-msg.is-error { color: #dc2626; }
+.form-msg.is-ok { color: #059669; }
+.form-submit {
+  justify-self: center; cursor: pointer;
+  width: 145px; height: 73px;      /* seg07 送出 145×73 */
+  background: linear-gradient(180deg, #FFEAA7, #FDCB6E);
+  border: 2px solid var(--color-text); border-radius: 999px;
+  font-family: inherit; font-size: 24px; font-weight: 700; letter-spacing: 0.3em; text-indent: 0.3em;
+  box-shadow: 0 4px 0 var(--color-text);
+}
+.form-submit:hover { transform: translateY(2px); box-shadow: 0 2px 0 var(--color-text); }
+.form-submit:disabled { opacity: .5; cursor: wait; }
+.site-footer {
+  margin-top: 64px; text-align: center;   /* seg07 form 底→footer 71（PDF y 分佈） */
+  font-size: 16px; letter-spacing: 0.2em; color: var(--color-text);
+}
+
+/* ============================================================
+   RWD（frontend-spec §8.3 斷點）
+   ============================================================ */
+@media (max-width: 1200px) {
+  .hero-title { font-size: 32px; padding: 30px 24px; }
+  .hero-kicker { font-size: 18px; }
+  .team-grid { grid-template-columns: repeat(2, minmax(0, 448px)); }
+  .contact-grid { grid-template-columns: 1fr; }
+  .contact-left { display: flex; align-items: center; gap: 32px; }
+  .contact-logo { margin-top: 0; width: 320px; }
+}
+@media (max-width: 767px) {
+  /* Header：nav 橫向可捲（P-5 預設，不做 hamburger） */
+  .header-inner { flex-wrap: wrap; gap: 12px; padding: 14px 16px; }
+  .header-logo img { height: 40px; }
+  .header-nav { margin-left: 0; width: 100%; overflow-x: auto; gap: 20px; }
+  .header-nav a { font-size: 14px; letter-spacing: 0.15em; white-space: nowrap; }
+  /* Hero：單欄堆疊 */
+  .hero-grid { grid-template-columns: 1fr; text-align: center; }
+  .hero-title { font-size: 22px; padding: 20px 16px; }
+  .hero-dot { width: 12px; height: 12px; border-width: 2px; }
+  .hero-body { font-size: 17px; letter-spacing: 0.08em; }
+  .hero-figure { order: 2; max-width: 420px; margin: 0 auto; }
+  /* Audience */
+  .audience-tab { font-size: 16px; }
+  .audience-tab small { font-size: 12px; }
+  .audience-panel { padding: 24px 16px; }
+  .audience-hook { font-size: 20px; }
+  .audience-benefits li { font-size: 16px; flex-direction: column; align-items: center; gap: 2px; }
+  .audience-benefits b { min-width: 0; text-align: center; }
+  /* Newspaper：影片卡全寬直排；BG 圖以 background 蓋滿寬（mobile 圖比例拉伸無妨，裝飾層） */
+  .np-features { gap: 72px; }
+  .feature-card, .feature-card-right { justify-self: stretch; }
+  .feature-bubble { width: 120px; height: 112px; font-size: 18px; left: -6px; }
+  .feature-video, .feature-desc { margin-left: 0; width: 100%; max-width: 100%; }
+  .feature-video { margin-top: 64px; }
+  .feature-desc { font-size: 16px; }
+  /* Progress */
+  .progress-cols { grid-template-columns: 1fr; gap: 20px; }
+  .progress-chip { min-height: 0; clip-path: none; border-radius: 10px; }
+  /* Team */
+  .team-grid { grid-template-columns: minmax(0, 448px); }
+  .member-photo { width: 220px; height: 220px; }
+  .member-bio { min-height: 0; }
+  /* Contact */
+  .contact-left { flex-direction: column; }
+  .contact-form { padding: 24px 18px; }
+  .form-row { flex-direction: column; align-items: stretch; gap: 6px; }
+  .site-footer { font-size: 13px; letter-spacing: 0.08em; }
+  /* Sticky CTA：右下縮小圓鈕（P-5 預設） */
+  .sticky-cta { top: auto; bottom: 20px; right: 16px; width: 92px; padding: 8px 6px 10px; border-radius: 12px 12px 26px 12px; }
+  .sticky-cta-icon { width: 26px; }
+  .sticky-cta-kicker { font-size: 9px; }
+  .sticky-cta-label { font-size: 16px; }
+  /* 過渡形狀降幅 */
+  .zigzag { height: 32px; }
+  .audience::after { height: 70px; }
+  .newspaper::after { height: 60px; }
+}

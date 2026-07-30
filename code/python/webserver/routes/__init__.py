@@ -10,6 +10,7 @@ from .auth import setup_auth_routes
 from .sessions import setup_session_routes
 from .audit import setup_audit_routes
 from .help import setup_help_routes
+from .early_bird import setup_early_bird_routes
 from .user_init import setup_user_init_routes
 from .admin import setup_admin_routes
 
@@ -32,6 +33,7 @@ def setup_routes(app):
     setup_session_routes(app)
     setup_audit_routes(app)
     setup_help_routes(app)
+    setup_early_bird_routes(app)
     setup_user_init_routes(app)
     setup_admin_routes(app)
 

@@ -86,11 +86,44 @@ class WriterPromptBuilder:
 - 章節數量：3-5 章
 """
 
+    def _render_evidence_lookup_block(
+        self, evidence_lookup: Optional[Dict[int, Dict[str, str]]]
+    ) -> str:
+        """票 2026-07-28-f Fix 3：白名單 ID → 真實來源對照塊（DR compose 版）。
+
+        治斷點 3（假引用）：沒有此塊時 Writer 只看到「合法 ID 範圍 1~N」，
+        內文與 [N] 指向的來源可完全脫鉤（兩道 guard 都只驗 ID 存在）。
+        port LR 概念（agents/writer.py compose_section 的 evidence_lookup +
+        prompts/writer.py:889-931 渲染塊）；None → 回空字串（backward compat）。
+        """
+        if not evidence_lookup:
+            return ""
+        lines = [
+            "",
+            "### 白名單 ID ↔ 真實來源對照（引用前必讀）",
+            "",
+        ]
+        for cid in sorted(evidence_lookup):
+            e = evidence_lookup[cid]
+            lines.append(
+                f"- [{cid}] **{e.get('title') or '未知標題'}**（{e.get('site') or '未知來源'}）\n"
+                f"  - URL: {e.get('url') or '無 URL'}\n"
+                f"  - 摘要：{e.get('snippet') or ''}"
+            )
+        lines.append("")
+        lines.append(
+            "引用 [N] 時，該句內容**必須真的由該來源摘要支持**。"
+            "若某個 ID 的來源主題與你要寫的內容無關，**不要引用它**——"
+            "寧可不掛引用並在文中誠實說明資料不足，也不可把無關來源掛在論述上。"
+        )
+        return "\n".join(lines)
+
     def build_compose_prompt_with_plan(
         self,
         analyst_draft: str,
         analyst_citations: List[int],
-        plan: 'WriterPlanOutput'  # noqa: F821
+        plan: 'WriterPlanOutput',  # noqa: F821
+        evidence_lookup: Optional[Dict[int, Dict[str, str]]] = None,
     ) -> str:
         """
         Build compose prompt using pre-generated plan (Phase 3).
@@ -99,10 +132,13 @@ class WriterPromptBuilder:
             analyst_draft: Draft content from Analyst
             analyst_citations: Whitelist of citation IDs
             plan: WriterPlanOutput from plan() method
+            evidence_lookup: 白名單 ID → 真實來源明細（票 2026-07-28-f Fix 3）；
+                None 時 backward compat（不渲染對照塊）。
 
         Returns:
             Complete compose prompt string
         """
+        evidence_block = self._render_evidence_lookup_block(evidence_lookup)
         return f"""你是報告撰寫專家。
 
 請根據以下大綱撰寫完整報告（目標：{plan.estimated_length} 字）：
@@ -114,6 +150,7 @@ class WriterPromptBuilder:
 - Analyst 草稿：{analyst_draft}
 - 關鍵論點：{', '.join(plan.key_arguments)}
 - 可用引用（白名單）：共 {len(analyst_citations)} 個 ID，最大 ID = {max(analyst_citations) if analyst_citations else 0}
+{evidence_block}
 
 ### 要求
 1. 嚴格遵循大綱結構，每個章節充分展開
@@ -149,7 +186,8 @@ class WriterPromptBuilder:
         analyst_citations: List[int],
         mode: str,
         user_query: str,
-        suggested_confidence: str
+        suggested_confidence: str,
+        evidence_lookup: Optional[Dict[int, Dict[str, str]]] = None,
     ) -> str:
         """
         Build compose prompt from PDF System Prompt (pages 26-31).
@@ -161,12 +199,15 @@ class WriterPromptBuilder:
             mode: Research mode
             user_query: Original user query
             suggested_confidence: Suggested confidence level from status mapping
+            evidence_lookup: 白名單 ID → 真實來源明細（票 2026-07-28-f Fix 3）；
+                None 時 backward compat（不渲染對照塊）。
 
         Returns:
             Complete compose prompt string
         """
         # Format Critic feedback
         critic_feedback = self._format_critic_feedback(critic_review)
+        evidence_block = self._render_evidence_lookup_block(evidence_lookup)
 
         # Get template for mode
         template = self._get_template_for_mode(mode)
@@ -211,6 +252,7 @@ class WriterPromptBuilder:
 
 - 白名單共 {len(analyst_citations)} 個 ID，最大 ID = {max(analyst_citations) if analyst_citations else 0}
 - 引用範圍：1 ~ {max(analyst_citations) if analyst_citations else 0}（不可超過、不可發明）
+{evidence_block}
 
 ---
 

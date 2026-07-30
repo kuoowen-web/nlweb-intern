@@ -69,7 +69,7 @@
 //   saveCurrentSession invoked via window bridge (KEEP-in-place until commit 25 sweep).
 
 import { injectStateSyncBackref } from '../core/state-sync.js';
-import { setProcessingState, pushConversationHistory, setCurrentConversationId, escapeHTML } from './search.js?v=20260717a';
+import { setProcessingState, pushConversationHistory, setCurrentConversationId, escapeHTML } from './search.js?v=20260728a';
 import { getSelectedSitesParam } from './source-filters.js';
 import { markSessionDirty } from './session-manager.js';
 import { getCurrentSessionId } from '../utils/analytics.js';

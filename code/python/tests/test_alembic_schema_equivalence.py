@@ -194,6 +194,10 @@ ALLOWED_PATH_A_ONLY_TABLES: Set[str] = {
     "articles",
     "chunks",
     "user_document_chunks",
+    # early_bird_signups: landing 早鳥表單落地表（migration 9ebc45a96911）。
+    # 依 auth_db._get_postgres_schema() 檔頭「DO NOT add new tables」指令，
+    # 新表一律 alembic-only、不進 legacy schema dict → path A-only by design。
+    "early_bird_signups",
 }
 
 # Allow-list：alembic (A) 比 legacy (B) 更嚴格的 column overrides。

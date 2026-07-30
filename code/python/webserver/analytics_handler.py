@@ -350,6 +350,66 @@ class AnalyticsHandler:
             logger.error(traceback.format_exc())
             return web.json_response({"error": str(e)}, status=500)
 
+    # 無 @admin_only：daily-patrol 雲端巡檢（無 DB 憑證、無 admin session）要能打；
+    # 只回聚合計數（無 query 內容 / 使用者資料），洩漏面極低（票 2026-07-28 #9 拍板）。
+    async def get_tier6_errors(self, request: web.Request) -> web.Response:
+        """
+        Aggregate tier_6_enrichment error observability for patrol alerting.
+
+        聚合 metadata.error_type 三分類（7a44c6a4）：timeout / http_<status> /
+        無 error_type（正常）。timeout 計入 timeouts 欄，不重複進 errors dict。
+
+        Query params:
+            days: Number of days to look back (default: 1, clamped to [1, 30])
+        """
+        try:
+            days = int(request.query.get('days', 1))
+            days = max(1, min(days, 30))
+            cutoff_timestamp = time.time() - (days * 24 * 60 * 60)
+
+            rows = await self.db.fetchall(
+                "SELECT source_type, metadata FROM tier_6_enrichment WHERE timestamp > ?",
+                (cutoff_timestamp,)
+            )
+
+            by_source = {}
+            for row in rows:
+                source = row.get('source_type') or 'unknown'
+                entry = by_source.setdefault(
+                    source, {"calls": 0, "timeouts": 0, "errors": {}}
+                )
+                entry["calls"] += 1
+
+                error_type = None
+                raw_metadata = row.get('metadata')
+                if raw_metadata:
+                    try:
+                        parsed = json.loads(raw_metadata)
+                        if isinstance(parsed, dict):
+                            error_type = parsed.get('error_type')
+                    except (ValueError, TypeError):
+                        pass  # parse 失敗當無 error_type，不炸
+
+                if error_type == 'timeout':
+                    entry["timeouts"] += 1
+                elif error_type:
+                    entry["errors"][error_type] = entry["errors"].get(error_type, 0) + 1
+
+            result = {
+                "days": days,
+                "total_calls": len(rows),
+                "by_source": by_source,
+                "has_errors": any(e["errors"] for e in by_source.values()),
+            }
+
+            response = web.json_response(result)
+            response.headers['Cache-Control'] = 'no-store'
+            return response
+
+        except Exception as e:
+            logger.error(f"Error getting tier6 errors: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
     async def handle_analytics_event(self, request: web.Request) -> web.Response:
         """
         Handle single analytics event from frontend.
@@ -521,6 +581,7 @@ def register_analytics_routes(app: web.Application, db_path: str = None):
     app.router.add_get('/api/analytics/queries', handler.get_queries)
     app.router.add_get('/api/analytics/top_clicks', handler.get_top_clicks)
     app.router.add_get('/api/analytics/export_training_data', handler.export_training_data)
+    app.router.add_get('/api/analytics/tier6_errors', handler.get_tier6_errors)
 
     app.router.add_post('/api/analytics/event', handler.handle_analytics_event)
     app.router.add_post('/api/analytics/event/batch', handler.handle_analytics_batch)

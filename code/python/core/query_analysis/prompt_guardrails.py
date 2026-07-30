@@ -319,9 +319,9 @@ class PromptGuardrails(PromptRunner):
             if response and isinstance(response, dict):
                 verdict_str = response.get('verdict', 'safe')
                 reason = response.get('reason', '')
-                if verdict_str == 'malicious':
+                if str(verdict_str).lower() == 'malicious':
                     return InjectionVerdict.MALICIOUS, reason
-                elif verdict_str == 'suspicious':
+                elif str(verdict_str).lower() == 'suspicious':
                     return InjectionVerdict.SUSPICIOUS, reason
         except Exception as e:
             logger.warning(

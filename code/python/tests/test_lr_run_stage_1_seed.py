@@ -42,6 +42,9 @@ def test_run_stage_1_passes_seed_to_engine():
             self.evidence_pool = seed_pool
             self.state = None
             self._current_stage = ""
+            # plan: lr-consistency-pause-teeth——real BABLoopEngine 恆有此 flag（False 預設）；
+            # _run_stage_1 新增 `if engine.paused_by_consistency:` 分流會讀它。非漂移路徑 → False。
+            self.paused_by_consistency = False
         async def run_loop(self, **kw):
             cm = MagicMock(); cm.model_dump_json = MagicMock(return_value="{}"); cm.topics = []
             return cm
@@ -80,6 +83,9 @@ def test_run_stage_1_merges_seed_even_when_engine_pool_degrades():
             self.executed_searches = []
             self.evidence_pool = {}  # 模擬補搜全失敗 → pool 退化成空
             self.state = None; self._current_stage = ""
+            # plan: lr-consistency-pause-teeth——real BABLoopEngine 恆有此 flag（False 預設）；
+            # _run_stage_1 新增分流會讀它。非漂移路徑 → False。
+            self.paused_by_consistency = False
         async def run_loop(self, **kw):
             cm = MagicMock(); cm.model_dump_json = MagicMock(return_value="{}"); cm.topics = []
             return cm

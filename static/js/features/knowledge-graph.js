@@ -70,13 +70,13 @@
 
 // v4.0 Commit 21 (2026-05-25, Phase 8 part C) — direct cross-module imports per D-V6 relax.
 import { getResearchReport, getArgumentGraph, getChainAnalysis } from './research.js';
-import { getConversationHistory } from './search.js?v=20260717a';
+import { getConversationHistory } from './search.js?v=20260728a';
 import {
     getCurrentResearchQueryId,
     displayDeepResearchResults,
     showDRError
 } from './deep-research.js?v=20260717a';
-import { setCurrentConversationId } from './search.js?v=20260717a';
+import { setCurrentConversationId } from './search.js?v=20260728a';
 import { getSessionHistory, getCurrentLoadedSessionId } from './sessions-list.js';
 import { copyAndOpen } from './sharing.js';
 import { markSessionDirty } from './session-manager.js';

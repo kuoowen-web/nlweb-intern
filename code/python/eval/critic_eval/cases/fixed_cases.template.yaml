@@ -1,0 +1,29 @@
+# Q4 固定回歸組（fixed set）— 樣板，內容待填。
+#
+# ⚠️ 規範：這組**必須用真實輸入**——從實際跑過的 DR/LR session 撈真的 Analyst
+#    草稿 + 對應來源，不得自己編故事（老闆定調：不要造假資料）。
+#    校準用的構造案例放 gold_cases.yaml，不要混進來。
+#
+# 用途：當回歸基準。critic 對這組固定草稿重跑 → 三評審找碴 → 出分數存基準；
+#      日後 critic 有改動就重跑比對，分數掉了即品質退步。
+#
+# 建議規模：先 20~40 案，涵蓋資料充足 / 稀薄 / 時間敏感等不同題型。
+# 這組**不需要** human_labels（那是 gold set 的事）；只需真實 (query, sources, draft)。
+# 欄位對應 code/python/eval/critic_eval/schema.py:EvalCase
+#
+# 撈法（下一步 runner 落地時實作）：
+#   從 search_sessions 撈 live_research_state / DR research state 裡的
+#   Analyst 草稿與 evidence_pool，去識別化後填入下方。
+
+cases:
+  - id: real_0001_PLACEHOLDER
+    query: "（撈自真實 session 的使用者問題）"
+    sources:
+      - id: 1
+        text: "（撈自真實 session 的來源內容 1）"
+      - id: 2
+        text: "（撈自真實 session 的來源內容 2）"
+    draft: "（撈自真實 session 的 Analyst 草稿全文，含 [id] 引用標記）"
+    # human_labels 留空：回歸組不需人工標
+    expected_critic_verdict: PASS   # 可留預設；回歸看的是跨版本分數變化，非單題對錯
+    notes: "PLACEHOLDER — 待撈真實資料替換，勿保留此樣板進正式回歸集。"

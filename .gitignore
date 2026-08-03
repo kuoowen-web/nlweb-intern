@@ -490,6 +490,7 @@ test_*.py
 !code/python/tests/contract/test_*.py
 !.claude/hooks/test_*.py
 !code/python/misc/logger/test_*.py
+!code/python/eval/critic_eval/test_*.py
 check_*.py
 analyze_*.py
 retry_*.py

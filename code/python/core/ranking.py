@@ -102,7 +102,30 @@ class Ranking:
      "description" : "項目簡短描述"}]
 
     RANKING_PROMPT_NAME = "RankingPrompt"
-     
+
+    def _author_framing_suffix(self):
+        """B5: 作者查詢時，把 per-item 描述導向「文章清單條目」而非獨立主題摘要。
+
+        現象：問「某記者的文章」時，預設 ranking prompt 產出的 description 會把單篇
+        報導的內容當成扣合提問的獨立摘要（讀起來像在介紹那篇報導的主題），而非
+        「這是記者X的一篇報導、在講什麼」。結果因 author filter 已限定為該作者，
+        故此處框架安全。回傳 '' 代表非作者查詢、行為完全不變。
+
+        注意：純文字後綴、不含 {} 佔位，不會被 fill_prompt 當變數處理。
+        """
+        author_search = getattr(self.handler, 'author_search', None)
+        if not (author_search and author_search.get('is_author_search')):
+            return ""
+        author_name = author_search.get('author_name', '')
+        if not author_name:
+            return ""
+        return (
+            f"\n\n補充框架：使用者是在查找記者「{author_name}」的文章。"
+            f"請把描述寫成「這篇報導在講什麼」的角度、像文章清單中的一則條目，"
+            f"讓多筆結果合起來像是「{author_name}」的文章清單；"
+            f"不需扣合使用者問題、也不要寫成與記者無關的獨立主題摘要。"
+        )
+
     def get_ranking_prompt(self):
         site = self.handler.site
         item_type = self.handler.item_type
@@ -111,10 +134,13 @@ class Ranking:
         prompt_str, ans_struc = find_prompt(site, item_type, self.RANKING_PROMPT_NAME)
         if prompt_str is None:
             logger.debug("Using default ranking prompt")
-            return self.RANKING_PROMPT[0], self.RANKING_PROMPT[1]
+            prompt_str, ans_struc = self.RANKING_PROMPT[0], self.RANKING_PROMPT[1]
         else:
             logger.debug(f"Using custom ranking prompt for site: {site}, item_type: {item_type}")
-            return prompt_str, ans_struc
+
+        # B5: 作者查詢時附加記者框架（非作者查詢 suffix 為空、零影響）
+        prompt_str = prompt_str + self._author_framing_suffix()
+        return prompt_str, ans_struc
         
     def __init__(self, handler, items, ranking_type=REGULAR_TRACK, level="low"):
         ll = len(items)

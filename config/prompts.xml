@@ -125,6 +125,7 @@
         - 擷取 2-3 項具體事實（機構名、數據、技術、專案）
         - 陳述報導涵蓋什麼，不解釋為何相關
         - 禁止出現「該文章探討了...」「與...有一定的相關性」「來源於可信的...」
+        - 數字與單位一律照報導原文，不換算、不把英文單位符號翻成中文（例：來源寫「MW」就保留「MW」，不可寫成「千百萬瓦」；GW、kWh、°C、% 等同理）
 
         正確範例：「Target 使用 AI 模擬未來訂單情況，協助供應鏈管理和門市人力配置。系統能預測需求並提前調整資源。」
         錯誤範例：「該文章探討了零售業如何利用 AI 技術改善供應鏈管理，與台灣零售科技業的發展有一定的相關性，且來源於可信的新聞網站。」
@@ -588,6 +589,7 @@
           - State WHAT the article covers, not WHY it's relevant or WHERE it comes from
           - Example GOOD: "Target使用AI模擬未來訂單情況，協助供應鏈管理和門市人力配置。系統能預測需求並提前調整資源。"
           - Example BAD: "該文章探討了零售業如何利用AI技術改善供應鏈管理，與台灣零售科技業的發展有一定的相關性，且來源於可信的新聞網站。"
+          - Keep numbers and units exactly as written in the source; do NOT convert, recompute, or translate unit symbols into Chinese words (e.g. keep "MW" as "MW"; never render it as "千百萬瓦"). The same applies to other units such as GW, kWh, °C, %.
 
           IMPORTANT: The description you generate must be in Traditional Chinese (繁體中文), unless the user explicitly requests English or another language.
 

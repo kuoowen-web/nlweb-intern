@@ -153,10 +153,17 @@ class GenerateAnswer(NLWebHandler):
 
             # Log the multi-signal breakdown
             final_score = ranking.get('final_score', ranking.get('score', 0))
+            # row7 主題同一性上限：四維度加權會把「只順帶提到查詢主題」的報導算成 56
+            # （semantic 40 判對了，卻被 freshness/authority 抬過 >51 閘門）。在此夾住。
+            from core.ranking import clamp_score_by_subject_match
+            final_score = clamp_score_by_subject_match(
+                final_score, ranking.get('subject_match'), name
+            )
             print(f"[RANKING] {name[:50]}: final={final_score}, semantic={ranking.get('semantic_score', 'N/A')}, keyword={ranking.get('keyword_score', 'N/A')}, freshness={ranking.get('freshness_score', 'N/A')}, authority={ranking.get('authority_score', 'N/A')}")
             logger.info(f"Ranked {name}: final={final_score}, semantic={ranking.get('semantic_score', 'N/A')}, keyword={ranking.get('keyword_score', 'N/A')}, freshness={ranking.get('freshness_score', 'N/A')}, authority={ranking.get('authority_score', 'N/A')}")
 
             # Store with final_score for threshold comparison
+            ranking['final_score'] = final_score  # 夾過的值要寫回，下游/analytics 才一致
             ranking['score'] = final_score  # Ensure 'score' key exists for backward compatibility
 
             ansr = {

@@ -8,7 +8,10 @@ LLM call patch core.llm.ask_llm（函式內局部 import，call-time lookup）�
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from reasoning.relevance_gate_core import judge_irrelevant_source_ids
+from reasoning.relevance_gate_core import (
+    _build_relevance_prompt,
+    judge_irrelevant_source_ids,
+)
 
 
 def make_logger():
@@ -102,3 +105,39 @@ class TestJudgeIrrelevantSourceIds:
             )
         assert result is None  # 🔧 R1：fail-open → None
         logger.warning.assert_called()
+
+
+class TestSubjectIdentityRule:
+    """機械防線：gate prompt 的「主題同一性」條（UX 回報 row7）。
+
+    病：問「再生能源」卻回「再生水／海水淡化」。舊版負面表列只涵蓋**具名人物**張冠李戴，
+    概念/主題類查詢無對應條款 → 落進「間接相關要保留」+「不確定就保留」兩條預設，
+    實測真模型 3/3 全保留該來源。本組鎖住新條存在、與人物條同級、且**排在
+    「不確定就保留」之前**（順序決定它讀起來是例外還是被預設吃掉）。
+
+    純字串斷言、不呼叫 LLM（$0）。mutation：刪掉該條 → 4 條全紅（已驗）。
+    """
+
+    def _prompt(self):
+        return _build_relevance_prompt("再生能源", "[1] moea - 某報導：內文")
+
+    def test_subject_identity_rule_present(self):
+        p = self._prompt()
+        assert "另一個主題" in p, "gate prompt 缺「主題同一性」條 —— 概念類查詢無守門"
+        assert "共用字詞不等於同一個主題" in p
+
+    def test_person_rule_not_clobbered(self):
+        """新條不得取代原本的人物條（兩條並存，各守一類查詢主體）。"""
+        p = self._prompt()
+        assert "另一個具名人物" in p
+        assert "同機構不等於相關" in p
+
+    def test_rule_precedes_uncertainty_fallback(self):
+        """新條必須排在「不確定就保留」之前，否則會被 fail-open 預設抵銷。"""
+        p = self._prompt()
+        assert p.index("另一個主題") < p.index("不確定就保留")
+
+    def test_fail_open_default_preserved(self):
+        """收嚴判準不得順手拆掉 fail-open —— 誤刪真證據的代價仍高於留噪音。"""
+        p = self._prompt()
+        assert "不確定就保留" in p

@@ -11,7 +11,7 @@ This module extends base reasoning schemas with optional fields for:
 All enhanced fields are optional to maintain backward compatibility.
 """
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Literal, Dict, Any
 from enum import Enum
 import uuid
@@ -180,29 +180,38 @@ class AnalystResearchOutputEnhanced(AnalystResearchOutput):
 
     @field_validator('draft')
     @classmethod
-    def validate_draft_with_gaps(cls, v, info):
+    def validate_draft_length(cls, v, info):
+        """
+        No-op 覆蓋：僅用於蓋掉父類 AnalystResearchOutput.validate_draft_length
+        的無條件 100 字元擋關（Pydantic v2 對同名 validator 方法採子類覆蓋，
+        非疊加）。真正的長度判斷邏輯見 validate_draft_with_gaps（model_validator,
+        mode="after")—— field_validator 的 info.data 在校驗 draft 這個欄位時
+        看不到宣告順序在其後的 gap_resolutions（票 2026-08-13-c AR R1 blocker
+        B1 實測證實），故長度判斷不能留在這一層。
+        """
+        return v
+
+    @model_validator(mode='after')
+    def validate_draft_with_gaps(self):
         """
         Validate draft length based on status and gap resolutions.
         Stage 5: Allow shorter drafts when gap_resolutions are present,
         as the response is delegating to web search or LLM knowledge.
-        """
-        status = info.data.get('status')
-        gap_resolutions = info.data.get('gap_resolutions', [])
 
-        # If there are gap resolutions (Stage 5), allow shorter drafts
-        if gap_resolutions and len(gap_resolutions) > 0:
-            # Minimum 30 characters when using gap resolutions
-            if status == 'DRAFT_READY' and len(v) < 30:
+        用 model_validator(mode="after") 而非 field_validator——此時 self.* 是
+        完整物件，沒有 Pydantic 欄位宣告順序限制，能正確讀到 gap_resolutions。
+        """
+        if self.gap_resolutions and len(self.gap_resolutions) > 0:
+            if self.status == 'DRAFT_READY' and len(self.draft) < 30:
                 raise ValueError(
                     "Draft must be at least 30 characters when using gap_resolutions"
                 )
         else:
-            # Original validation: 100 characters for DRAFT_READY
-            if status == 'DRAFT_READY' and len(v) < 100:
+            if self.status == 'DRAFT_READY' and len(self.draft) < 100:
                 raise ValueError(
                     "Draft must be at least 100 characters when status is DRAFT_READY"
                 )
-        return v
+        return self
 
 
 class CriticReviewOutputEnhanced(CriticReviewOutput):

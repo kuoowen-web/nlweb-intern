@@ -4,11 +4,17 @@ Critic Agent - Quality review and compliance checking for the Actor-Critic syste
 Includes Phase 2 CoV (Chain of Verification) for fact-checking verifiable claims.
 """
 
+import logging
 from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from reasoning.agents.base import BaseReasoningAgent
 from reasoning.schemas import CriticReviewOutput
 from reasoning.prompts.critic import CriticPromptBuilder
 from reasoning.prompts.cov import CoVPromptBuilder
+from reasoning.meta_narrative_guard import (
+    looks_like_meta_narrative,
+    matches_instructor_reask_signature,
+    sanitize_critic_field_text,
+)
 
 if TYPE_CHECKING:
     # Track F (sprint 2026-05-28) — forward-ref 避免 runtime import
@@ -17,6 +23,120 @@ if TYPE_CHECKING:
         CriticSectionReview,
         TimeRange,
     )
+
+
+# === 契約硬化（plan: cross-module-contract-hardening, Task 4）===
+def _reconcile_cov_counts(results, reported_verified, reported_contradicted, reported_unverified):
+    """CoV 統計對帳。
+
+    舊行為：升級決策（REJECT / WARN）只讀 LLM **自報**的 contradicted_count /
+    unverified_count（原 critic.py:216-217），而同一函式在 :203-209 已經逐筆
+    迭代 results 判斷 status —— 兩條推導並存於相鄰十行內、彼此無對帳。
+    LLM 自報數字錯（少報 contradicted）→ 該 REJECT 的直接放行。
+
+    新行為：以 results 逐筆推導為準（那是可查事實），自報值僅用於對帳；
+    不一致即 ERROR log（不可 silent）。verified 的推導也收在這裡
+    （票 2026-07-30-f）——rebuild 區段構造 CoVVerificationOutput 需要它，
+    不在 rebuild 處 inline sum() 是為了推導邏輯只寫一份。
+
+    Returns:
+        (verified_count, contradicted_count, unverified_count) —— 逐筆推導值。
+    """
+    derived_v = sum(1 for r in results if r.get("status") == "verified")
+    derived_c = sum(1 for r in results if r.get("status") == "contradicted")
+    derived_u = sum(1 for r in results if r.get("status") == "unverified")
+    if (derived_v != reported_verified or derived_c != reported_contradicted
+            or derived_u != reported_unverified):
+        logging.getLogger(__name__).error(
+            "[CONTRACT] CoV 自報統計與逐筆推導不一致："
+            "verified reported=%s derived=%s / contradicted reported=%s derived=%s / "
+            "unverified reported=%s derived=%s；"
+            "以推導值為準（自報為 LLM 產物，results 為可查事實）。",
+            reported_verified, derived_v, reported_contradicted, derived_c,
+            reported_unverified, derived_u,
+        )
+    return derived_v, derived_c, derived_u
+
+
+def _evaluate_cov(cov_verification: dict, current_status: str) -> tuple:
+    """CoV 分支的完整判定：逐筆推導 → 對帳 → 升級建議。
+
+    把原本內嵌在 `review()` 的邏輯抽出，讓【生產端與測試端共用同一個函式】。
+    若只抽函式而 review() 沒改呼叫，測試就會打到「原語的複製品」而非生產路徑。
+
+    ⚠️ 升級語義【逐字保留】生產碼原語義（原 critic.py:220-225）：
+      (a) 條件是 `unverified_count >= 3 and current_status == "PASS"`，
+          不是 `> 0` —— 寫成 > 0 會讓 1 個 unverified 就升 WARN（門檻從 3 降到 1）；
+      (b) escalated 為 None 時 caller 必須維持原 status，不可無條件覆蓋 ——
+          否則原本 REJECT 而只有 unverified 時會被【降級】成 WARN（守門員被放鬆）。
+
+    Args:
+        cov_verification: CoV 原始輸出。
+        current_status: 進來時的 review status（`result.status`）——
+            WARN 升級條件依賴它，不可省。
+
+    Returns:
+        (cov_issues, escalated_status | None, verified_count, contradicted_count,
+        unverified_count)
+        cov_issues 也要回傳 —— caller 的 rebuild 區段需要它來 extend
+        logical_gaps，只回傳判定結果會讓副作用消失。
+        escalated 為 None 代表【維持 current_status 不變】。
+    """
+    results = cov_verification.get("results", []) or []
+    cov_issues = []
+    for r in results:
+        status = r.get("status", "")
+        if status == "unverified":
+            cov_issues.append(f"[CoV 未驗證] {r.get('claim', '')}")
+        elif status == "contradicted":
+            cov_issues.append(f"[CoV 矛盾] {r.get('claim', '')}")
+
+    # 【無條件】對帳 —— 不受 cov_issues 是否為空影響。
+    # 【位置關鍵】LLM 少報最常見的形態是逐筆與總數一起錯，此時 cov_issues 為空，
+    # 若對帳寫在 `if cov_issues:` 之內就永遠不會被呼叫（正是本 Task 要治的主情境）。
+    verified_count, contradicted_count, unverified_count = _reconcile_cov_counts(
+        results,
+        cov_verification.get("verified_count", 0),
+        cov_verification.get("contradicted_count", 0),
+        cov_verification.get("unverified_count", 0),
+    )
+
+    escalated = None
+    if cov_issues:
+        if contradicted_count > 0:
+            escalated = "REJECT"
+        elif unverified_count >= 3 and current_status == "PASS":
+            escalated = "WARN"
+    return cov_issues, escalated, verified_count, contradicted_count, unverified_count
+
+
+def _critique_field_is_polluted(draft_is_dirty: bool, field_text: str) -> bool:
+    """判斷 critique/explanation 欄位本體是否為 instructor reask 污染。
+
+    兩層判準（AR R1 blocker BR1-1 修訂，票 2026-08-14）：
+
+    第一層（matches_instructor_reask_signature，不受 draft_is_dirty 影響，
+    永遠先跑）：命中 instructor reask 模板的高信度特徵句式，代表這個欄位
+    自己的 min_length validator 觸發了 reask——與 draft 是否污染是兩件
+    獨立的事，draft 髒不是放行這個欄位的理由。修的正是 BR1-1：原方向 A
+    只用 draft_is_dirty 做唯一判準，draft 髒＋critique 也獨立髒時完全
+    不檢查，直接放行。
+
+    第二層（只在第一層未命中、且 draft 本身乾淨時才跑）：若 draft 本身
+    已被判定是 meta-narrative 污染，critique/explanation 描述『draft 有
+    這個問題』是合法且必要的告警，不可用寬鬆判準覆蓋掉——那會讓 Critic
+    正確的告警消失，比不修更糟（見本票 plan 背景段的實測案例，S4）。
+    """
+    if matches_instructor_reask_signature(field_text):
+        return True
+    if draft_is_dirty:
+        return False
+    return looks_like_meta_narrative(field_text)
+
+
+def sanitize_critic_field(field_text: str) -> str:
+    """對外暴露的 sanitize 入口，供測試與 review() 呼叫。"""
+    return sanitize_critic_field_text(field_text)
 
 
 class CriticAgent(BaseReasoningAgent):
@@ -199,29 +319,24 @@ class CriticAgent(BaseReasoningAgent):
 
         # Phase 2 CoV: Attach verification results to output and auto-escalate
         if enable_cov and cov_verification:
-            # Add CoV issues to logical_gaps
-            cov_issues = []
-            for r in cov_verification.get("results", []):
-                status = r.get("status", "")
-                if status == "unverified":
-                    cov_issues.append(f"[CoV 未驗證] {r.get('claim', '')}")
-                elif status == "contradicted":
-                    cov_issues.append(f"[CoV 矛盾] {r.get('claim', '')}")
+            # 契約硬化 Task 4：逐筆推導 + 與 LLM 自報值對帳 + 升級判定
+            # 全部收在 _evaluate_cov（生產端與測試端共用同一個函式）。
+            # 對帳在該函式內【無條件】執行 —— 不受 cov_issues 是否為空影響。
+            cov_issues, escalated, verified_count, contradicted_count, unverified_count = (
+                _evaluate_cov(cov_verification, result.status))
 
             if cov_issues:
                 result_logical_gaps = list(result.logical_gaps) if result.logical_gaps else []
                 result_logical_gaps.extend(cov_issues)
 
-                # Auto-escalate based on CoV results
-                contradicted_count = cov_verification.get("contradicted_count", 0)
-                unverified_count = cov_verification.get("unverified_count", 0)
-
-                new_status = result.status
-                if contradicted_count > 0:
-                    new_status = "REJECT"
+                # escalated is None → 維持原 status（不可無條件覆蓋，
+                # 否則 REJECT 會被 WARN 降級）
+                new_status = escalated or result.status
+                # 升級告警【留在 caller 端】—— _evaluate_cov 是 module 級函式，
+                # 拿不到 self.logger；搬走或刪掉就是行為回歸。
+                if escalated == "REJECT":
                     self.logger.warning(f"CoV: Auto-escalating to REJECT due to {contradicted_count} contradicted claims")
-                elif unverified_count >= 3 and result.status == "PASS":
-                    new_status = "WARN"
+                elif escalated == "WARN":
                     self.logger.warning(f"CoV: Escalating to WARN due to {unverified_count} unverified claims")
 
                 # Rebuild result with CoV data
@@ -232,9 +347,11 @@ class CriticAgent(BaseReasoningAgent):
                         for r in cov_verification.get("results", [])
                     ],
                     summary=cov_verification.get("summary", ""),
-                    verified_count=cov_verification.get("verified_count", 0),
-                    unverified_count=cov_verification.get("unverified_count", 0),
-                    contradicted_count=cov_verification.get("contradicted_count", 0)
+                    # 票 2026-07-30-f：三 count 一律吃逐筆推導值（_evaluate_cov →
+                    # _reconcile_cov_counts），LLM 自報值僅用於對帳 ERROR log。
+                    verified_count=verified_count,
+                    unverified_count=unverified_count,
+                    contradicted_count=contradicted_count,
                 )
 
                 # B1 (C2+C6): preserve runtime type + all fields. If result is
@@ -282,6 +399,72 @@ class CriticAgent(BaseReasoningAgent):
             result.__dict__["verification_message"] = cov_verification.get(
                 "verification_message", "本報告未經完整事實驗證"
             )
+
+        # 缺陷 B（票 2026-08-13-c）：不信任 LLM 自評 status —— draft 本身疑似
+        # meta 自白時無條件覆蓋為 REJECT。prod 實證 LLM 可能給 PASS/WARN 即使
+        # cov_verification.summary 已正確描述「purely meta-instructions」，
+        # 因為 status 與 cov summary 是同一次生成的兩個獨立欄位，LLM 不保證
+        # 兩者邏輯一致。此 override 只升級不降級（已是 REJECT 的不受影響）。
+        if result.status != "REJECT" and looks_like_meta_narrative(draft):
+            self.logger.warning(
+                "[META-NARRATIVE-GUARD] Critic LLM 判定 %s 但 draft 疑似系統自白，"
+                "deterministic override 為 REJECT", result.status
+            )
+            result = result.model_copy(update={
+                "status": "REJECT",
+                "critique": result.critique + (
+                    "\n\n[自動覆蓋為 REJECT：draft 內容疑似系統內部處理訊息，"
+                    "非有效研究內容]"
+                ),
+            })
+            # should-fix 4：結構化標記，不只靠 critique 文字子字串比對。
+            # model_copy 後 __dict__ 上的動態屬性不會自動帶過去（Pydantic
+            # model_copy 只複製宣告欄位），故在 model_copy 之後才設。
+            result.__dict__["meta_narrative_override"] = True
+
+        # 缺口一（票 2026-08-14）：critique / structured_weaknesses[].explanation
+        # 本體是獨立的 instructor reask 觸發源（各自的 min_length 約束），
+        # 上面的既有防線只檢查 draft 本身，不檢查這兩個欄位——若 draft 乾淨
+        # 但這兩個欄位獨立被污染，上面那段 if 不會觸發（draft 判 False）。
+        # AR R1 blocker BR1-1：_critique_field_is_polluted 是兩層判準，
+        # 第一層不受 draft_is_dirty 影響，draft 髒時這兩個欄位仍會被檢查。
+        #
+        # 只在 draft 本身乾淨時才判這兩個欄位污染（_critique_field_is_polluted
+        # 的 draft_is_dirty 條件）：若 draft 已髒，critique 提到同一組 marker
+        # 極可能是 Critic 正確描述『這段是驗證錯誤殘留』，不該被覆蓋掉。
+        draft_already_flagged = looks_like_meta_narrative(draft)
+
+        critique_polluted = _critique_field_is_polluted(
+            draft_is_dirty=draft_already_flagged, field_text=result.critique
+        )
+
+        weaknesses = getattr(result, "structured_weaknesses", None) or []
+        polluted_weakness_indices = [
+            i for i, w in enumerate(weaknesses)
+            if _critique_field_is_polluted(
+                draft_is_dirty=draft_already_flagged, field_text=w.explanation
+            )
+        ]
+
+        if critique_polluted or polluted_weakness_indices:
+            self.logger.warning(
+                "[META-NARRATIVE-GUARD] critique/explanation 欄位本體疑似 "
+                "instructor reask 污染（critique=%s, weakness_indices=%s），"
+                "sanitize 並升級為 REJECT",
+                critique_polluted, polluted_weakness_indices,
+            )
+            update = {"status": "REJECT"}
+            if critique_polluted:
+                update["critique"] = sanitize_critic_field(result.critique)
+            if polluted_weakness_indices:
+                new_weaknesses = list(weaknesses)
+                for i in polluted_weakness_indices:
+                    new_weaknesses[i] = new_weaknesses[i].model_copy(
+                        update={"explanation": sanitize_critic_field(new_weaknesses[i].explanation)}
+                    )
+                update["structured_weaknesses"] = new_weaknesses
+            result = result.model_copy(update=update)
+            result.__dict__["critic_field_meta_override"] = True
 
         return result
 

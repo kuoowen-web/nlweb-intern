@@ -16,7 +16,7 @@ import functools
 from datetime import datetime
 import os  # Add this import
 from misc.logger.logging_config_helper import get_configured_logger
-from core.llm import ask_llm
+from core.llm import ask_llm, llm_failure_detail
 from core.config import CONFIG
 
 logger = get_configured_logger("prompts")
@@ -420,28 +420,13 @@ class PromptRunner:
         item_type = self.handler.item_type
         site = self.handler.site
         
-        # Hardcoded PrevQueryDecontextualizer prompt
-        if prompt_name == 'PrevQueryDecontextualizer':
-            prompt_str = """The user is querying the site {request.site} which has {site.itemType}s.
-        Rewrite the query, incorporating the context of the previous queries and answers.
-        Keep the decontextualized query short and do not reference the site. 
-
-        If the query very clearly does not reference earlier queries, 
-        don't change the query. Err on the side of incorporating the context of the 
-        previous queries. If you are not sure whether this is a brand new query, 
-        or follow up, it is likely a follow up. Try your best to incorporate the 
-        context from the previous queries.
-
-        The user's query is: {request.rawQuery}. 
-        Previous queries were: {request.previousQueries}."""
-            
-            ans_struc = {
-                "requires_decontextualization": "True or False",
-                "decontextualized_query": "The rewritten query, if decontextualization is required"
-            }
-            return prompt_str, ans_struc
-        
-        # For other decontextualization prompts, use 'default' site to find root-level prompts
+        # 票 2026-07-24-a：原本此處有 PrevQueryDecontextualizer 的硬編碼英文 prompt
+        # early-return，攔在 find_prompt 之前 → config/prompts.xml 的繁中版永不生效
+        # （改 XML = no-op，prompt 資產庫單一真相被破壞）。已刪除，改走下方常規路徑。
+        # 鎖線測試：tests/unit/core/test_prevquery_decon_prompt_source.py
+        #
+        # 下面這行是「路由」不是「硬編碼 prompt」——Decontextualizer 家族的節點掛在
+        # <Site id="default"> 下，具名 site 需改寫成 default 才查得到，保留。
         if 'Decontextualizer' in prompt_name:
             site = 'default'
         
@@ -456,7 +441,9 @@ class PromptRunner:
     def __init__(self, handler):
         self.handler = handler
 
-    async def run_prompt(self, prompt_name, level="low", verbose=False, timeout=8, max_length=512):
+    # 票 2026-08-06-g 件 2：per-item 變數的 pr_dict 通道；不傳＝{}＝行為不變。
+    # pr_dict 為 keyword-only——既有 caller 的位置傳參結構上打不到它。
+    async def run_prompt(self, prompt_name, level="low", verbose=False, timeout=8, max_length=512, *, pr_dict=None):
         prompt_runner_logger.info(f"Running prompt: {prompt_name} with level={level}, timeout={timeout}s, max_length={max_length}")
 
         try:
@@ -468,7 +455,7 @@ class PromptRunner:
                 return None
 
             prompt_runner_logger.debug(f"Filling prompt template with handler data")
-            prompt = fill_prompt(prompt_str, self.handler)
+            prompt = fill_prompt(prompt_str, self.handler, pr_dict if pr_dict is not None else {})
             if (verbose):
                 prompt_runner_logger.debug(f"Prompt: {prompt[:200]}...")
             prompt_runner_logger.debug(f"Filled prompt length: {len(prompt)} chars")
@@ -476,7 +463,11 @@ class PromptRunner:
             prompt_runner_logger.info(f"Calling LLM with level={level}, max_length={max_length}")
             response = await ask_llm(prompt, ans_struc, level=level, timeout=timeout, query_params=self.handler.query_params, max_length=max_length)
             
-            if response is None:
+            # 票 2026-08-04-e K-19/18/06：LLMError sentinel 恢復分型 log。
+            failure = llm_failure_detail(response)
+            if failure:
+                prompt_runner_logger.warning(f"LLM failed for prompt '{prompt_name}': {failure}")
+            elif response is None:
                 prompt_runner_logger.warning(f"LLM returned None for prompt '{prompt_name}'")
             else:
                 prompt_runner_logger.info(f"LLM response received for prompt '{prompt_name}'")

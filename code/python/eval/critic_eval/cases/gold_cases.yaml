@@ -1,0 +1,106 @@
+# Q3 人工標準答案組（gold set）— 用來「校準評審」，不是回歸基準。
+#
+# 這組是刻意構造的：每案的缺陷都由人工預先標好（human_labels），故意混入
+# 編造 / 假引用 / 邏輯跳步，並保留乾淨案例當負例。用途是拿已知答案去驗三個
+# 評審抓得準不準（抓到率 / 假警報率）。評審對齊人以後才有資格上場。
+#
+# 這不違反「不要造假輸入」——那條規範的是 Q4 固定回歸組（fixed_cases，要撈
+# 真實 session）。校準集本來就得人工構造，才知道正確答案。
+#
+# 欄位對應 code/python/eval/critic_eval/schema.py:EvalCase
+# defect type: fabrication | fake_citation | logic_jump | none
+
+cases:
+  - id: gold_clean_tsmc
+    query: "台積電 2024 年第一季財報表現如何？"
+    sources:
+      - id: 1
+        text: "台積電公布 2024 年第一季合併營收為新台幣 5,926 億元，季減 5.3%，年增 16.5%。"
+      - id: 2
+        text: "台積電 2024 年第一季稅後純益為新台幣 2,254 億元，每股盈餘 8.70 元。"
+      - id: 3
+        text: "台積電表示，第一季先進製程（7 奈米及以下）營收占晶圓銷售金額的 65%。"
+    draft: "台積電 2024 年第一季合併營收達新台幣 5,926 億元，年增 16.5%[1]。稅後純益為 2,254 億元，每股盈餘 8.70 元[2]。其中先進製程占晶圓銷售金額的 65%[3]。"
+    human_labels:
+      - type: none
+    expected_critic_verdict: PASS
+    notes: "乾淨正例：每句都有對應來源、引用正確。評審三位都應 found_issue=false（測假警報）。"
+
+  - id: gold_fabrication_margin
+    query: "台積電 2024 年第一季財報表現如何？"
+    sources:
+      - id: 1
+        text: "台積電公布 2024 年第一季合併營收為新台幣 5,926 億元，季減 5.3%，年增 16.5%。"
+      - id: 2
+        text: "台積電 2024 年第一季稅後純益為新台幣 2,254 億元，每股盈餘 8.70 元。"
+      - id: 3
+        text: "台積電表示，第一季先進製程（7 奈米及以下）營收占晶圓銷售金額的 65%。"
+    draft: "台積電 2024 年第一季合併營收達 5,926 億元，年增 16.5%[1]。此外，第一季毛利率高達 53.1%[1]，顯示獲利能力強勁。"
+    human_labels:
+      - type: fabrication
+        quote: "第一季毛利率高達 53.1%[1]"
+        reason: "任何來源皆未提及毛利率或 53.1% 這個數字，屬憑空捏造。"
+        source_hint: "無任一來源含此內容"
+    expected_critic_verdict: REJECT
+    notes: "編造正例：主要由 fabrication 評審抓到；grounding 評審也應抓（無根據）。logic 評審應 found_issue=false。"
+
+  - id: gold_fake_citation_eps
+    query: "台積電 2024 年第一季每股盈餘多少？"
+    sources:
+      - id: 1
+        text: "台積電公布 2024 年第一季合併營收為新台幣 5,926 億元，季減 5.3%，年增 16.5%。"
+      - id: 2
+        text: "台積電 2024 年第一季稅後純益為新台幣 2,254 億元，每股盈餘 8.70 元。"
+      - id: 3
+        text: "台積電表示，第一季先進製程（7 奈米及以下）營收占晶圓銷售金額的 65%。"
+    draft: "台積電 2024 年第一季每股盈餘為 8.70 元[3]，表現穩健。"
+    human_labels:
+      - type: fake_citation
+        quote: "每股盈餘為 8.70 元[3]"
+        reason: "引用[3]的內容是先進製程占比 65%，與每股盈餘無關；EPS 8.70 元實際出自來源[2]，屬張冠李戴。"
+        source_hint: "正確應引 [2]"
+    expected_critic_verdict: REJECT
+    notes: "假引用正例：數字本身對，但引用編號掛錯。主要由 fabrication 評審（引用查核）抓到。"
+
+  - id: gold_logic_jump_competitiveness
+    query: "如何評價台積電 2024 年第一季的競爭力？"
+    sources:
+      - id: 1
+        text: "台積電公布 2024 年第一季合併營收為新台幣 5,926 億元，季減 5.3%，年增 16.5%。"
+      - id: 2
+        text: "台積電 2024 年第一季稅後純益為新台幣 2,254 億元，每股盈餘 8.70 元。"
+    draft: "台積電 2024 年第一季合併營收季減 5.3%[1]，因此台積電已經失去市場競爭力。"
+    human_labels:
+      - type: logic_jump
+        quote: "因此台積電已經失去市場競爭力"
+        reason: "單季營收季減 5.3% 無法推得「失去市場競爭力」，中間缺乏環節；且同一來源[1]顯示年增 16.5%，屬選擇性引用後的過度推論。"
+        source_hint: "來源[1]僅提供營收增減數字，未評價競爭力"
+    expected_critic_verdict: REJECT
+    notes: "邏輯跳步正例：前提有根據、引用也對，問題在推論過頭。主要由 logic 評審抓到；grounding/fabrication 應 found_issue=false。"
+
+  - id: gold_subtle_overstate_high
+    query: "台積電 2024 年第一季獲利如何？"
+    sources:
+      - id: 1
+        text: "台積電公布 2024 年第一季合併營收為新台幣 5,926 億元，季減 5.3%，年增 16.5%。"
+      - id: 2
+        text: "台積電 2024 年第一季稅後純益為新台幣 2,254 億元，每股盈餘 8.70 元。"
+    draft: "台積電 2024 年第一季營收 5,926 億元[1]、稅後純益 2,254 億元[2]，創下歷史新高。"
+    human_labels:
+      - type: fabrication
+        quote: "創下歷史新高"
+        reason: "數字本身有根據，但「創下歷史新高」是來源未提供的附加評斷，屬輕微無根據誇大。"
+        source_hint: "來源未提及是否為歷史新高"
+    expected_critic_verdict: WARN
+    notes: "細微正例：大部分有根據、只有一個誇大修飾。測評審抓不抓得到細微問題、critic 是否降為 WARN（而非 REJECT）。"
+
+  - id: gold_clean_weather_thin
+    query: "這個週末北台灣天氣如何？"
+    sources:
+      - id: 1
+        text: "中央氣象署表示，本週末北台灣有短暫陣雨，氣溫約 22 至 27 度。"
+    draft: "根據中央氣象署，本週末北台灣有短暫陣雨，氣溫約在 22 至 27 度之間[1]。"
+    human_labels:
+      - type: none
+    expected_critic_verdict: PASS
+    notes: "乾淨但資料少的負例：草稿保守、沒超出來源。三位評審都應 found_issue=false（假警報控制）。"

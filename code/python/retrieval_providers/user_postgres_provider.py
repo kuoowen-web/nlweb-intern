@@ -241,6 +241,40 @@ class UserPostgresProvider:
 
         return results
 
+    async def user_has_any_chunk(
+        self,
+        user_id: str,
+        org_id: Optional[str] = None,
+    ) -> bool:
+        """這個 user（在該 org 範圍內）有沒有任何 chunk（票 2026-08-11-a A14 成本短路）。
+
+        **與 search_user_documents 的關鍵差別：不呼叫 get_embedding。**
+        後者在查 DB 之前先 `await get_embedding(query)`（本檔 :189），零文件使用者
+        的每個 internal seed 都白付一次 embedding；本函式只走 btree
+        idx_udc_user_id（migration d4a7e1b83c59 :49-52）。
+
+        **為什麼查 user_document_chunks 而不是 user_sources**（AR R2 BL-1）：
+          1. orphan chunk 是正常可達路徑 —— core/user_data_manager.py:372-375 先
+             DELETE FROM user_sources，chunk 清理在 webserver/routes/user_data.py:388-394
+             且**明文 best-effort**（except 只 warning）；chunk 表無 FOREIGN KEY
+             ⇒ DB 層零 cascade。此時 user_sources=0 但 chunk 還在、還撈得到。
+          2. 跨 store —— UserDataDB 優先讀 USER_DATA_DATABASE_URL 且可 fallback SQLite
+             （core/user_data_db.py:89-96），本 provider 只吃 PG 且從不讀那個變數
+             ⇒ 兩者可能是不同的資料庫，兩個方向的誤判都可能。
+        ⇒ 判準必須與**實際被檢索的那張表**同源，否則短路會靜默漏撈私文
+          （正是本 plan 批評 B4 時定義的失效形狀）。
+
+        **WHERE 共用 _build_user_docs_where**（本檔 :57）：org_id truthy → org_id = %s，
+        falsy → org_id IS NULL。自己拼 WHERE 會讓短路判準與檢索的 org 隔離語義漂移。
+        """
+        where_sql, params = _build_user_docs_where(user_id, org_id, None)
+        sql = f"SELECT 1 FROM user_document_chunks WHERE {where_sql} LIMIT 1"
+        pool = await self._get_pool()
+        async with pool.connection() as cur_conn:
+            async with cur_conn.cursor() as cur:
+                await cur.execute(sql, params)
+                return (await cur.fetchone()) is not None
+
     def _format_results(self, rows: List[Dict]) -> List[Dict[str, Any]]:
         """
         Format DB rows into the same dict structure previously returned by
@@ -270,10 +304,25 @@ class UserPostgresProvider:
                 # Score: pgvector <=> returns distance; we convert to similarity
                 'score': float(row.get('score', 0.0)),
 
-                # URL for compatibility with existing code
+                # URL：**chunk 級**識別字（票 2026-08-14-k，P0）。
+                # ⚠ 最後一段 chunk_index 是承重的，不是裝飾：doc_id 是每份文件
+                #   一顆 uuid4（core/user_data_manager.py:264-288 對整份文件呼叫
+                #   一次 create_document_record）⇒ 少了 chunk_index，一份文件的
+                #   N 個 chunk 產出逐字相同的 URL，而 LR 入池點
+                #   （reasoning/live_research/loop_engine.py:816-818）以 URL 為
+                #   去重鍵、命中即沿用既有 eid 且**不更新 snippet** ⇒ writer 永遠
+                #   只看得到第一次命中的那一個片段（prod 實測單一 doc_id 最多
+                #   53 個 chunk 全部同 URL）。
+                # ⚠ 用 row 的 chunk_index 而非 enumerate 的位置：後者是「本次
+                #   檢索結果內的序號」，跨檢索不穩定，會讓同一個 chunk 在不同輪
+                #   拿到不同 URL ⇒ 把「併太多」換成「灌太多」。
+                # ⚠ scheme 前綴 private:// 不可改 —— 下游所有 startswith 特判
+                #   （reasoning/orchestrator.py:3036、static/js/features/
+                #   deep-research.js:189、sanitize_private_url）都依賴它。
                 'url': (
                     f"private://{row.get('user_id')}/"
-                    f"{row.get('source_id')}/{row.get('doc_id')}"
+                    f"{row.get('source_id')}/{row.get('doc_id')}/"
+                    f"{row.get('chunk_index', 0)}"
                 ),
 
                 # Source type for analytics

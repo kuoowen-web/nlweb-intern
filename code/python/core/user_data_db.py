@@ -16,6 +16,7 @@ import asyncio
 from typing import Any, List, Dict, Optional, Tuple
 from pathlib import Path
 from misc.logger.logging_config_helper import get_configured_logger
+from core.db_connection_errors import pg_connect_error_message
 
 logger = get_configured_logger("user_data_db")
 
@@ -266,8 +267,7 @@ class UserDataDB:
 
             logger.info("User data database initialized (PostgreSQL async)")
         except Exception as e:
-            masked = self.database_url.split('@')[1] if '@' in self.database_url else self.database_url
-            logger.error(f"無法連線到 PostgreSQL ({masked})。是不是忘記開 Docker Desktop？")
+            logger.error(pg_connect_error_message(self.database_url))
             logger.error(f"Failed to initialize user data database: {e}", exc_info=True)
             raise
 

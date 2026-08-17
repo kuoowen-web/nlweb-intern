@@ -82,6 +82,32 @@ class GroundedClaim(BaseModel):
     )
 
 
+def _normalize_critic_status(raw, *, field: str) -> str:
+    """LR critic status 正規化——fail-closed（票 2026-08-04-e ④ Step 5b +
+    2026-07-31-d，CEO 2026-08-06 拍板）。
+
+    未知 / 缺值 / 非字串 → normalize_enum 回 None + ERROR log → 落 **"REJECT"**
+    （fail-closed）。理由：未知判定當 PASS＝被 Critic 否決的 claim 可能靜默進
+    報告，對「可信任性＝護城河」錯誤；誤殺最壞情況只是少用一條證據。
+    前置量測（2026-08-06 prod）：存量 3,072 筆 evidence_usage 100% 帶鍵、值全在
+    PASS/WARN → 切換碰不到舊資料；runtime 怪值零樣本，本函式的 ERROR log 是
+    唯一持續觀測面。
+
+    住所（2026-08-06 遷自 loop_engine.py，原因＝三個 render 消費端在本檔而
+    loop_engine top-level import 本檔，反向 import 成環）：本檔是
+    `Literal["PASS","WARN","REJECT"]` 字彙（GroundedClaim.critic_status）與全部
+    消費端的住所。**只改這一個函式，五個 callsite（loop_engine ×2 + 本檔
+    render 層 ×3；🔧R1 註：render 層三處於 Task 2 接線後才存在，同 branch 內
+    短暫只有 loop_engine ×2）自動同步**——接線由 test_normalize.py 兩條
+    _assert_wired 鎖。
+
+    注意：本函式【不傳】logger——使用 normalize 模組自己的 stdlib logger，
+    測試才能 monkeypatch 觀察（LazyLogger 抓不到）。
+    """
+    from core.contracts.normalize import normalize_enum
+    return normalize_enum(raw, ("PASS", "WARN", "REJECT"), field=field) or "REJECT"
+
+
 class BlockedSection(BaseModel):
     """body chapter 在 _write_section 入口被 deterministic gate 攔下時的 structured output。
 
@@ -722,6 +748,170 @@ class Stage4FormatPayload(BaseModel):
     )
 
 
+class Stage4OpType(str, Enum):
+    """Stage 4 單一訴求的操作類型 — 多訴求 operations 陣列的 discriminator。
+
+    Plan: lr-multi-intent-schema-plan。取代「單值 action 十選一」的表達力上限：
+    使用者說「改成五章 + 加表格 + 每章字數平均 + 不要掉這些事實」時，
+    舊 schema 必須四選一、其餘訴求無處可放（prod 樣本 A/B/C 實證）。
+
+    對應關係與執行順序見 plan「設計題 (a)」的矩陣；rank 表在
+    orchestrator.py 的 `_STAGE4_OP_RANK`（**不放這裡**：schema 不該知道執行順序）。
+    """
+    restructure = "restructure"                          # 重組章節（Replace All）
+    cancel_reframe = "cancel_reframe"                    # 撤銷既有 reframe 提案
+    set_chapter_word_balance = "set_chapter_word_balance"  # 各章字數平均/分配
+    set_total_word_count = "set_total_word_count"        # 全份總字數
+    set_citation_style = "set_citation_style"            # 引用格式
+    set_format_spec = "set_format_spec"                  # 其他格式偏好（free text）
+    add_special_element = "add_special_element"          # 表格/列表/圖表
+    preserve_facts = "preserve_facts"                    # 「不要掉了這些事實」
+    confirm = "confirm"                                  # 接受目前提案
+    auto_continue = "auto_continue"                      # 「你決定」
+    unclear = "unclear"                                  # 判不出
+
+
+class Stage4Operation(BaseModel):
+    """Stage 4 單一訴求 — 扁平 union（抄 ContextMapRevisionOperation pattern）。
+
+    **為什麼扁平而非 discriminated union**：LLM structured output 對「所有欄位攤平 +
+    全 optional + 有 default」的服從度遠高於 per-variant 巢狀結構（Stage 1 的
+    `ContextMapRevisionOperation` 8 個 op_type 共用一個扁平 model 已驗證可行）。
+    欄位合法性驗證留給 dispatch 階段（`_order_stage4_operations` + 各 op handler），
+    不在 schema 層 reject —— schema 層 reject 會讓整個 Stage4Response 掉進 unclear。
+    """
+    op_type: Stage4OpType = Field(..., description="這一條訴求的操作類型")
+
+    # --- restructure ---
+    new_chapters: List[ChapterSpec] = Field(
+        default_factory=list,
+        description="op_type=restructure 時的完整新章節清單（Replace All 語意）",
+    )
+    structure_summary: str = Field(
+        default="",
+        description="op_type=restructure 時，繁體中文一句話摘要使用者的結構訴求",
+    )
+
+    # --- set_chapter_word_balance ---
+    chapter_word_balance: Optional[Literal["even", "unspecified"]] = Field(
+        default=None,
+        description=(
+            "op_type=set_chapter_word_balance 時填。'even' = 使用者要求各章字數平均"
+            "（「每章字數平均」「每章差不多長」）。沒提 → null。"
+        ),
+    )
+
+    # --- set_total_word_count ---
+    total_word_count: Optional[int] = Field(
+        default=None, ge=1,
+        description="op_type=set_total_word_count 時的中文總字數整數（「七千字」→ 7000）",
+    )
+
+    # --- set_citation_style ---
+    citation_style: Optional[Literal[
+        "author_year", "numeric", "footnote", "none"
+    ]] = Field(
+        default=None,
+        description="op_type=set_citation_style 時的引用格式 enum",
+    )
+
+    # --- set_format_spec ---
+    format_spec: str = Field(
+        default="",
+        description="op_type=set_format_spec 時的自由文字格式偏好（使用者原文摘要）",
+    )
+
+    # --- add_special_element ---
+    special_elements: List[SpecialElementSpec] = Field(
+        default_factory=list,
+        description="op_type=add_special_element 時的 typed element 清單",
+    )
+
+    # --- preserve_facts ---
+    preserve_facts: List[str] = Field(
+        default_factory=list,
+        description=(
+            "op_type=preserve_facts 時，使用者點名「重組時不要掉」的具體事實清單。"
+            "每一項填**使用者原文的名詞片段**（如「nDX 獲獎專案」），不要改寫、不要摘要。"
+        ),
+    )
+
+    # --- 全 op_type 共用 ---
+    raw_phrase: str = Field(
+        default="",
+        description=(
+            "**使用者原話中對應這條訴求的片段**（surface form，逐字，不改寫）。"
+            "回執 narration 只能引用這個欄位，不可引用 LLM 生成的摘要或數字"
+            "（lessons-live-research §三：narration 不引用 LLM 生成的數字）。"
+        ),
+    )
+
+
+class Stage5OpType(str, Enum):
+    """Stage 5 單一訴求的操作類型（Plan: lr-multi-intent-schema-plan）。
+
+    值與舊 `_parse_revision_intent` 的六個 action 逐字對齊 —— 這讓
+    「operations 為空時退回單值路徑」的向後相容不需要任何轉換表。
+    """
+    revise_section = "revise_section"
+    revise_all = "revise_all"
+    done = "done"
+    structure_change = "structure_change"
+    continue_writing = "continue_writing"
+    recollect = "recollect"
+
+
+class Stage5Operation(BaseModel):
+    """Stage 5 單一訴求 — 扁平 union（抄 Stage4Operation / ContextMapRevisionOperation）。
+
+    **病灶修復點**：舊 schema 是「單一 action + **單一** target_index」，
+    「第 2 段補資料、第 4 段刪掉」型別上無法表達。此 model 讓**每一條 op 帶自己的
+    target_index**，多段修改成為一等公民。
+    """
+    op_type: Stage5OpType = Field(..., description="這一條訴求的操作類型")
+    target_index: Optional[int] = Field(
+        default=None,
+        description=(
+            "op_type=revise_section 時的**使用者口語段號（1-based，第 N 段就填 N）**。"
+            "沒指明哪一段 → null（系統會反問，禁止猜）。其他 op_type 一律 null。"
+        ),
+    )
+    instruction: str = Field(
+        default="", description="這一條訴求的具體修改指示（繁體中文原文摘要）"
+    )
+    raw_phrase: str = Field(
+        default="",
+        description=(
+            "**使用者原話中對應這條訴求的片段**（逐字，不改寫）。"
+            "回執 narration 只引用此欄位，禁引用 LLM 生成的摘要。"
+        ),
+    )
+
+
+# `action`（舊單值，語意退化為「主訴求摘要」）與 operations[0].op_type 的相容對照。
+# 只用於 log 警示，不用於 reject（見 _enforce_action_payload_contract 尾段）。
+_OP_TO_LEGACY_ACTION: dict = {
+    Stage4OpType.restructure: {
+        Stage4ResponseAction.adjust_chapters,
+        Stage4ResponseAction.new_structure_request,
+    },
+    Stage4OpType.cancel_reframe: {Stage4ResponseAction.cancel_reframe},
+    Stage4OpType.set_chapter_word_balance: {Stage4ResponseAction.adjust_format},
+    Stage4OpType.set_total_word_count: {Stage4ResponseAction.adjust_format},
+    Stage4OpType.set_citation_style: {Stage4ResponseAction.adjust_format},
+    Stage4OpType.set_format_spec: {Stage4ResponseAction.adjust_format},
+    Stage4OpType.add_special_element: {Stage4ResponseAction.add_special_element},
+    Stage4OpType.preserve_facts: {Stage4ResponseAction.adjust_format},
+    Stage4OpType.confirm: {
+        Stage4ResponseAction.confirm_reframe,
+        Stage4ResponseAction.confirm_format,
+        Stage4ResponseAction.confirm_both,
+    },
+    Stage4OpType.auto_continue: {Stage4ResponseAction.auto_continue},
+    Stage4OpType.unclear: {Stage4ResponseAction.unclear},
+}
+
+
 class Stage4Response(BaseModel):
     """Stage 4 user reply 經 LLM 分類後的 typed response — dispatcher 用此路由。
 
@@ -764,6 +954,15 @@ class Stage4Response(BaseModel):
         ),
     )
 
+    operations: List[Stage4Operation] = Field(
+        default_factory=list,
+        description=(
+            "**這一句使用者訊息中所有訴求的完整清單**（Plan: lr-multi-intent-schema-plan）。"
+            "使用者一次講三件事就填三條，不要三選一。空 list = 沒有可拆解的多訴求，"
+            "dispatcher 退回既有單值 `action` 路由（向後相容）。"
+        ),
+    )
+
     @field_validator("clarifying_question", mode="before")
     @classmethod
     def _coerce_null_clarifying_question(cls, v):
@@ -803,7 +1002,59 @@ class Stage4Response(BaseModel):
         if a == Stage4ResponseAction.unclear:
             if not self.clarifying_question.strip():
                 raise ValueError("action='unclear' 要求 clarifying_question 非空")
+        # Plan: lr-multi-intent-schema-plan — operations 非空時，`action` 退化為
+        # 「主訴求摘要」。若兩者語意不相容只 log WARNING，**不 reject**：
+        # reject 會讓整個 Stage4Response 掉進 classifier 的 except → unclear，
+        # 使用者的三個訴求全丟；log 一行的代價遠小於此。
+        if self.operations:
+            _primary = self.operations[0].op_type
+            _expected = _OP_TO_LEGACY_ACTION.get(_primary)
+            if _expected is not None and self.action not in _expected:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "[Stage4Response] action=%s 與 operations[0].op_type=%s 語意不相容"
+                    "（不 reject，dispatcher 以 operations 為準）",
+                    self.action.value, _primary.value,
+                )
         return self
+
+
+class PendingReframeReplyKind(str, Enum):
+    """pending reframe round 的 user 回覆五分支（CEO B 方案，2026-07-30）。
+
+    -a 死迴圈根因：舊 code 只有 confirm/cancel 有接線，其餘一律重播同句。
+    """
+    confirm = "confirm"                  # 接受目前 pending 提案
+    cancel = "cancel"                    # 取消重組，回真實架構
+    minor_revision = "minor_revision"    # 小改：在既有架構上收窄/重排（走 associator 增量）
+    major_rework = "major_rework"        # 大改：訴求超出重組範圍 → 不 reframe，引導重開研究
+    unclear = "unclear"                  # 判不出 → 誠實澄清（禁重播同句）
+
+
+class PendingReframeReplyClassification(BaseModel):
+    """pending reframe 回覆分流器的 typed output。
+
+    B1 紅線：kind 由 LLM 判，禁 code 端 regex/詞表/章數門檻推導
+    （memory/lessons-live-research.md:84-85）。
+    """
+    kind: PendingReframeReplyKind = Field(..., description="五分支之一")
+    revision_request: str = Field(
+        default="",
+        description=(
+            "kind=minor_revision 時：使用者這次的結構訴求原文摘要（餵給 associator "
+            "增量重組用）。其他 kind 留空。"
+        ),
+    )
+    clarifying_question: str = Field(
+        default="",
+        description=(
+            "kind=unclear 時：針對這句話問回去的具體澄清問句（繁體中文，"
+            "不可是重播原本的選項清單）。其他 kind 留空。"
+        ),
+    )
+    reason: str = Field(
+        default="", description="LLM 的判斷理由（log 用，不給 user 看）"
+    )
 
 
 class ClarificationRequest(BaseModel):
@@ -936,6 +1187,46 @@ def context_map_extract_for_section(
     return "\n".join(lines)
 
 
+def context_map_to_topic_rows(context_map: ContextMap) -> List[Dict[str, object]]:
+    """ContextMap → 前端用的**輕量結構化** topic list（票 2026-08-14-n）。
+
+    與 context_map_to_summary() 是**兩個不同受眾的出口，刻意不共用**：
+      - context_map_to_summary() 產出 Markdown 字串，受眾是 **LLM**（prompt 素材，
+        含長 description、relations、pending seeds；實測單一 session 11KB）。
+        格式隨 prompt 工程改動，**不是** UI contract。
+      - 本函式產出 JSON-able dict list，受眾是**前端 UI**。前端不 parse 字串，
+        直接讀欄位 → summary 那邊改格式不會弄壞畫面。
+
+    刻意**不含** description：Stage 1 checkpoint 上使用者要做的決定是「方向對不對、
+    要不要繼續」，長 description 會把 proposal 與證據清單推到很下面（票文 ①-a 的
+    否決理由）。relations 亦不含 —— 票文標 parked，有三個 revisit 觸發訊號。
+
+    欄位語義：
+      - name / domain：topic 標示，對齊 Stage 2 consolidation narration 的
+        「• {name}（{domain}）」。
+      - relevance：core/supporting/peripheral，供前端分組（Stage 2 也是這樣分）。
+      - confidence：high/medium/low。
+      - evidence_count = len(topic.evidence_ids)，即「**這個 topic 引用了幾筆**」。
+        ⚠ 與 checkpoint payload 的 evidence_total（evidence pool 的**完整筆數**）
+        **不是同一個東西**，兩者不該對得起來：同一筆證據可被多個 topic 引用
+        （加總 > total），也可能有證據不被任何 topic 引用（加總 < total）。
+        前端文案必須把兩者講成不同維度，見 live-research.js 的 topic 區塊標題。
+
+    排序沿用 _RELEVANCE_ORDER（core → supporting → peripheral），與 summary 一致。
+    """
+    topics = sorted(context_map.topics, key=lambda t: _RELEVANCE_ORDER.get(t.relevance, 1))
+    return [
+        {
+            "name": t.name,
+            "domain": t.domain,
+            "relevance": t.relevance,
+            "confidence": t.confidence,
+            "evidence_count": len(t.evidence_ids),
+        }
+        for t in topics
+    ]
+
+
 def context_map_to_summary(context_map: ContextMap) -> str:
     """
     Generate a complete Markdown summary of the full ContextMap.
@@ -943,6 +1234,10 @@ def context_map_to_summary(context_map: ContextMap) -> str:
     Unlike context_map_extract_for_section(), this includes ALL topics and
     relations without filtering. Used for Stage 1 and other scenarios
     that need the full picture.
+
+    ⚠ 受眾是 **LLM**（prompt 素材），不是 UI。前端要 per-topic 資料請用
+    context_map_to_topic_rows()（票 2026-08-14-n：本字串曾被塞進 SSE payload，
+    前端從未消費，已移除）。
     """
     lines: List[str] = []
     lines.append(f"## 研究結構 (v{context_map.version})")
@@ -1126,7 +1421,25 @@ class CitationInline(BaseModel):
 
 
 class LiveWriterSectionOutput(BaseModel):
-    """Writer 在 Live Research 模式下撰寫單一章節的輸出。"""
+    """Writer 在 Live Research 模式下針對單一章節的輸出。
+
+    ⚠ 不可加 min_length 或其他會拋出 ValueError 的 validator（票
+    2026-08-14 缺口二）：本 class 對 instructor reask 污染的免疫目前是
+    結構性巧合，不是刻意設計——section_content/narration/methodology_note/
+    chapter_summary 四個自由文字欄位都沒有會 raise 的約束，故不會觸發
+    instructor 的 reask_responses_tools()（見 reasoning/agents/base.py
+    generate_structured()），也就不會發生 DR 那種「LLM 把 reask 指令
+    當成寫作任務、把 schema 自白寫進欄位」的 P0（票 2026-08-13-c）。
+
+    若未來因產品需求（例如章節字數下限）要幫這些欄位加 min_length，
+    必須同時：(1) 為 LR 補等價於 DR reasoning/meta_narrative_guard.py
+    的偵測防線（DR 走 compose()，LR 走 compose_section()，兩者共用
+    writer.py 但呼叫路徑分流，DR 的既有防線不會自動涵蓋 LR）；
+    (2) 在本 docstring 移除這段警告。詳見
+    docs/specs/live-research-spec.md「守則：LiveWriterSectionOutput
+    欄位不可加 min_length 等會拋錯的約束」章節（守則本身記在 spec，
+    不依賴會隨 plan 歸檔而過期的 docs/in progress/ 路徑）。
+    """
 
     section_title: str
     section_content: str = Field(..., description="此章節的 Markdown 內容（含 {cite:N} placeholder）")
@@ -1435,14 +1748,19 @@ class EvidencePoolEntry(BaseModel):
     # default="internal" 保 backward-compat：所有 Track A 既有 evidence_pool 條目 load 後自動標 internal。
     # 邊界紀律：新增帶 default 的 Literal 欄位 ≠ 修改既有欄位，不視為動 Track A frozen schema 結構
     # （沿 Track A addendum C-4 lemma / Track E E-AMB-3 拍板先例）。
-    source: Literal["internal", "web", "wiki", "llm_knowledge"] = Field(
+    # ⚠ 2026-08-12：本欄位加第 5 值 'private' 屬「改既有欄位 type」（非「加新 Optional
+    # 欄位」的安全類別），已依 lessons-live-research 邊界 lemma 走 owner track review。
+    # 加值不改 default、不改 required、無資料遷移（私文從未進過 LR 池，見 plan 前提 1）。
+    source: Literal["internal", "web", "wiki", "llm_knowledge", "private"] = Field(
         default="internal",
         description=(
             "evidence 來源類型："
             "'internal' = 站內 corpus retrieval；"
             "'web' = Google CSE web search；"
             "'wiki' = Wikipedia API；"
-            "'llm_knowledge' = Analyst gap_resolutions LLM_KNOWLEDGE virtual doc"
+            "'llm_knowledge' = Analyst gap_resolutions LLM_KNOWLEDGE virtual doc；"
+            "'private' = 使用者上傳的私人文件（票 2026-08-11-a，CEO 2026-08-12 拍板"
+            "選項 A：私文為 BAB 迴圈常設來源）"
         ),
     )
     # P2 全局 evidence 模型（W1，§0 #13）：evidence→建議章節正向 N:M 軟標註。
@@ -1456,6 +1774,85 @@ class EvidencePoolEntry(BaseModel):
             "**軟性提示**：writer 讀全 pool，此欄只影響排序優先序，不是白名單。"
         ),
     )
+
+    # ── 票 2026-08-15-a：入池前置條件（型別層，面 B）──────────────────
+    # 🔴 **本層是票 2026-08-14-l 的實際守門人**：`-l` 的 seed 走
+    #    BABLoopEngine.__init__(seed_evidence_pool=…)（loop_engine.py:124-133）
+    #    直灌，**繞過所有寫入介面**；但它必須建 EvidencePoolEntry 才組得出 pool，
+    #    而建 entry 就過這裡。⇒ 守 -l 的是型別層，不是 _pool_put()。
+    #
+    # 🔴 **不開 `validate_assignment`**。現況 `model_config == {}`，setattr 路徑
+    #    完全不驗（`e.url = 'private://u2/s/d'` 靜默接受、`e.source = 'bogus'`
+    #    繞過 Literal）。開啟會把 ctor 既有的嚴格度新加到 setattr 上，讓
+    #    published_at / title / source / year 的型別錯 setattr 從靜默變 raise
+    #    —— **那是本票不需要的保護，卻要承擔它的迴歸面**。
+    #    `-l` 的 seed 走 __init__ 直灌 ⇒ 那是 **ctor** 不是 setattr ⇒ 本
+    #    validator 已經夠。setattr 列為明示盲區，見盲區斷言。
+
+    @field_validator("url", "title", "snippet", "source_domain")
+    @classmethod
+    def _enforce_private_fields_sanitized(cls, v: str) -> str:
+        """私文的四個外顯字串欄位一律脫敏後才落地 —— evidence pool 的**入池前置條件**。
+
+        **為什麼是四個欄位不是只有 url。**
+        `-l` 的隱私契約本來就是三個欄位 —— repo 現成的 A16 契約測試
+        （tests/integration/test_lr_private_docs_pipeline.py）逐字斷言
+        `url` / `source_domain` / `title` 都不得含 user_id，而
+        `_build_references_block._format_entry`（orchestrator.py）
+        印出去的正是那三個。只掛 url ⇒ 型別層只兜三分之一。
+        `snippet` 一併掛上：它進 writer prompt，是第四條外顯路徑。
+
+        **零誤傷**（實跑十種樣本）：`sanitize_private_url` 對非
+        `private://` 值 early-return 原樣回傳 ⇒ 中文標題 `我的知識庫`、
+        檔名 `報告.pdf (片段 1/3)`、網域 `reuters.com`、含 "private" 子字串的
+        中文摘要、大寫 `PRIVATE://`、非前綴的 `x private:// y`
+        **全部 byte-identical**。title / snippet / source_domain 的正常值
+        不可能以 `private://` 開頭。
+
+        票 2026-08-15-a。判準錨在「**這個值恰好是什麼形狀**」（netloc 必須是
+        `_PRIVATE_URL_OPAQUE_HOST`），不是「有沒有人記得呼叫 sanitize」——
+        後者是消費點的責任，繞得過（票 `2026-08-14-k` 的 R2/R3 連兩輪證明了
+        測試層攔不住它）。
+
+        ⚠ **段數不寫死**：`sanitize_private_url` 只切第一個 `/`，故對
+        票 `2026-08-14-k` 之後的四段 URL
+        （`private://{uid}/{src}/{doc}/{chunk_index}`）與**之前落 DB 的三段舊
+        session** 都正確。
+
+        ⚠ **為什麼是就地脫敏而不是 raise**：`deserialize_evidence_pool`
+        對 ValidationError 的既有處置是 **per-entry skip** ⇒
+        raise 版會讓既有髒 session 的私文證據被靜默丟棄（只留 WARNING）。
+        就地脫敏把舊資料修好，不製造資料遺失。
+
+        ⚠ **本 validator 的能力邊界**（實跑，見 plan §④）：
+          - `model_construct()` / `model_copy(update=…)` **繞過所有 validation**
+            （Pydantic 設計如此）—— **沒有自動化檢查在防這兩個**，只有
+            code review 指名項
+          - `entry.__dict__["url"] = <髒值>` 與 `object.__setattr__(entry,
+            "url", <髒值>)` **也繞過**。這是 Python 物件模型層的繞過，
+            **任何 Pydantic 設定都擋不住**，只能列盲區
+          - `entry.url = <髒值>`（普通 setattr）也繞過 —— 本票不開
+            `validate_assignment`，理由見上方註解
+          - `PRIVATE://`（大寫）／前導空白／`private:///`（三斜線）三種形狀
+            `sanitize_private_url` 不處理 ⇒ 這三種進得來
+        ⇒ **在「私文 url 只由 user_postgres_provider.py 那個 f-string
+           產生」的前提下，那三種字面形狀產不出來；該前提被打破時它們就是真洞。**
+           盲區已寫成會跑的斷言
+           （test_documented_pool_guard_blind_spots_still_blind）。
+        ⇒ **這是降風險不是消除風險** —— 本 validator 把 -l 的隱私契約從
+           執行紀律降為型別層兜底，**不保證沒有第二條路**。
+
+        非 `private://` 的 url（internal / web / wiki / llm_knowledge / 空字串）
+        原樣回傳 —— `sanitize_private_url` 的 early return 保證，
+        實跑六種樣本全部 unchanged。
+        """
+        # 函式內 import：core.user_data_retriever 在 module level 拉起
+        # retrieval_providers.user_postgres_provider（連帶 psycopg / pgvector /
+        # core.embedding），而 schemas_live 是被廣泛 import 的純 schema 模組
+        # ⇒ 放檔頭等於讓每個 import schema 的人都付那串 DB 相依成本。
+        from core.user_data_retriever import sanitize_private_url
+
+        return sanitize_private_url(v) if isinstance(v, str) else v
 
 
 class GeneratedTitle(BaseModel):
@@ -1509,7 +1906,9 @@ def _render_claim_line(gc: Dict, prefix: str) -> str:
     conf = gc.get("confidence", "")
     claim = gc.get("claim", "")
     tag = ""
-    if gc.get("critic_status", "PASS") == "WARN":
+    if _normalize_critic_status(
+        gc.get("critic_status"), field="lr_critic_status_render_claim_line"
+    ) == "WARN":
         tag = "[confidence: low | critic_status: WARN] "
     return f"- {tag}{prefix}（{rtype}，{conf}）：{claim}"
 
@@ -1572,9 +1971,14 @@ def render_grounded_narrative(
         if not raw_claims:
             continue
         # Gemini C-1: filter REJECT claims at render layer (source 已入庫保留 forensic)
+        # 票 2026-07-31-d：REJECT filter 改走 _normalize_critic_status（fail-closed：
+        # unknown/缺鍵/非字串 → REJECT → 濾；ERROR log 現形）。source 層仍保留全部
+        # （forensic），render 層是唯一閘門。
         renderable = [
             c for c in raw_claims
-            if c.get("critic_status", "PASS") != "REJECT"
+            if _normalize_critic_status(
+                c.get("critic_status"), field="lr_critic_status_render_narrative"
+            ) != "REJECT"
         ]
         if not renderable:
             # 整批 claim 都是 REJECT → 該 eid block 跳過 (writer 看不到)
@@ -1634,9 +2038,14 @@ def render_grounding_evidence_view(
         }
 
     def _renderable_claims(eid: int) -> List[Dict]:
+        # 票 2026-07-31-d：同 render_grounded_narrative 口徑 fail-closed。
+        # 本 closure 每 eid 會被 _priority 與渲染主迴圈重複呼叫——壞值時 ERROR
+        # log 會重複出現，可觀測性優先於去重，接受。
         return [
             c for c in (evidence_usage.get(eid) or [])
-            if c.get("critic_status", "PASS") != "REJECT"
+            if _normalize_critic_status(
+                c.get("critic_status"), field="lr_critic_status_render_view"
+            ) != "REJECT"
         ]
 
     # R2 優先序分桶（tier 1=最高）：①本章 citation → ①b suggested_here → ②有 claim
@@ -1648,6 +2057,15 @@ def render_grounding_evidence_view(
             return 1
         if eid in suggested_here:   # P2 W5：tier ①b（建議本章）
             return 2
+        # A13 / R6（票 2026-08-11-a）：私文沒有 suggested_chapters（OutlinePlanner
+        # 不認識它）、初期也沒有 analyst claim ⇒ 預設落最低 tier 5，budget 一滿就被
+        # 丟掉 ⇒ 池子裡有、writer 看不到、報告不引用 ⇒ 使用者體感「沒用到我的文件」。
+        # 選 tier 3（與「有 claim」同級）而非 tier 2：tier 2 會讓私文排在有 analyst
+        # claim 的 evidence **之前**，私文筆數多時排擠掉真正被推理用到的公開 evidence。
+        # 此選擇已記入 docs/decisions.md（CEO 2026-08-12 拍板選項 A 的配套決策）。
+        entry_for_tier = evidence_pool.get(eid)
+        if getattr(entry_for_tier, "source", "") == "private":
+            return 3
         if _renderable_claims(eid):
             return 3
         entry = evidence_pool.get(eid)

@@ -18,6 +18,7 @@ import importlib
 import sentry_sdk
 
 from core.openai_http import keepalive_timeout_enabled
+from core.llm_coerce_signal import report_coerce_failure
 
 
 from misc.logger.logging_config_helper import get_configured_logger, LogLevel
@@ -170,6 +171,18 @@ class LLMError(dict):
         return f"LLMError(kind={self.error_kind!r}, detail={self.detail!r})"
 
 
+def llm_failure_detail(response: Any) -> Optional[str]:
+    """LLMError sentinel → "kind: detail" 描述；非 LLMError → None。
+
+    票 2026-08-04-e K-19/K-18/K-06：三種 error_kind 對只寫 `if not x` 的 caller
+    完全等價（timeout 被記成 empty response）。ranking 家族的 empty-response
+    分支用本 helper 恢復 log 層分型；改 raise 語義是另一張架構票的事。
+    """
+    if isinstance(response, LLMError):
+        return f"{response.error_kind}: {response.detail}"
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 數值欄位 coerce 單一收斂點（full-scan-2026-07 CORE-2 / AF-1 / MP-2 三層根解）
 #
@@ -191,7 +204,7 @@ class LLMError(dict):
 
 # 數值型別意圖關鍵詞（涵蓋 repo 內既有 score/final_score/*_score 欄位的中英描述）。
 _NUMERIC_DESC_PATTERN = re.compile(
-    r"整數|數值|浮點|小數|\binteger\b|\bint\b|\bfloat\b|\bnumber\b|\bnumeric\b",
+    r"整數|數值|浮點|小數|分數|評分|得分|\binteger\b|\bint\b|\bfloat\b|\bnumber\b|\bnumeric\b",
     re.IGNORECASE,
 )
 # 布林意圖關鍵詞：即使描述含數值字樣也不得當數值欄位（防「True or False」等誤判）。
@@ -211,6 +224,36 @@ def _is_numeric_field_desc(desc: Any) -> bool:
     return bool(_NUMERIC_DESC_PATTERN.search(desc))
 
 
+# 票 2026-08-04-e K-115：描述關鍵詞是唯一判準時，涵蓋面靠「還沒人這樣寫過」的
+# 歷史巧合（refuter 七例全漏網）。補兩個獨立訊號：
+#   (a) 欄位名 score 家族（repo 現有 20 個 flat 數值欄位中 19 個的命名形狀；
+#       第 20 個 confidence 靠「浮點」描述關鍵詞命中，不依賴本訊號——🔧R1）
+#   (b) 純數值範圍描述（全字串錨定——"2-3 句事實摘要" 內嵌範圍不得命中，
+#       誤判方向＝非數值欄位值被 coerce **刪除**，比漏網更危險）
+# ⚠ 刻意不加 \bscore\b 描述關鍵詞：whoRanking 的 query 欄位描述含
+#   "(only if score > 70)"，加了會刪掉 query 字串值。
+# 涵蓋面機械防線＝ tests/unit/core/test_numeric_schema_inventory.py（golden map，
+# 新欄位不分類即紅）——本 pattern 不再獨自扛涵蓋面。
+_NUMERIC_FIELD_NAME_PATTERN = re.compile(r"(?:^|_)score$", re.IGNORECASE)
+_NUMERIC_RANGE_ONLY_DESC_PATTERN = re.compile(
+    r"^\s*\d+(?:\.\d+)?\s*(?:-|~|–|—|到|至)\s*\d+(?:\.\d+)?\s*分?\s*$"
+)
+
+
+def _is_numeric_field(field: Any, desc: Any) -> bool:
+    """欄位是否宣告為數值：布林描述優先排除；desc 非字串（巢狀節點）維持
+    no-op 邊界（R1 #4 分工不變）；然後 欄位名 ∨ 純範圍 ∨ 描述關鍵詞。"""
+    if not isinstance(desc, str):
+        return False
+    if _BOOL_DESC_PATTERN.search(desc):
+        return False
+    if isinstance(field, str) and _NUMERIC_FIELD_NAME_PATTERN.search(field):
+        return True
+    if _NUMERIC_RANGE_ONLY_DESC_PATTERN.match(desc):
+        return True
+    return bool(_NUMERIC_DESC_PATTERN.search(desc))
+
+
 def _coerce_numeric_fields(result: Dict[str, Any], schema: Dict[str, Any]) -> Dict[str, Any]:
     """對 result 中被 schema 宣告為數值的欄位就地 coerce（int 優先，退 float）。
 
@@ -219,8 +262,10 @@ def _coerce_numeric_fields(result: Dict[str, Any], schema: Dict[str, Any]) -> Di
       - result 非 dict（含 LLMError falsy sentinel）→ 原樣回，不迭代污染。
       - 欄位值已是 int/float/bool → 不動。
       - 欄位值是字串：strip 後試 int（純整數字串）→ 退 float（含小數點）；
-        兩者皆失敗（'70分' / 全形 / '0.7abc'）→ **保留原值 + logger.warning**
-        （不 silent、不歸 0、不丟件——下游既有防禦處理原值）。
+        兩者皆失敗（'70分' / '高分' / '0.7abc'）→ **移除該欄位** + logger.warning
+        + 品質訊號事件（票 2026-08-01-k）。不 silent、不歸 0、不丟件——欄位不存在
+        使下游 `.get(k, default)` 走 default，TypeError 整批崩路徑消失。
+        （全形數字如 '７０' 可被 Python int() 轉換，走成功分支不受影響。）
       - 欄位值為 None / 缺席 → 保留（不試轉）。
 
     作用域邊界（R1 #4 裁決，刻意設計）：
@@ -235,7 +280,7 @@ def _coerce_numeric_fields(result: Dict[str, Any], schema: Dict[str, Any]) -> Di
         return result
 
     for field, desc in schema.items():
-        if not _is_numeric_field_desc(desc):
+        if not _is_numeric_field(field, desc):
             continue
         if field not in result:
             continue
@@ -255,11 +300,46 @@ def _coerce_numeric_fields(result: Dict[str, Any], schema: Dict[str, Any]) -> Di
             except (TypeError, ValueError):
                 coerced = None
         if coerced is None:
+            # 票 2026-08-01-k：轉不動 → **移除該欄位**，不保留原字串、不設 None。
+            #
+            # 為什麼是「移除」不是「設 None」：dict.get(k, default) 的 default 只在
+            # key **不存在**時生效。key 存在而值為 None 時回傳 None，下游六個讀取點
+            # （mmr.py:236,254,270 / whoRanking.py:171,172 / router.py:246 /
+            #  generate_answer.py:155,438,491 / xgboost_ranker.py:154,177）照樣
+            # `None > 50` TypeError——其中 whoRanking.py:171 與 generate_answer.py:438
+            # 在 try **外**，會讓整批 query 的 ranking 全滅。移除 key 才讓那些
+            # `.get(k, 0)` 真的走 default 分支，TypeError 路徑就此消失。
+            #
+            # ⚠ **用詞校正（land-diff R1 in-house，已逐行親驗；票 2026-08-04-e 再校）**：
+            # 上列讀取點的 score **值層**皆為 `.get(k, default)` 形式，但 mmr.py 的
+            # **容器層**（`r['ranking']`×5、`['name']`×2）曾為裸下標——已於票
+            # 2026-08-04-e 改 `.get` chain 防禦形（缺欄→0/空名，同語義）。值層危險
+            # 不在「沒寫 default」，而在「**寫了 default 卻被 present-but-None 打敗**」。
+            # 這正是本修法選 `del` 而非設 `None` 的全部理由。真正的裸下標在別處
+            # （ranking.py:228 / whoRanking.py:83,125 / generate_answer.py:965 /
+            #  router.py:350-526），已逐條判可達性**全部安全**（heal-before-consume
+            # 前置補值 / `_safe_score()==0` 被 `>59` 擋死 / router 重包新 dict）。
+            #
+            # 語義：把「未定義」正確表達成未定義。不是排序策略變更——欄位不存在時
+            # 下游本來就當 0 處理（`_safe_score` 亦然）。
+            #
+            # ⚠ 這裡若有人改回保留原值或改成設 None，
+            # tests/unit/core/test_llm_score_coercion.py::
+            #   test_removed_field_survives_all_downstream_read_shapes 會紅
+            #   （它逐一施加六個裸讀點的實際運算形狀）。
+            #
+            # 為什麼要 report_coerce_failure 而不只 logger.warning：warning 印在
+            # server log ＝ 無人看得到，且該 log 不持久化（票 2026-08-01-j：
+            # /app/logs 未掛 volume，redeploy 全滅）。訊號落 DB（guardrail_events）
+            # 才留得住、才有巡檢可查。**本模組刻意不依賴 log 檔持久化。**
             logger.warning(
                 "LLM numeric field '%s' returned non-coercible string %r "
-                "(schema desc %r); preserving original value for downstream defense.",
+                "(schema desc %r); removing field so downstream .get(k, default) "
+                "yields its default instead of raising TypeError.",
                 field, value, desc,
             )
+            report_coerce_failure(field=field, raw_value=value, schema_desc=desc)
+            del result[field]
         else:
             result[field] = coerced
     return result

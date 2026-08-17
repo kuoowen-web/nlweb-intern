@@ -17,6 +17,7 @@ from typing import Any, List, Dict, Optional, Tuple
 from pathlib import Path
 from misc.logger.logging_config_helper import get_configured_logger
 from core.schema_definitions import get_sqlite_schema, get_postgres_schema, get_index_sql
+from core.db_connection_errors import pg_connect_error_message
 
 logger = get_configured_logger("analytics_db")
 
@@ -230,10 +231,7 @@ class AnalyticsDB:
 
             logger.info("Analytics database initialized (PostgreSQL async)")
         except Exception as e:
-            logger.error(
-                f"無法連線到 PostgreSQL ({self.database_url.split('@')[1] if '@' in self.database_url else self.database_url})。"
-                f"是不是忘記開 Docker Desktop？"
-            )
+            logger.error(pg_connect_error_message(self.database_url))
             logger.error(f"Failed to initialize analytics database: {e}", exc_info=True)
 
     def _init_database_sync(self):

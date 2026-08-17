@@ -1,11 +1,18 @@
 # Copyright (c) 2025 Microsoft Corporation.
 # Licensed under the MIT License
 
-"""
-GuardrailLogger — Defense event logging for guardrail system.
+"""GuardrailLogger — Defense & quality-signal event logging.
 
-Writes all defense events (rate_limit, query_sanitized, concurrency_limit,
-injection_detected, pii_filtered) to the guardrail_events table.
+Writes events where the system **detected an anomaly and took action** to the
+guardrail_events table. Two families share this table:
+  - Defense（原始用途）: rate_limit, query_sanitized, concurrency_limit,
+    injection_detected, pii_filtered
+  - Quality signal（票 2026-08-01-k 起）: llm_numeric_coerce_failed
+    —— 上游（LLM）產出 schema 沒宣告的形態，系統移除該欄位以自保。
+    寫入端見 core/llm_coerce_signal.py，常數見該檔 COERCE_EVENT_TYPE。
+
+⚠ 查「防禦指標」時要**依 event_type 過濾**，不要對整表做 count——兩個 family 的
+語義不同（防禦是「擋掉了攻擊/濫用」，品質訊號是「上游品質退化」）。
 
 Singleton pattern, reuses AnalyticsDB for DB access.
 Fire-and-forget: log_event never raises; errors go to Python logger only.
@@ -13,12 +20,15 @@ Fire-and-forget: log_event never raises; errors go to Python logger only.
 
 import json
 import time
-import logging
 from typing import Optional
 
 from core.analytics_db import AnalyticsDB
+from misc.logger.logging_config_helper import get_configured_logger
 
-logger = logging.getLogger(__name__)
+# 票 2026-08-04-e（K-73 更正版）：stdlib 零 handler logger 的 ERROR 仍會走
+# logging.lastResort stderr（訊息不消失），但不進結構化 log、無人巡檢。
+# 改配置化 logger；log_event 的 never-raise 契約不變。
+logger = get_configured_logger("guardrail_logger")
 
 
 class GuardrailLogger:
@@ -52,8 +62,10 @@ class GuardrailLogger:
         Insert one row into guardrail_events. Fire-and-forget.
 
         Args:
-            event_type: One of 'rate_limit', 'query_sanitized', 'concurrency_limit',
-                        'injection_detected', 'pii_filtered'
+            event_type: Defense: 'rate_limit', 'query_sanitized', 'concurrency_limit',
+                        'injection_detected', 'pii_filtered'.
+                        Quality signal: 'llm_numeric_coerce_failed'（見
+                        core/llm_coerce_signal.COERCE_EVENT_TYPE）。
             severity:   One of 'info', 'warning', 'critical'
             user_id:    Authenticated user ID (nullable)
             client_ip:  Client IP address (nullable)
@@ -72,9 +84,11 @@ class GuardrailLogger:
             await db.execute(sql, (time.time(), event_type, severity, user_id, client_ip, details_json))
         except Exception as e:
             # Never raise — guardrail logging must not break the request path
-            logger.error(
+            # 🔧R1（in-house nit-2）：LazyLogger.error 是 async worker enqueue，
+            # exc_info=True 在 worker thread 解析時已無 traceback；.exception 在
+            # call site 就捕 sys.exc_info()。
+            logger.exception(
                 f"GuardrailLogger.log_event failed (event_type={event_type}, severity={severity}): {e}",
-                exc_info=True,
             )
 
     async def get_recent_events(
@@ -116,8 +130,7 @@ class GuardrailLogger:
             rows = await db.fetchall(sql, tuple(params))
             return rows
         except Exception as e:
-            logger.error(
+            logger.exception(
                 f"GuardrailLogger.get_recent_events failed (minutes={minutes}): {e}",
-                exc_info=True,
             )
             return []

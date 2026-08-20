@@ -1301,6 +1301,20 @@ Mode toggle 四鈕（新聞搜尋 / 進階搜尋 / Live 研究[Beta] / 自由對
 - **路 A：slot release 綁 task 終態**（修 Gemini C1 同 session 並行雙寫）：並行 slot release 從 HTTP handler finally 移到背景 task 生命週期——detach 終態由 route closure done-callback release（捕獲 limiter 區域變數），非 detach 終態 route finally release，靠 `ConcurrencyLimiter.release()` idempotent 兜底（雙釋放點安全網）。**INVARIANT（I-A1）**：detach return → `add_done_callback` 之間禁任何 `await`（破了則 C1 並行雙寫復活、且 test 可能仍全綠）。效果：背景 task 未完成期間 slot 仍佔住 → 同 user 第二請求被擋 429，不會啟動第二個並行 task 競寫同 session row。`acquire` 仍在 route 層不動。
 - **持久化單一責任**：route 層 trailing `_save_state` 已移除（detach 後與 task 內 `_persist_checkpoint_boundary → _persist_progress → _save_state` 雙寫、可能舊 snapshot 覆寫新）。持久化單一歸背景 task 內部，每 boundary idempotent 寫。
 
+#### 7.3.2 斷線後續跑接管（takeover，2026-08-20 治本）
+
+> **解決的回報故障**：即時研究進行中使用者網路斷線 → 網路恢復後連按三次「繼續研究」全部失敗，斷線保護形同未執行。
+
+§7.3.1 路 A 的副作用：背景 task 未結束前 per-user slot（`lr_user:{uid}`，`DR_USER_LIMIT=1`）一直佔住，於是**使用者自己回來續跑**也會被自己那把舊 slot 擋成 429（最長到 `ZOMBIE_TTL_SECONDS=300` 或舊 stage 跑完為止）。前端把 429 併進一般錯誤 → 顯示「連線出了狀況…請再送一次繼續」→ 使用者照做、照樣 429，三次全掛。
+
+- **接管（`methods/live_research.takeover_detached_lr_task`，continue route 於 `try_acquire` 之前呼叫）**：同 `lr_session_id` + 同 `user_id` 又送來新的 continue → cancel 舊背景 task → `asyncio.wait` 等它**真的**結束（舊 route 的 slot-release done-callback 才會跑）→ 才放行。並行雙寫不變量是**加強**不是放寬：舊 task 已終結才啟動新 task，比「擋掉新請求」更早收斂。
+- **不以「已偵測到離線」為接管條件**（關鍵）：斷線偵測只靠往 socket 寫 keepalive 失敗（`aiohttp_streaming_wrapper.write_keepalive`），半開 TCP 上要等 TCP 重傳耗盡（十幾分鐘）才會失敗，前面有 nginx 時 server 端更看不到 client 側斷線。使用者按「繼續」的當下舊 task **多半仍被標成在線**——若要求 offline 才接管，最常見情境不接管 = 沒修好。改以「LR 回覆入口只在串流停下時才出現，同分頁不會在自己串流跑時送 continue」為據，把新 continue 視為「使用者換了條連線在驅動同一場研究」。舊 handler 先 `connection_alive_event.clear()` + `_lr_detach_event.set()`（成對）再 cancel。
+- **接管的邊界（不可放寬，否則變成亂砍 task）**：`user_id` 不符 → 不接管（防猜 UUID 砍別人的研究）；cancel 後逾時（`LR_TAKEOVER_TIMEOUT_SECONDS=10`）仍未結束 → **不放行**，退回既有 429（寧可擋，不可假設它死了）。
+- **已知取捨**：同一場研究在第二個分頁按繼續，會接管掉第一個分頁正在跑的串流（後按的贏），研究本身不掉——從最後一個 durable boundary 續跑。
+- **前端第二道防線**：`continueLiveResearch` 對 429 走有界退避自動重試（`lr-continue-outcome.js`，2 次、3s/8s），文案誠實說明在等什麼；用盡才交還使用者，且不再叫使用者盲目重送。
+- **串流優先於重連**：`handleLiveResearchSSE` 進場清 `_lrConnectionLost`、進出成對維護 inflight 計數；`shouldRunWakeReconnect` 在串流跑時一律不重連。修的是「按了繼續、跑到一半被 read-only 重繪（`restoreLRCheckpointFromState` 內含 `resetLiveResearchUI`）洗回中斷點」——舊碼只有「醒來重連成功」才清 `_lrConnectionLost`，使用者手動接回時旗標永久留 true。
+- **失敗歸因誠實化**：LR SSE 新增 `error` / `research_error` / `research_interrupted` 終止分支，後端 `state_not_found` / legacy schema 旁白加 `terminal: true`。舊碼這些全落到「沒收到終止事件 → 顯示連線中斷」，把後端明確錯誤誤標成斷線，使用者只會一直重按（DR 早在 W1/W2 修過同病，LR 一直漏）。
+
 ### 7.4 Final Report Rendering
 
 收 `final_result` / export → 渲染到 `#liveResearchView` 並切 tab（reuse DR 的 `marked.parse` / `DOMPurify.sanitize` / citation link / collapsible section / reference list）。
@@ -1465,6 +1479,7 @@ Chrome MCP tab 紀律：
 | 2026-06-16 | Citation text-fragment highlight（§7.5）+ SSE 斷線不取消 read-only 重連（§7.3）|
 | 2026-06-19 | cruft 體檢：移除 dead flag、WARN explanation 不截斷、citation 前後端 mirror 修正 |
 | 2026-06-23 | **SSE 522 連線釋放治本（§7.3.1）**：detach-aware await（斷線釋 fd、task 不 cancel）+ route finish_response + 路 A slot 綁 task 終態（修 Gemini C1 並行雙寫）+ 移除冗餘 trailing save。已 deploy；行為層 2026-07-06 prod 驗收 PASS（slot 佔用生效、fd 29/conn 1 無洩漏），嚴格版（429 顯式 + fd 鋸齒 + 落 DB）待下次真機批 |
+| 2026-08-20 | **斷線後續跑接管（§7.3.2）**：修「網路斷線恢復後連按三次繼續全失敗」。後端加同 session/同 user takeover（cancel 舊 task → 確認結束 → 才放行，不以已偵測離線為條件）；前端加 429 有界退避重試、串流期間禁止 read-only 重連、LR 終止性錯誤事件分支。單元測試：`test_lr_reconnect_takeover.py`(7)、`lr-continue-outcome.test.js`(10)，皆過 mutation 驗證 |
 | 2026-07-28 | **spec 補漏批（C 線稽核）**：§4.3.2 drift-pause teeth 契約入 spec（2026-07-23 land：`stage2_drift_paused` + 三路 dispatch + Stage 1/2 drift banner）+ 新增 §4.11 backward navigation（2026-06-19 land）+ §7.4.1 校正 KG markdown 已拔（2026-07-21）+ §4.9.1 schema 補全 + persist 方法名層級（`_persist_checkpoint_boundary` 鏈）+ §8.4.1 fixture 目錄校正 |
 
 > 完整 commit 群與踩坑 lesson 見 `memory/lessons-live-research.md`。

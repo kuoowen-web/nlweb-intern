@@ -1523,6 +1523,32 @@ async def live_research_continue_handler(request: web.Request) -> web.Response:
         if user.get("org_id"):
             query_params["org_id"] = user["org_id"]
 
+    # 斷線重連接管（plan: lr-reconnect-continue-takeover, 2026-08-20）——**必須在
+    # try_acquire 之前**，否則新請求先被自己那把舊 slot 擋成 429 就沒機會接管。
+    # 病灶：斷線 → detach → 舊背景 task 續跑並持續佔住 `lr_user:{uid}` slot（限額 1）
+    # → 使用者網路恢復後按「繼續研究」全部 429 → 斷線保護形同未執行。
+    # 接管條件：同 lr_session + 同 user 又送來新的 continue（**不**要求「已偵測到離線」——
+    # 半開 TCP / nginx 之下 server 往往還沒察覺斷線，那正是最常見情境）。邊界與安全性
+    # （user 不符、cancel 逾時皆不放行）見 methods/live_research.takeover_detached_lr_task。
+    _lr_cont_sid = body.get("lr_session_id", "") or ""
+    if _lr_cont_sid:
+        from methods.live_research import takeover_detached_lr_task
+        _lr_cont_owner = user["id"] if (user and user.get("authenticated")) else ""
+        try:
+            _lr_takeover = await takeover_detached_lr_task(_lr_cont_sid, _lr_cont_owner)
+        except Exception as _tk_err:
+            # 不可 silent fail：接管失敗照樣往下走（最壞退回既有 429 行為），但必須留痕。
+            logger.error(
+                f"[LIVE RESEARCH] Reconnect takeover raised (non-fatal, 退回既有 429 行為): {_tk_err}",
+                exc_info=True,
+            )
+            _lr_takeover = "error"
+        if _lr_takeover not in ("none", "taken_over", "taken_over_stale"):
+            logger.warning(
+                f"[LIVE RESEARCH] Continue 未接管舊 task（result={_lr_takeover}）—— "
+                f"若舊 slot 仍佔住，本請求會回 429（lr_session={_lr_cont_sid}）"
+            )
+
     # C-2: Concurrency check — Live Research continue also triggers LLM pipelines
     lr_cont_limiter = None
     lr_cont_search_key = None

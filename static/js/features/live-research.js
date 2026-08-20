@@ -82,6 +82,8 @@ import { serializeLRChatRoot, lrStagesInSnapshot, lrSnapshotForStage, shouldSave
 import { lrReviewBannerHTML, LR_REVIEW_FALLBACK_BANNER_TEXT, lrContextMapHTML, lrStyleFeaturesHTML } from './lr-review-render.js';
 import { getCurrentLoadedSessionId } from './sessions-list.js';
 import { classifyReconnectFetchOutcome, lrReconnectAuthCopy } from './lr-reconnect-auth.js';
+// plan: lr-reconnect-continue-takeover — 續跑 HTTP 結果分流 + 重連 gate（純函式，node --test 直測）
+import { classifyContinueHttpOutcome, shouldRunWakeReconnect, lrContinueCopy } from './lr-continue-outcome.js';
 // Re-export pure snapshot helpers (unit-tested in lr-snapshot.js) for any importers of this module.
 export { serializeLRChatRoot, lrStagesInSnapshot, lrSnapshotForStage };
 
@@ -156,6 +158,11 @@ export function getLRSwitchToken() {
 let _lrConnectionLost = false;
 let _lrReconnectInflight = false;
 let _lrReconnectTimer = null;
+// plan: lr-reconnect-continue-takeover — 目前是否有 SSE 串流在跑（handleLiveResearchSSE
+// 進出成對維護）。串流在跑時**禁止**醒來重連：_doLRReconnect 會 restoreLRCheckpointFromState
+// → resetLiveResearchUI() → 用 DB 舊 state 蓋掉正在跑的續跑進度，畫面退回中斷點，
+// 使用者看到的就是「按了繼續沒有用」。用計數器而非 boolean：巢狀 / 交疊串流不會提早解鎖。
+let _lrStreamInflightCount = 0;
 
 // 測試 / 外部覆寫用 seam：實際重連動作（拉 state + render）。預設 null，
 // 由 _doLRReconnect 實作；wake 流程只透過 _debouncedLRReconnect 進入，保證 read-only。
@@ -214,8 +221,12 @@ function flushDeferredLRReloginHint() {
 }
 
 function _scheduleLRWakeReconnect(source) {
-    if (!_lrConnectionLost) return;            // 沒斷過不處理
-    if (!getLRSessionId()) return;             // 無 session 無從 restore
+    // gate 抽成純函式（lr-continue-outcome.js）才有機械防線可鎖（見該檔說明）。
+    if (!shouldRunWakeReconnect({
+        connectionLost: _lrConnectionLost,
+        streamInflight: _lrStreamInflightCount > 0,
+        hasSession: !!getLRSessionId(),
+    })) return;
     _debouncedLRReconnect(source);
 }
 
@@ -359,6 +370,15 @@ async function _doLRReconnect(source) {
         return;
     }
     if (!lrState) return;
+
+    // plan: lr-reconnect-continue-takeover —— post-await 二次確認（NO SILENT FAIL：有 log）。
+    // 上面那串 await（fetch / refresh / json）期間，使用者可能已經按了「繼續」而有 SSE 串流
+    // 跑起來。此時再用 DB 舊 state 重繪 = resetLiveResearchUI() 洗掉正在跑的續跑，畫面退回
+    // 中斷點。_scheduleLRWakeReconnect 進場時的 gate 擋不到這段窗口，故此處補一次。
+    if (_lrStreamInflightCount > 0) {
+        console.warn('[Live Research] wake reconnect: 串流已在跑（重連期間使用者已續跑）— 放棄 read-only 重繪，避免蓋掉 live 進度');
+        return;
+    }
 
     // Reconnect succeeded: clear disconnect state, re-arm relogin hint, bump
     // token to prevent a stale render from overwriting, then read-only render.
@@ -2584,6 +2604,14 @@ export async function handleLiveResearchSSE(response, triggeringLRSid = null) {
     // plan: lr-sse-reconnect-resume — 追蹤是否收到終止性事件（checkpoint / export）。
     // 若 stream 結束卻沒收到任何終止事件 = 異常斷線（後端仍在跑），顯示可恢復狀態。
     let sawTerminalEvent = false;
+    // plan: lr-reconnect-continue-takeover —— 串流開跑 = 連線是活的。
+    // (a) 清 _lrConnectionLost：舊碼只有「醒來重連成功」才清，使用者自己按「繼續」接回時
+    //     旗標會一直留 true → 之後任何 visibilitychange/online 都會觸發 read-only 重繪，
+    //     把跑到一半的續跑洗回中斷點（看起來就是「繼續沒生效」）。真的再斷線時下方 catch
+    //     會把它設回 true。
+    // (b) inflight 計數 +1：串流期間禁止醒來重連（見 shouldRunWakeReconnect）。
+    _lrConnectionLost = false;
+    _lrStreamInflightCount++;
 
     try {
         while (true) {
@@ -2624,6 +2652,26 @@ export async function handleLiveResearchSSE(response, triggeringLRSid = null) {
                             console.warn('[Live Research] window.adoptLRServerSession 未掛載，雙 row 收斂跳過（resume 可能失效）');
                         }
 
+                    } else if (type === 'error' || type === 'research_error' || type === 'research_interrupted') {
+                        // plan: lr-reconnect-continue-takeover —— 後端明確報錯 = 終止性事件。
+                        // 舊碼 LR 完全沒有這條分支：'error' 落到 else → classifyEnvelope 判 'skip'
+                        // （registry.FRONTEND_SKIP_RENDER_TYPES 含 error）→ 靜默丟棄 → 串流結束時
+                        // sawTerminalEvent=false → 顯示「連線中斷…可以從中斷處繼續」。使用者於是
+                        // 一直重按繼續，每次都得到同一句「斷線」，真正的失敗原因從未露面。
+                        // 修法對齊 DR 既有做法（deep-research.js W1/W2：research_error /
+                        // research_interrupted 各有分支）。
+                        const errText = data.error || data.message || '研究過程發生錯誤';
+                        console.error('[Live Research] SSE terminal error:', type, errText);
+                        sawTerminalEvent = true;   // 這是明確終態，**不是**斷線
+                        hideLRTypingIndicator();
+                        setProcessingState(false);
+                        addLRChatMessage('error', String(errText));
+                        // 保留回覆入口：這類錯誤多半可由使用者再送一次繼續（真正不可續的
+                        // 情況後端會走 terminal narration 分支，那裡不復原 reply UI）。
+                        const errReplyEl = document.getElementById('lrCheckpointReply');
+                        if (errReplyEl) errReplyEl.style.display = '';
+                        _lrAwaitingCheckpointReply = true;
+
                     } else if (type === 'low_relevance_warning') {
                         console.warn('[Relevance] Low relevance (LR):', data.content);
                         showResearchRelevanceWarning(data.content, 'relevance');
@@ -2639,7 +2687,22 @@ export async function handleLiveResearchSSE(response, triggeringLRSid = null) {
                         if (derivedActivity) _currentLRActivity = derivedActivity;
                         hideLRTypingIndicator();
                         addLRChatMessage('narration', narrText);
-                        showLRTypingIndicator();
+                        // plan: lr-reconnect-continue-takeover —— 後端標 terminal=true 的旁白
+                        // （state_not_found / legacy schema）代表「研究終止於此，重送 continue
+                        // 也不會好」。必須算終止事件，否則串流結束會再蓋一句「連線中斷…可從中斷
+                        // 處繼續」，與這句話直接矛盾，使用者只會繼續重按。
+                        if (data.terminal === true) {
+                            console.warn('[Live Research] SSE terminal narration — 研究已終止，不再視為斷線:', narrText);
+                            sawTerminalEvent = true;
+                            setProcessingState(false);
+                            // 終態：不再重開 typing indicator（不可 break——那只會跳出本則
+                            // message 的 line 迴圈，語意混淆且會漏掉同 message 的其他 line）。
+                            // 同時關掉 awaiting 旗標，否則下方 2026-05-16 防呆會把 reply UI
+                            // 叫回來，與「請重新開始研究」的指示互相矛盾。
+                            _lrAwaitingCheckpointReply = false;
+                        } else {
+                            showLRTypingIndicator();
+                        }
                         // Bug fix 2026-05-16 (defensive): if we are still awaiting a
                         // checkpoint reply but the reply UI got hidden by
                         // continueLiveResearch and the backend forgot to re-emit a
@@ -2889,6 +2952,8 @@ export async function handleLiveResearchSSE(response, triggeringLRSid = null) {
         }
     } finally {
         try { reader.cancel(); } catch (_) {}
+        // 成對遞減（與上方 ++ 一組）：串流結束後才重新允許醒來重連。
+        _lrStreamInflightCount = Math.max(0, _lrStreamInflightCount - 1);
         if (loadingState) loadingState.classList.remove('active');
         hideLRTypingIndicator();
         setProcessingState(false);
@@ -3050,28 +3115,61 @@ export async function continueLiveResearch(userMessage, autoContinue, navAction 
         // （Option C lrInProgress guard 保護 _user mutation）。
         // SSE 兼容性：authenticatedFetch 不 await body（line 196/236 直接 return
         // Response object），response.body.getReader() stream 可正常讀。
-        console.log('[Live Research] Continue via authenticatedFetch');
-        const response = await window.authManager.authenticatedFetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: body
-        });
+        // plan: lr-reconnect-continue-takeover —— 429 有界自動退避重試。
+        // 病灶：斷線後舊背景 task 仍佔住 per-user 並行 slot（後端 spec §7.3.1 路 A），
+        // 使用者一按「繼續」就 429。舊碼把 429 併進 `!response.ok` → throw → catch 顯示
+        // 「連線出了狀況…請再送一次繼續」，叫使用者立刻重送，但伺服器要的是「等」——
+        // 於是連按三次全失敗（本次回報的症狀）。後端已加同 session 重連接管把這種 429
+        // 消掉；此處是第二道：真的撞上忙碌時前端自己退避重試，並誠實說明在等什麼。
+        let response = null;
+        for (let attempt = 0; ; attempt++) {
+            console.log('[Live Research] Continue via authenticatedFetch (attempt', attempt, ')');
+            const resp = await window.authManager.authenticatedFetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: body
+            });
 
-        if (response.status === 401) {
-            // CEO P0 UX fix (2026-05-19): authenticatedFetch refresh-then-retry 失敗
-            // → _handleAuthFailure 已 trigger（login modal shown + state reset）。
-            // 顯示 friendly narration 而非 raw "HTTP 401" — 對齊 spec §5.3。
-            const loadingState = document.getElementById('loadingState');
-            if (loadingState) loadingState.classList.remove('active');
-            hideLRTypingIndicator();
-            setProcessingState(false);
-            addLRChatMessage('error', '登入已過期，請重新登入後再繼續研究。');
-            return;
-        }
+            const decision = classifyContinueHttpOutcome({ status: resp.status, attempt });
 
-        if (!response.ok) {
-            const err = await response.json().catch(() => ({}));
-            throw new Error(err.message || `HTTP ${response.status}`);
+            if (decision.action === 'stream') { response = resp; break; }
+
+            if (decision.action === 'auth_expired') {
+                // CEO P0 UX fix (2026-05-19): authenticatedFetch refresh-then-retry 失敗
+                // → _handleAuthFailure 已 trigger（login modal shown + state reset）。
+                // 顯示 friendly narration 而非 raw "HTTP 401" — 對齊 spec §5.3。
+                const loadingState = document.getElementById('loadingState');
+                if (loadingState) loadingState.classList.remove('active');
+                hideLRTypingIndicator();
+                setProcessingState(false);
+                addLRChatMessage('error', '登入已過期，請重新登入後再繼續研究。');
+                return;
+            }
+
+            if (decision.action === 'auto_retry') {
+                console.warn('[Live Research] Continue busy (429) — 自動退避重試，delayMs=', decision.delayMs, 'attempt=', attempt);
+                if (attempt === 0) addLRChatMessage('system', lrContinueCopy.busyRetrying);
+                await new Promise(r => setTimeout(r, decision.delayMs));
+                continue;
+            }
+
+            if (decision.action === 'busy_giveup') {
+                // 重試用盡：誠實收尾，復原回覆入口，**不**謊稱是連線問題、也不叫使用者盲目狂按。
+                console.warn('[Live Research] Continue still busy (429) after auto retries — 交還使用者');
+                const loadingState = document.getElementById('loadingState');
+                if (loadingState) loadingState.classList.remove('active');
+                hideLRTypingIndicator();
+                setProcessingState(false);
+                addLRChatMessage('system', lrContinueCopy.busyGaveUp);
+                const busyReplyEl = document.getElementById('lrCheckpointReply');
+                if (busyReplyEl) busyReplyEl.style.display = '';
+                _lrAwaitingCheckpointReply = true;
+                return;
+            }
+
+            // decision.action === 'error'
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.message || `HTTP ${resp.status}`);
         }
 
         await handleLiveResearchSSE(response, getLRSessionId());  // D-7: capture triggering stream's LR session id (continue; non-null — sent in body)

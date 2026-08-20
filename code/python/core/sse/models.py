@@ -223,6 +223,11 @@ class LiveResearchSessionCreated(SseEnvelope):
 class LiveResearchNarration(SseEnvelope):
     message_type: Literal["live_research_narration"] = "live_research_narration"
     text: Optional[str] = None
+    # terminal（plan: lr-reconnect-continue-takeover, 2026-08-20）：這則旁白代表研究已
+    # 終止於此（如 state_not_found / legacy schema），重送 continue 不會好。前端據此收尾，
+    # 不再把「後端明確報錯」誤標成「連線中斷、可從中斷處繼續」。省略 = 一般進度旁白。
+    # 建模而非靠 extra="allow" 吞（B3/B4 紀律：wire truth 必須進 model）。
+    terminal: Optional[bool] = None
 
 
 class LiveResearchStageChange(SseEnvelope):

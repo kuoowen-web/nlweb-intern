@@ -29,6 +29,141 @@ from reasoning.live_research.stage_state import LiveResearchStageState
 logger = get_configured_logger("live_research_handler")
 
 
+# ── 斷線重連接管（plan: lr-reconnect-continue-takeover, 2026-08-20）─────────────
+# 病灶：client 斷線 → detach → 背景 task 續跑到下個 checkpoint；期間 route 層並行 slot
+# **仍佔住**（spec §7.3.1 路 A：slot 綁 task 終態，防同 session 並行雙寫）。使用者網路
+# 恢復後按「繼續研究」→ POST /continue 撞 `lr_user:{uid}` slot（DR_USER_LIMIT=1）→ 429
+# → 前端顯示「連線出了狀況…請再送一次繼續」→ 使用者連按三次全失敗，斷線保護形同未執行。
+#
+# 治本：**同一 lr_session + 同一 user 又送來新的 continue** 時，這個請求就是「使用者用一條
+# 新連線回來接手同一場研究」——接管：cancel 舊 task → 等它真的結束（舊 route 的 done-callback
+# 才會釋放 slot）→ 才放行新請求。並行雙寫不變量**加強**而非放寬：舊 task 已終結才啟動新
+# task，比「擋掉新請求」更早收斂。
+#
+# 刻意**不**把「已偵測到 client 離線」列為條件——理由見 takeover_detached_lr_task 內
+# `_looked_online` 段（斷線偵測本身不可靠，要求它就等於在最常見情境下不修）。
+#
+# 邊界（刻意不接管，維持原 429）：
+#   - user_id 不符 = 不是同一個人（防猜 UUID 殺別人的研究）。
+#   - cancel 後逾時仍沒結束 = 不確定舊 task 死透，寧可擋（回 'timeout'，route 照常走 429）。
+#
+# 安全性：cancel 舊 task 不等於丟進度——orchestrator 每個 durable boundary 都
+# `_persist_checkpoint_boundary` 落 DB，resume 用 `next_i = last_completed_section_index + 1`
+# 冪等續跑。且舊 task 本來就在「離線防呆上限」下跑到下個 checkpoint 就會停，接管只是把
+# 「離線續燒」提早收掉，與防燒錢目標同向。
+_ACTIVE_LR_TASKS: dict = {}   # lr_session_id -> (asyncio.Task, LiveResearchHandler)
+
+# 接管時等舊 task 真正結束的上限秒數。逾時不接管（不可假設它死了就放行——那就是雙寫）。
+LR_TAKEOVER_TIMEOUT_SECONDS = 10.0
+
+
+def _register_lr_task(lr_session_id: Optional[str], task: "asyncio.Task", handler) -> None:
+    """登記背景 LR task，供跨 request 的重連接管查詢。lr_session_id 為空則不登記。"""
+    if not lr_session_id:
+        return
+    _ACTIVE_LR_TASKS[lr_session_id] = (task, handler)
+
+
+def _unregister_lr_task(lr_session_id: Optional[str], task: "asyncio.Task") -> None:
+    """撤銷登記。只在登記的 task 就是自己時才刪——接管後 registry 已換成新 task，
+    舊 task 的 done-callback 不可把新的一併刪掉。"""
+    if not lr_session_id:
+        return
+    entry = _ACTIVE_LR_TASKS.get(lr_session_id)
+    if entry is not None and entry[0] is task:
+        _ACTIVE_LR_TASKS.pop(lr_session_id, None)
+
+
+async def takeover_detached_lr_task(
+    lr_session_id: str,
+    user_id: str = "",
+    timeout: float = LR_TAKEOVER_TIMEOUT_SECONDS,
+) -> str:
+    """重連續跑前，接管同一 lr_session 的離線背景 task。
+
+    Returns（皆有 log，不 silent）:
+      - "none"        : 沒有在跑的舊 task（正常路徑，直接放行）
+      - "taken_over"  : 舊 task 已 cancel 並確認結束（放行）
+      - "taken_over_stale": 同上，且舊 task 當時仍被標成在線（未偵測到的斷線，見下方說明）
+      - "owner_mismatch": user_id 不符（不接管，維持 429）
+      - "timeout"     : cancel 後逾時未結束（不接管，維持 429）
+    """
+    entry = _ACTIVE_LR_TASKS.get(lr_session_id)
+    if entry is None:
+        return "none"
+    task, old_handler = entry
+    if task.done():
+        _unregister_lr_task(lr_session_id, task)
+        return "none"
+
+    old_user = getattr(old_handler, "user_id", "") or ""
+    if (user_id or "") != old_user:
+        logger.warning(
+            f"[LIVE RESEARCH] Takeover rejected: user mismatch "
+            f"(lr_session={lr_session_id}, requester={user_id!r}, owner={old_user!r})"
+        )
+        return "owner_mismatch"
+
+    # 「舊 client 是否還在線」不可當作接管的硬條件——這正是本 bug 最常見的形態：
+    # 使用者網路斷掉時 server **不會馬上知道**。斷線偵測只靠「往 socket 寫東西失敗」
+    # （aiohttp_streaming_wrapper.start_heartbeat → write_keepalive → _mark_disconnected），
+    # 而半開 TCP 上寫 13 bytes 的 keepalive 會先進 kernel 緩衝、由 TCP 重傳撐十幾分鐘才失敗
+    # （前面若有 nginx，server 端 socket 更是完全看不到 client 側斷線）。也就是說：使用者
+    # 網路恢復、按下「繼續」的當下，舊 task 多半**仍被標成在線**。若要求「已偵測到離線」
+    # 才接管，等於在最常見的情境下不接管 → 照樣 429 → bug 沒修好。
+    #
+    # 改用「同 user + 同 lr_session + 又來了一個新的 continue 請求」當判準：LR 的回覆入口
+    # 只在串流停下（checkpoint / 中斷 / resume）時才出現，同一個分頁不會在自己串流還在跑時
+    # 送 continue。所以這個新請求代表「使用者正在用一條新連線驅動同一場研究」——舊那條
+    # 就是該讓位的那條。
+    #
+    # 已知取捨（誠實記錄）：使用者在第二個分頁開同一場研究並按繼續時，第一個分頁正在跑的
+    # 串流會被接管掉（後按的贏），研究本身不會掉——從最後一個 boundary 續跑。相對於「第二
+    # 個分頁永遠 429、使用者卡死」，這個語意較合理，且正是斷線情境下唯一能自動復原的作法。
+    alive = getattr(old_handler, "connection_alive_event", None)
+    _looked_online = alive is not None and alive.is_set()
+    if _looked_online:
+        logger.warning(
+            f"[LIVE RESEARCH] Reconnect takeover: 舊 task 仍被標成在線，但同 user 同 session "
+            f"送來新的 continue → 判定舊連線已失效（半開 TCP / 尚未偵測到的斷線），一併接管 "
+            f"(lr_session={lr_session_id})"
+        )
+        # 先把舊 handler 標成離線（與 _lr_mark_client_disconnected 同語意的成對設置），
+        # 讓舊 task 在被 cancel 前的殘餘 emit 直接 drop、不往死連線寫。
+        alive.clear()
+        _old_detach = getattr(old_handler, "_lr_detach_event", None)
+        if _old_detach is not None:
+            _old_detach.set()
+
+    logger.warning(
+        f"[LIVE RESEARCH] Reconnect takeover: cancelling detached background task "
+        f"(lr_session={lr_session_id}, task={task.get_name()}) — 進度已 per-boundary 落盤，"
+        f"新的 continue 將從最後一個 boundary 續跑"
+    )
+    task.cancel()
+    # 用 asyncio.wait（不是 gather / await task）：wait **不**取走 task 的 exception，
+    # 讓 `_on_lr_research_complete` 仍是唯一的終態記錄點（不重複記、不吞例外）。
+    await asyncio.wait({task}, timeout=timeout)
+    if not task.done():
+        logger.error(
+            f"[LIVE RESEARCH] Reconnect takeover TIMEOUT: 舊 task {timeout}s 內未結束 "
+            f"(lr_session={lr_session_id}) — 不放行新 continue（避免同 session 並行雙寫）"
+        )
+        return "timeout"
+
+    # done-callback 是 loop.call_soon 排程的：舊 route 的 slot-release callback 要再讓出
+    # 一次 event loop 才會跑到。多讓幾次（便宜、無副作用），確保 slot 在 try_acquire 前釋放。
+    for _ in range(3):
+        await asyncio.sleep(0)
+    _unregister_lr_task(lr_session_id, task)
+    _result = "taken_over_stale" if _looked_online else "taken_over"
+    logger.info(
+        f"[LIVE RESEARCH] Reconnect takeover done — 舊 task 已結束，放行 continue "
+        f"(lr_session={lr_session_id}, result={_result})"
+    )
+    return _result
+
+
 class LiveResearchHandler(DeepResearchHandler):
     """
     Handler for Live Research mode.
@@ -244,6 +379,9 @@ class LiveResearchHandler(DeepResearchHandler):
             )
             _task_created = True  # task 已建立 → 終態歸 done-callback（見 except CancelledError）
             self._lr_research_task.add_done_callback(self._on_lr_research_complete)
+            # 重連接管登記（plan: lr-reconnect-continue-takeover）：斷線後這個 task 會 detach
+            # 續跑並持續佔住 slot，使用者回來按「繼續」時要能被 takeover_detached_lr_task 找到。
+            _register_lr_task(self.lr_session_id, self._lr_research_task, self)
             # Detach-aware await（plan: lr-sse-connection-release-fix, 2026-06-22）：
             # 同時等「task 完成」與「client 離線」。離線先到 → 提早 return，
             # **不** cancel task（disconnect-no-cancel 保留），task 在後台跑到下個
@@ -372,6 +510,10 @@ class LiveResearchHandler(DeepResearchHandler):
                         await sender.send_message({
                             "message_type": "live_research_narration",
                             "text": narration_text,
+                            # terminal=True：這是「研究停在這裡、重送 continue 也不會好」的終止性
+                            # 旁白。前端據此渲染終止狀態，**不可**再退化成「連線中斷…可從中斷處
+                            # 繼續」（那會讓使用者無限重按繼續，正是本次 bug 的症狀之一）。
+                            "terminal": True,
                         })
                     except Exception as e:
                         logger.warning(
@@ -383,6 +525,7 @@ class LiveResearchHandler(DeepResearchHandler):
                         await self.http_handler.write_stream({
                             "message_type": "live_research_narration",
                             "text": narration_text,
+                            "terminal": True,   # 見上方 sender 路徑說明
                         })
                     except Exception as e:
                         logger.warning(
@@ -420,6 +563,7 @@ class LiveResearchHandler(DeepResearchHandler):
                         await sender.send_message({
                             "message_type": "live_research_narration",
                             "text": legacy_msg,
+                            "terminal": True,   # 見 state_not_found 分支說明
                         })
                     except Exception as e:
                         logger.warning(
@@ -432,6 +576,7 @@ class LiveResearchHandler(DeepResearchHandler):
                         await self.http_handler.write_stream({
                             "message_type": "live_research_narration",
                             "text": legacy_msg,
+                            "terminal": True,   # 見 state_not_found 分支說明
                         })
                     except Exception as e:
                         logger.warning(
@@ -468,6 +613,8 @@ class LiveResearchHandler(DeepResearchHandler):
             )
             _task_created = True  # task 已建立 → 終態歸 done-callback（見 except CancelledError）
             self._lr_research_task.add_done_callback(self._on_lr_research_complete)
+            # 重連接管登記（plan: lr-reconnect-continue-takeover）：見 runQuery 同段註解。
+            _register_lr_task(self.lr_session_id, self._lr_research_task, self)
             # Detach-aware await（plan: lr-sse-connection-release-fix, 2026-06-22）。見 runQuery 同段註解。
             detach_waiter = asyncio.ensure_future(self._lr_detach_event.wait())
             _detached = False
@@ -590,6 +737,10 @@ class LiveResearchHandler(DeepResearchHandler):
           且 in-memory state 落盤責任已在 orchestrator 內部每 boundary 完成）。
         """
         from reasoning.orchestrator_base import ResearchCancelledError
+        # 重連接管撤銷登記（plan: lr-reconnect-continue-takeover）：done-callback 是所有終態
+        # （完成 / 失敗 / cancel）的必經點，放這裡才不會漏。`_unregister_lr_task` 只刪「登記的
+        # 就是自己」的 entry，接管後新 task 的登記不會被舊 task 的 callback 誤刪。
+        _unregister_lr_task(getattr(self, "lr_session_id", None), task)
         try:
             exc = task.exception()
             if exc is None:

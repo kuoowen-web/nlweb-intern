@@ -120,6 +120,18 @@
         針對以下報導，評估與使用者提問的相關程度，給予 0-100 分。
         一律使用繁體中文回應，除非使用者明確要求用英文。
 
+        【主題同一性 — 先判定，再給分】
+        預設這篇報導**不是**在談使用者問的主題，除非報導內容明確顯示它就是在談那件事。
+        測試：先用一句話說出「這篇報導在談什麼」——若那句話不需要提到使用者問的主題
+        就講得完整，它就不是在談使用者問的主題。
+        **先把判定寫進 subject_match 欄位，再依判定給 score，不得跨區間**：
+        - different：報導談的是**另一個主題**——另一種資源、另一個產業、另一個議題——
+          只是名稱共用部分字詞，或同屬更上位的領域（同屬永續、同屬氣候調適、
+          出自同一個部會的政策，都仍然是另一個主題）→ score 0-30
+        - passing_mention：使用者問的主題只被順帶提到一兩句，不是這篇在談的事 → score 31-51
+        - same：報導本身就是在談那個主題，或談那個主題底下的具體事件／政策／案例 → score 52-100
+        判斷依據是整篇報導在講什麼，不是查詢的字詞有沒有出現。
+
         【description 撰寫規則】
         只寫事實內容，不寫後設評論：
         - 擷取 2-3 項具體事實（機構名、數據、技術、專案）
@@ -139,6 +151,7 @@
       </promptString>
       <returnStruc>
         {
+          "subject_match": "same / passing_mention / different —— 依【主題同一性】判定，先寫這欄再給 score",
           "score": "0-100 整數，相關程度評分",
           "description": "2-3 句事實摘要，含具體細節，不可有後設評論。須使用繁體中文。"
         }
@@ -159,17 +172,31 @@
         - 距今天數：{item.age_days} 天
         - 來源：{item.source}
 
+        【主題同一性 — 先判定，且約束下方的語意相關性與 final_score】
+        預設這篇報導**不是**在談使用者問的主題，除非報導內容明確顯示它就是在談那件事。
+        測試：先用一句話說出「這篇報導在談什麼」——若那句話不需要提到使用者問的主題
+        就講得完整，它就不是在談使用者問的主題。
+        **先把那句話寫進 article_subject 欄位、再把判定寫進 subject_match 欄位，兩者都在給分之前**。
+        判定決定「語意相關性」的區間，不得跨區間：
+        - different：報導談的是**另一個主題**——另一種資源、另一個產業、另一個議題——
+          只是名稱共用部分字詞，或同屬更上位的領域（同屬永續、同屬氣候調適、
+          出自同一個部會的政策，都仍然是另一個主題）→ 語意相關性 0-30
+        - passing_mention：使用者問的主題只被順帶提到一兩句，不是這篇在談的事 → 語意相關性 31-51
+        - same：報導本身就是在談那個主題，或談那個主題底下的具體事件／政策／案例 → 語意相關性 52-100
+        判斷依據是整篇報導在講什麼，不是查詢的字詞有沒有出現。
+        **final_score 不得高於語意相關性所落區間的上限**——時效性與來源權威性再高，
+        都不能把一篇談別的主題的報導推上去（0-30 的區間即代表 final_score 上限 30）。
+
         【四維度評分】
 
-        1. 語意相關性（0-100）：報導內容與使用者資訊需求的吻合程度
-           - 主題對齊與概念重疊
+        1. 語意相關性（0-100）：**依上方【主題同一性】測試所落的區間給分，不得跨區間**
+           - 區間內再依報導對該主題的涵蓋深度微調
            - 跨語言語意匹配（中文查詢可語意匹配中文內容）
-           - 對查詢主題的報導深度
-           - 若查詢含「最新」「最近」，超過 180 天的報導即使主題相關也須大幅扣分
+           - 若查詢含「最新」「最近」，超過 180 天的報導即使主題相同也須大幅扣分
 
         2. 關鍵字匹配（0-100）：查詢詞在報導中出現的情況
            - 完全匹配（較高權重）
-           - 部分匹配與同義詞（較低權重）
+           - 只共用部分字詞、但實際指的是另一件事物 → 不算匹配，給 0-30
            - 詞頻及在標題／內文中的顯著程度
 
         3. 時效性（0-100）：新聞內容的時效價值
@@ -217,6 +244,8 @@
       </promptString>
       <returnStruc>
         {
+          "article_subject": "用一句話說出這篇報導在談什麼，不得提到使用者的提問。這欄最先寫。",
+          "subject_match": "same / passing_mention / different —— 依【主題同一性】判定，緊接 article_subject 之後、所有分數之前",
           "semantic_score": "0-100 整數",
           "keyword_score": "0-100 整數",
           "freshness_score": "0-100 整數",
@@ -579,6 +608,22 @@
           Assign a score between 0 and 100 to the following item from {item.source_site}
           based on how relevant it is to the user's question across all sites.
 
+          SUBJECT-IDENTITY CRITERION — decide this BEFORE scoring. Assume by default that this
+          article is NOT about the subject the user asked about, unless its content clearly shows
+          that it is. Test: first state in ONE sentence what this article is about; if that
+          sentence is complete WITHOUT mentioning the user's subject, the article is not about it.
+          **Write the verdict into the subject_match field FIRST, then derive the score from it;
+          do not cross bands**:
+          - different: the article is about a DIFFERENT subject — a different resource, a different
+            industry, a different matter — that merely shares part of its name, or merely sits
+            under the same broader field (same sustainability theme, same climate agenda, or the
+            same government ministry still counts as a DIFFERENT subject) -> score 0-30
+          - passing_mention: the user's subject is only mentioned in passing and is not what the
+            article is about -> score 31-51
+          - same: the article is itself about that subject, or about a specific event/policy/case
+            OF that subject -> score 52-100
+          Judge by what the whole article discusses, not by whether the query's words appear in it.
+
           Consider that this result is being compared against results from multiple different sites,
           so factor in the credibility and relevance of the source site as well.
 
@@ -597,6 +642,7 @@
         </promptString>
         <returnStruc>
           {
+            "subject_match": "same / passing_mention / different — per the SUBJECT-IDENTITY criterion; write this field BEFORE the score",
             "score": "integer between 0 and 100",
             "description": "2-3 factual sentences with specific details, NO meta-commentary about the article itself"
           }
@@ -616,17 +662,39 @@
           - Age: {item.age_days} days old
           - Source: {item.source}
 
+          **SUBJECT-IDENTITY CRITERION — do this FIRST; it bounds both Semantic Relevance and
+          the Final Score.** Assume by default that this article is NOT about the subject the user
+          asked about, unless its content clearly shows that it is. Test: first state in ONE
+          sentence what this article is about; if that sentence is complete WITHOUT mentioning the
+          user's subject, the article is not about it.
+          **Write that one sentence into the article_subject field, then the verdict into
+          subject_match, BEFORE any score**; the verdict fixes the Semantic Relevance band, and
+          bands may not be crossed:
+          - different: the article is about a DIFFERENT subject — a different resource, a different
+            industry, a different matter — that merely shares part of its name, or merely sits
+            under the same broader field (same sustainability theme, same climate agenda, or the
+            same government ministry still counts as a DIFFERENT subject) -> Semantic Relevance 0-30
+          - passing_mention: the user's subject is only mentioned in passing and is not what the
+            article is about -> Semantic Relevance 31-51
+          - same: the article is itself about that subject, or about a specific event/policy/case
+            OF that subject -> Semantic Relevance 52-100
+          Judge by what the whole article discusses, not by whether the query's words appear in it.
+          **The Final Score must not exceed the ceiling of the Semantic Relevance band** — no
+          amount of freshness or source authority may lift an article that is about something else
+          (a 0-30 band means Final Score is 30 or below).
+
           Evaluate the article on these dimensions:
 
-          1. **Semantic Relevance (0-100)**: How well does the article's content match the user's information need? Consider:
-             - Topic alignment and conceptual overlap
+          1. **Semantic Relevance (0-100)**: score INSIDE the band fixed by the SUBJECT-IDENTITY
+             test above — do not cross bands. Within that band, adjust for:
+             - Depth of coverage on the query subject
              - Language-aware matching (Chinese queries can match Chinese content semantically)
-             - Depth of coverage on the query topic
              - CRITICAL: If query asks for "最新" (latest) or "最近" (recent), heavily penalize old articles (>180 days) even if topically relevant
 
           2. **Keyword Matching (0-100)**: Presence and frequency of query terms. Consider:
              - Exact keyword matches (higher weight)
-             - Partial matches and synonyms (lower weight)
+             - Words that merely share characters with the query but refer to a DIFFERENT thing
+               are NOT matches -> 0-30
              - Term frequency and prominence in title/content
 
           3. **Freshness (0-100)**: Recency value for news content. Use this scoring guide:
@@ -670,6 +738,8 @@
         </promptString>
         <returnStruc>
           {
+            "article_subject": "ONE sentence stating what this article is about, written WITHOUT reference to the user's query. Write this field FIRST.",
+            "subject_match": "same / passing_mention / different — per the SUBJECT-IDENTITY criterion; write this immediately after article_subject and before any score",
             "semantic_score": "integer 0-100",
             "keyword_score": "integer 0-100",
             "freshness_score": "integer 0-100",

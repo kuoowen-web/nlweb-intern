@@ -57,6 +57,52 @@ def dedup_by_title_and_source(results: list) -> list:
     return deduplicated
 
 
+# UX 回報 row7（問「再生能源」卻回「再生水／海水淡化」）：ranking 類 prompt 新增
+# subject_match 判定（same / passing_mention / different），此處把判定轉成分數硬上限。
+#
+# 為什麼上限要在 code、不能只寫在 prompt 裡：實測 RankingPromptForGenerate 已經正確
+# 判出 passing_mention、semantic_score 也給在 31-51 區間內（40），卻仍照四維度加權吐出
+# final_score=56，越過 do() 的 >51 閘門——**加權算術會把離題報導推回榜上**，而算術約束
+# 不該指望 LLM 自律（prompt 內寫「final_score 不得高於區間上限」實測被忽略）。
+# 分工：prompt 負責「這篇在談的是不是同一件事」的判斷，code 負責把判斷變成不可繞過的上限。
+SUBJECT_MATCH_CEILING = {"different": 30, "passing_mention": 51}
+
+
+def clamp_score_by_subject_match(score, subject_match, item_name: str = ""):
+    """依 prompt 的 subject_match 判定夾住分數上限；不提升分數，只壓低。
+
+    fail-open（判定缺失／未知值／分數非數值 → 原樣返回）——判定沒做出來時不該反過來
+    擋掉結果，但一律 log，不靜默（缺 key = prompt/schema 漂移，必須看得見）。
+    """
+    if subject_match is None:
+        logger.warning(
+            "Ranking response has no 'subject_match' for '%s' — subject-identity ceiling "
+            "NOT applied (prompt/returnStruc drift?)", item_name or "unknown",
+        )
+        return score
+    ceiling = SUBJECT_MATCH_CEILING.get(str(subject_match).strip().lower())
+    if ceiling is None:
+        if str(subject_match).strip().lower() != "same":
+            logger.warning(
+                "Unknown subject_match %r for '%s' — ceiling NOT applied",
+                subject_match, item_name or "unknown",
+            )
+        return score
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        logger.warning(
+            "Non-numeric score %r for '%s' — subject-identity ceiling NOT applied",
+            score, item_name or "unknown",
+        )
+        return score
+    if score > ceiling:
+        logger.info(
+            "[SUBJECT-MATCH] '%s': %s → %s (subject_match=%s，離題報導不得越過 >51 閘門)",
+            item_name or "unknown", score, ceiling, subject_match,
+        )
+        return ceiling
+    return score
+
+
 def _safe_score(result: dict):
     """安全提取 ranking score 為數值，供所有比較/排序/輸出點使用（defense-in-depth）。
 
@@ -168,6 +214,11 @@ class Ranking:
                 logger.error(f"LLM returned empty response for ranking: {name}")
                 sentry_sdk.capture_message(f"LLM returned empty in ranking.rankItem for: {name}")
                 ranking = {"score": 0, "description": "LLM ranking failed", "final_score": 0}
+            else:
+                # row7：主題同一性上限。放在 required_item_type 檢查之前，兩者都可壓低分數。
+                ranking["score"] = clamp_score_by_subject_match(
+                    ranking.get("score"), ranking.get("subject_match"), name
+                )
 
             # Handle both string and dictionary inputs for json_str
             schema_object = json_str if isinstance(json_str, dict) else json.loads(json_str)
